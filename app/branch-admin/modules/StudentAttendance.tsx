@@ -2,50 +2,21 @@
 
 /**
  * app/branch-admin/modules/StudentAttendance.tsx
- * ---------------------------------------------------------
- * ELEEVEON STUDENT ATTENDANCE V3
- * ---------------------------------------------------------
- * Golden Standard Module.
- * Branch-scoped, offline-first, mobile-first, syncUtils powered.
+ * --------------------------------------------------------------------------
+ * ELEEVEON STUDENT ATTENDANCE — PHASE 10 ROUTE INTEGRATION
  *
- * Workspace-session aligned:
- * - reads the selected workspace session written by /select-role first
- * - falls back to ActiveMembershipProvider, then ActiveBranchContext/settings
- * - prevents this attendance register from accidentally using stale school/branch
- *   context left behind by another role or portal
- * - all attendance reads and writes now use the resolved workspace
- *   schoolId and branchId
+ * Route responsibilities:
+ * - active account, school, branch and membership resolution;
+ * - permissions, navigation and loading states;
+ * - Dexie reads and local-first mutations;
+ * - tenant filtering and route-specific state.
  *
- * Golden UI behavior:
- * - no duplicate module hero/header block
- * - compact search + inline save + slider filter + more menu
- * - filters moved into a bottom sheet
- * - cards/list view uses compact Students.tsx-style rows instead of large cards
- * - table and analytics live under the More menu
- * - attendance bulk actions live under the More menu to save vertical space
- * - summary is shown only inside analytics, not as a permanent main-screen strip
- * - styling uses ba-* theme variables so dark mode/system theme keeps working
- *
- * Important attendance rule:
- * - student list is resolved from ACTIVE StudentEnrollment records first.
- * - if a branch has not created enrollment rows yet, the page falls back to
- *   active students whose currentClassId matches the selected class.
- * - this keeps the register usable while still respecting the enrollment model.
- *
- * DB focus:
- * - attendance
- * - studentEnrollments
- * - students
- * - classes
- * - academicStructures
- * - academicPeriods
- *
- * Sync behavior:
- * - createLocal(...) creates new attendance rows
- * - updateLocal(...) updates existing attendance rows
- * - softDeleteLocal(...) clears/archives a student's selected-date attendance
- * - reads/writes stay scoped by accountId + schoolId + branchId
- * - no manual synced/version/updatedAt fields are written directly here
+ * Visual standard:
+ * - compact search toolbar;
+ * - no permanent title, hero, mode row or summary cards;
+ * - setup lives in the slider sheet;
+ * - views and bulk actions live in the More sheet;
+ * - compact row cards, table and analytics modes.
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -63,6 +34,7 @@ import {
   type Attendance,
   type Class,
   type Student,
+  type StudentAttendanceSummary,
   type StudentEnrollment,
 } from "../../lib/db/db";
 
@@ -74,11 +46,15 @@ import {
 
 import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
-type ViewMode = "cards" | "table" | "summary";
-type ToastTone = "success" | "error" | "info";
+import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
+import { PermissionGate } from "../../components/shared/PermissionGate";
+
+type EntryMode = "daily" | "termTotals";
+type ViewMode = "cards" | "table" | "analytics";
 type AttendanceStatus = "present" | "absent" | "late";
 type AttendanceFilter = "all" | AttendanceStatus | "unmarked";
-type AttendanceMap = Record<string, AttendanceStatus>;
+type ToastTone = "success" | "error" | "info";
+type BulkScope = "all" | "shown";
 
 type TenantRow = {
   accountId?: string | null;
@@ -86,42 +62,59 @@ type TenantRow = {
   branchId?: string | null;
   isDeleted?: boolean;
   active?: boolean;
-  status?: string;
+  status?: string | null;
+};
+
+type WorkspaceSession = {
+  membership?: Record<string, unknown> | null;
+  schoolId?: string | null;
+  branchId?: string | null;
+};
+
+type DailyDraftMap = Record<string, AttendanceStatus | undefined>;
+
+type TermDraft = {
+  daysOpened: number;
+  daysPresent: number;
+  daysAbsent: number;
+  timesLate: number;
+  attendancePercent: number;
+};
+
+type TermDraftMap = Record<string, TermDraft>;
+
+type StudentView = {
+  student: Student;
+  id: string;
+  name: string;
+  admissionNumber: string;
+  photo?: string;
+  existingAttendance?: Attendance;
+  existingSummary?: StudentAttendanceSummary;
 };
 
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const idOf = (value: unknown) =>
+  value === undefined || value === null ? "" : String(value).trim();
+const sameId = (a: unknown, b: unknown) => idOf(a) === idOf(b);
+const tableSafe = (name: string) => (db as any)[name];
 
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  teacherId?: string | null;
-  studentId?: string | null;
-  parentId?: string | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
-};
-
-function safeStorageRead(key: string) {
+function storageValue(key: string) {
   if (typeof window === "undefined") return null;
-
   try {
     return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
+      window.localStorage.getItem(key) ||
+      window.sessionStorage.getItem(key)
     );
   } catch {
     return null;
   }
 }
 
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
+function storedJson<T>(key: string): T | null {
+  const raw = storageValue(key);
   if (!raw) return null;
-
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -129,107 +122,55 @@ function safeJsonRead<T>(key: string): T | null {
   }
 }
 
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership() {
-  return safeJsonRead<Record<string, any>>("activeMembership");
-}
-
-function firstLocalId(...values: unknown[]): string {
+function firstId(...values: unknown[]) {
   for (const value of values) {
-    const parsed = idOf(value);
-    if (parsed && parsed !== "0") return parsed;
+    const id = idOf(value);
+    if (id && id !== "0") return id;
   }
-
   return "";
 }
 
-function selectedWorkspaceSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeSchoolId?: unknown;
-  activeSchool?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeStorageRead("activeSchoolId"),
+function isActive(row: TenantRow) {
+  const status = String(row.status || "").toLowerCase();
+  return (
+    !row.isDeleted &&
+    row.active !== false &&
+    !["inactive", "deleted", "archived", "suspended"].includes(status)
   );
 }
 
-function selectedWorkspaceBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeBranchId?: unknown;
-  activeBranch?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeStorageRead("activeBranchId"),
-  );
+function clamp(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
 }
 
-type StudentRow = {
-  student: Student;
-  enrollment?: StudentEnrollment;
-  existingAttendance?: Attendance;
-  source: "enrollment" | "currentClass";
-};
+function percent(present: number, opened: number) {
+  return opened
+    ? Math.max(0, Math.min(100, Math.round((present / opened) * 100)))
+    : 0;
+}
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+function safePhoto(value: unknown) {
+  const url = String(value || "");
+  return !url || url.startsWith("blob:") || url.startsWith("data:image/")
+    ? undefined
+    : url;
+}
 
-const idOf = (value: any): string => {
-  if (value === undefined || value === null) return "";
-  return String(value).trim();
-};
+function normalizeTermDraft(value?: Partial<TermDraft>): TermDraft {
+  const daysOpened = clamp(value?.daysOpened);
+  const daysPresent = Math.min(
+    daysOpened || Number.MAX_SAFE_INTEGER,
+    clamp(value?.daysPresent),
+  );
 
-const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
-const tableSafe = (name: string) => (db as any)[name];
-
-const isActiveRow = (row: any) => {
-  const status = String(row?.status || "").toLowerCase();
-  if (row?.isDeleted) return false;
-  if (row?.active === false) return false;
-  if (["inactive", "deleted", "archived", "suspended"].includes(status))
-    return false;
-  return true;
-};
-
-function statusTone(
-  status?: AttendanceStatus,
-): "green" | "red" | "orange" | "gray" {
-  if (status === "present") return "green";
-  if (status === "absent") return "red";
-  if (status === "late") return "orange";
-  return "gray";
+  return {
+    daysOpened,
+    daysPresent,
+    daysAbsent: Math.max(0, daysOpened - daysPresent),
+    timesLate: clamp(value?.timesLate),
+    attendancePercent: percent(daysPresent, daysOpened),
+  };
 }
 
 function statusLabel(status?: AttendanceStatus) {
@@ -237,31 +178,1399 @@ function statusLabel(status?: AttendanceStatus) {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
-function Chip({
-  children,
-  tone = "gray",
-}: {
-  children: React.ReactNode;
-  tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple";
-}) {
-  return <span className={`ba-chip ${tone}`}>{children}</span>;
+function statusTone(status?: AttendanceStatus) {
+  if (status === "present") return "green";
+  if (status === "absent") return "red";
+  if (status === "late") return "orange";
+  return "gray";
 }
 
-function Empty({
-  icon,
-  title,
-  text,
-}: {
-  icon: string;
-  title: string;
-  text: string;
-}) {
+export default function StudentAttendance() {
+  const router = useRouter();
+  const revision = useDataRevision();
+  const { loading, setLoading } = useBackgroundLoader();
+
+  const {
+    accountId,
+    authenticated,
+    loading: accountLoading,
+  } = useAccount();
+
+  const {
+    settings,
+    loading: settingsLoading,
+  } = useSettings();
+
+  const {
+    activeSchool,
+    activeSchoolId,
+    activeBranch,
+    activeBranchId,
+    loading: contextLoading,
+  } = useActiveBranch();
+
+  const { activeMembership } = useActiveMembership();
+
+  const openWorkspace = useMemo(
+    () => storedJson<WorkspaceSession>(OPEN_WORKSPACE_KEY),
+    [],
+  );
+
+  const storedMembership = useMemo(
+    () => storedJson<Record<string, unknown>>("activeMembership"),
+    [],
+  );
+
+  const membership = (
+    openWorkspace?.membership ||
+    activeMembership ||
+    storedMembership ||
+    {}
+  ) as Record<string, unknown>;
+
+  const schoolId = firstId(
+    openWorkspace?.schoolId,
+    membership.schoolId,
+    (membership.school as { id?: unknown } | undefined)?.id,
+    activeSchoolId,
+    (activeSchool as { id?: unknown } | null)?.id,
+    (settings as { schoolId?: unknown } | null)?.schoolId,
+    storageValue("activeSchoolId"),
+  );
+
+  const branchId = firstId(
+    openWorkspace?.branchId,
+    membership.branchId,
+    membership.schoolBranchId,
+    (membership.branch as { id?: unknown } | undefined)?.id,
+    activeBranchId,
+    (activeBranch as { id?: unknown } | null)?.id,
+    (settings as { branchId?: unknown } | null)?.branchId,
+    storageValue("activeBranchId"),
+  );
+
+  const primary =
+    settings?.primaryColor || "var(--primary-color, #2563eb)";
+
+  const permissionValues = useMemo(() => {
+    const raw = membership.permissions;
+    if (Array.isArray(raw)) return raw.map(String);
+    if (raw && typeof raw === "object") {
+      return Object.entries(raw)
+        .filter(([, value]) => Boolean(value))
+        .map(([key]) => key);
+    }
+    return [];
+  }, [membership.permissions]);
+
+  const role = String(membership.role || "").toLowerCase();
+  const roleCanManage = [
+    "owner",
+    "super_admin",
+    "admin",
+    "branch_admin",
+    "teacher",
+  ].includes(role);
+
+  const canView =
+    roleCanManage ||
+    permissionValues.some((permission) =>
+      [
+        "attendance.view",
+        "attendance.read",
+        "attendance.manage",
+        "student_attendance.view",
+      ].includes(permission),
+    );
+
+  const canEdit =
+    roleCanManage ||
+    permissionValues.some((permission) =>
+      [
+        "attendance.manage",
+        "attendance.write",
+        "student_attendance.manage",
+      ].includes(permission),
+    );
+
+  const [students, setStudents] = useState<Student[]>([]);
+  const [classes, setClasses] = useState<Class[]>([]);
+  const [structures, setStructures] = useState<AcademicStructure[]>([]);
+  const [periods, setPeriods] = useState<AcademicPeriod[]>([]);
+  const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
+  const [attendanceRows, setAttendanceRows] = useState<Attendance[]>([]);
+  const [summaryRows, setSummaryRows] =
+    useState<StudentAttendanceSummary[]>([]);
+
+  const [entryMode, setEntryMode] = useState<EntryMode>("daily");
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const [structureId, setStructureId] = useState(
+    String(settings?.currentAcademicStructureId || ""),
+  );
+  const [periodId, setPeriodId] = useState(
+    String(settings?.currentAcademicPeriodId || ""),
+  );
+  const [classId, setClassId] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] =
+    useState<AttendanceFilter>("all");
+
+  const [dailyDrafts, setDailyDrafts] = useState<DailyDraftMap>({});
+  const [termDrafts, setTermDrafts] = useState<TermDraftMap>({});
+  const [bulkDaysOpened, setBulkDaysOpened] = useState("");
+  const [bulkScope, setBulkScope] = useState<BulkScope>("all");
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<{
+    tone: ToastTone;
+    message: string;
+  } | null>(null);
+
+  const mediaByStudentId = useEntityMediaUrls({
+    accountId,
+    ownerTable: "students",
+    rows: students,
+    fields: [
+      { fieldKey: "photo", mediaIdKey: "photoMediaId" },
+      { fieldKey: "coverPhoto", mediaIdKey: "coverPhotoMediaId" },
+    ],
+  });
+
+  const sameTenant = (row: TenantRow) =>
+    (!row.accountId || row.accountId === accountId) &&
+    (!row.schoolId || sameId(row.schoolId, schoolId)) &&
+    (!row.branchId || sameId(row.branchId, branchId)) &&
+    !row.isDeleted;
+
+  const notify = (tone: ToastTone, message: string) => {
+    setToast({ tone, message });
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        setToast((current) =>
+          current?.message === message ? null : current,
+        );
+      }, 4200);
+    }
+  };
+
+  const clearData = () => {
+    setStudents([]);
+    setClasses([]);
+    setStructures([]);
+    setPeriods([]);
+    setEnrollments([]);
+    setAttendanceRows([]);
+    setSummaryRows([]);
+  };
+
+  const load = async () => {
+    if (
+      !authenticated ||
+      !accountId ||
+      !schoolId ||
+      !branchId ||
+      !canView
+    ) {
+      clearData();
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      const [
+        studentRows,
+        classRows,
+        structureRows,
+        periodRows,
+        enrollmentRows,
+        attendanceData,
+        summaryData,
+      ] = await Promise.all([
+        tableSafe("students")?.toArray?.() || [],
+        tableSafe("classes")?.toArray?.() || [],
+        tableSafe("academicStructures")?.toArray?.() || [],
+        tableSafe("academicPeriods")?.toArray?.() || [],
+        tableSafe("studentEnrollments")?.toArray?.() || [],
+        tableSafe("attendance")?.toArray?.() || [],
+        tableSafe("studentAttendanceSummaries")?.toArray?.() || [],
+      ]);
+
+      setStudents(
+        (studentRows as Student[])
+          .filter(
+            (row: any) =>
+              sameTenant(row) &&
+              !["withdrawn", "graduated"].includes(
+                String(row.status || "").toLowerCase(),
+              ),
+          )
+          .sort((a: any, b: any) =>
+            String(a.fullName || "").localeCompare(
+              String(b.fullName || ""),
+            ),
+          ),
+      );
+
+      setClasses(
+        (classRows as Class[])
+          .filter((row: any) => sameTenant(row) && isActive(row))
+          .sort((a: any, b: any) =>
+            String(a.name || "").localeCompare(String(b.name || "")),
+          ),
+      );
+
+      setStructures(
+        (structureRows as AcademicStructure[])
+          .filter((row: any) => sameTenant(row) && isActive(row))
+          .sort((a: any, b: any) =>
+            String(a.name || "").localeCompare(String(b.name || "")),
+          ),
+      );
+
+      setPeriods(
+        (periodRows as AcademicPeriod[])
+          .filter((row: any) => sameTenant(row) && isActive(row))
+          .sort(
+            (a: any, b: any) =>
+              Number(a.order || 0) - Number(b.order || 0),
+          ),
+      );
+
+      setEnrollments(
+        (enrollmentRows as StudentEnrollment[]).filter((row: any) =>
+          sameTenant(row),
+        ),
+      );
+
+      setAttendanceRows(
+        (attendanceData as Attendance[]).filter((row: any) =>
+          sameTenant(row),
+        ),
+      );
+
+      setSummaryRows(
+        (summaryData as StudentAttendanceSummary[]).filter((row: any) =>
+          sameTenant(row),
+        ),
+      );
+    } catch (error) {
+      console.error("Failed to load student attendance:", error);
+      clearData();
+      notify("error", "Failed to load student attendance.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (accountLoading || contextLoading) return;
+    if (!authenticated || !accountId) router.replace("/login");
+    else if (!schoolId || !branchId) router.replace("/account");
+  }, [
+    accountLoading,
+    contextLoading,
+    authenticated,
+    accountId,
+    schoolId,
+    branchId,
+    router,
+  ]);
+
+  useEffect(() => {
+    if (accountLoading || settingsLoading || contextLoading) return;
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    authenticated,
+    accountId,
+    schoolId,
+    branchId,
+    accountLoading,
+    settingsLoading,
+    contextLoading,
+    revision,
+    canView,
+  ]);
+
+  useEffect(() => {
+    if (!structureId && settings?.currentAcademicStructureId) {
+      setStructureId(String(settings.currentAcademicStructureId));
+    }
+    if (!periodId && settings?.currentAcademicPeriodId) {
+      setPeriodId(String(settings.currentAcademicPeriodId));
+    }
+  }, [
+    structureId,
+    periodId,
+    settings?.currentAcademicStructureId,
+    settings?.currentAcademicPeriodId,
+  ]);
+
+  const studentMap = useMemo(
+    () =>
+      new Map(
+        students.map((row: any) => [idOf(row.id), row]),
+      ),
+    [students],
+  );
+
+  const classMap = useMemo(
+    () =>
+      new Map(
+        classes.map((row: any) => [idOf(row.id), row]),
+      ),
+    [classes],
+  );
+
+  const structureMap = useMemo(
+    () =>
+      new Map(
+        structures.map((row: any) => [idOf(row.id), row]),
+      ),
+    [structures],
+  );
+
+  const periodMap = useMemo(
+    () =>
+      new Map(
+        periods.map((row: any) => [idOf(row.id), row]),
+      ),
+    [periods],
+  );
+
+  const filteredPeriods = useMemo(
+    () =>
+      structureId
+        ? periods.filter((row: any) =>
+            sameId(row.academicStructureId, structureId),
+          )
+        : periods,
+    [periods, structureId],
+  );
+
+  const attendanceByStudent = useMemo(() => {
+    const map = new Map<string, Attendance>();
+
+    attendanceRows.forEach((row: any) => {
+      if (
+        row.isDeleted ||
+        !sameId(row.classId, classId) ||
+        !sameId(row.academicStructureId, structureId) ||
+        !sameId(row.academicPeriodId, periodId) ||
+        row.date !== date
+      ) {
+        return;
+      }
+
+      map.set(idOf(row.studentId), row);
+    });
+
+    return map;
+  }, [
+    attendanceRows,
+    classId,
+    structureId,
+    periodId,
+    date,
+  ]);
+
+  const summaryByStudent = useMemo(() => {
+    const map = new Map<string, StudentAttendanceSummary>();
+
+    summaryRows.forEach((row: any) => {
+      if (
+        row.isDeleted ||
+        !sameId(row.classId, classId) ||
+        !sameId(row.academicStructureId, structureId) ||
+        !sameId(row.academicPeriodId, periodId)
+      ) {
+        return;
+      }
+
+      map.set(idOf(row.studentId), row);
+    });
+
+    return map;
+  }, [
+    summaryRows,
+    classId,
+    structureId,
+    periodId,
+  ]);
+
+  const studentViews = useMemo<StudentView[]>(() => {
+    if (!structureId || !periodId || !classId) return [];
+
+    const seen = new Set<string>();
+    const result: StudentView[] = [];
+
+    enrollments.forEach((enrollment: any) => {
+      if (
+        enrollment.isDeleted ||
+        enrollment.status !== "active" ||
+        !sameId(enrollment.classId, classId) ||
+        !sameId(enrollment.academicStructureId, structureId) ||
+        !sameId(enrollment.academicPeriodId, periodId)
+      ) {
+        return;
+      }
+
+      const student = studentMap.get(idOf(enrollment.studentId)) as
+        | Student
+        | undefined;
+
+      if (!student) return;
+
+      const studentAny = student as any;
+      const id = idOf(studentAny.id);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+
+      result.push({
+        student,
+        id,
+        name: studentAny.fullName || "Unnamed student",
+        admissionNumber:
+          studentAny.admissionNumber || "No admission number",
+        photo:
+          mediaByStudentId[id]?.photo ||
+          safePhoto(studentAny.photo),
+        existingAttendance: attendanceByStudent.get(id),
+        existingSummary: summaryByStudent.get(id),
+      });
+    });
+
+    students.forEach((student: any) => {
+      const id = idOf(student.id);
+
+      if (
+        !id ||
+        seen.has(id) ||
+        !sameId(student.currentClassId, classId) ||
+        !isActive(student)
+      ) {
+        return;
+      }
+
+      seen.add(id);
+
+      result.push({
+        student,
+        id,
+        name: student.fullName || "Unnamed student",
+        admissionNumber:
+          student.admissionNumber || "No admission number",
+        photo:
+          mediaByStudentId[id]?.photo ||
+          safePhoto(student.photo),
+        existingAttendance: attendanceByStudent.get(id),
+        existingSummary: summaryByStudent.get(id),
+      });
+    });
+
+    return result.sort((a, b) => a.name.localeCompare(b.name));
+  }, [
+    structureId,
+    periodId,
+    classId,
+    enrollments,
+    students,
+    studentMap,
+    mediaByStudentId,
+    attendanceByStudent,
+    summaryByStudent,
+  ]);
+
+  useEffect(() => {
+    const next: DailyDraftMap = {};
+    studentViews.forEach((item) => {
+      const status = (item.existingAttendance as any)?.status;
+      if (["present", "absent", "late"].includes(status)) {
+        next[item.id] = status as AttendanceStatus;
+      }
+    });
+    setDailyDrafts(next);
+  }, [studentViews]);
+
+  useEffect(() => {
+    const next: TermDraftMap = {};
+    studentViews.forEach((item) => {
+      const row = item.existingSummary as any;
+      next[item.id] = normalizeTermDraft({
+        daysOpened: row?.daysOpened,
+        daysPresent: row?.daysPresent,
+        daysAbsent: row?.daysAbsent,
+        timesLate: row?.timesLate,
+        attendancePercent: row?.attendancePercent,
+      });
+    });
+    setTermDrafts(next);
+  }, [studentViews]);
+
+  const selectedClassName =
+    (classMap.get(classId) as any)?.name ||
+    (classId ? "Selected class" : "Select a class");
+
+  const selectedStructureName =
+    (structureMap.get(structureId) as any)?.name ||
+    (structureId ? "Selected structure" : "");
+
+  const selectedPeriodName =
+    (periodMap.get(periodId) as any)?.name ||
+    (periodId ? "Selected period" : "");
+
+  const visibleStudents = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    return studentViews.filter((item) => {
+      if (entryMode === "daily") {
+        const status = dailyDrafts[item.id];
+
+        if (statusFilter === "unmarked" && status) return false;
+
+        if (
+          ["present", "absent", "late"].includes(statusFilter) &&
+          status !== statusFilter
+        ) {
+          return false;
+        }
+      }
+
+      if (!query) return true;
+
+      return `${item.name} ${item.admissionNumber}`
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [
+    studentViews,
+    search,
+    entryMode,
+    dailyDrafts,
+    statusFilter,
+  ]);
+
+  const dailySummary = useMemo(() => {
+    const total = studentViews.length;
+    const present = studentViews.filter(
+      (item) => dailyDrafts[item.id] === "present",
+    ).length;
+    const absent = studentViews.filter(
+      (item) => dailyDrafts[item.id] === "absent",
+    ).length;
+    const late = studentViews.filter(
+      (item) => dailyDrafts[item.id] === "late",
+    ).length;
+    const marked = present + absent + late;
+
+    return {
+      total,
+      present,
+      absent,
+      late,
+      marked,
+      unmarked: Math.max(0, total - marked),
+      completion: total ? Math.round((marked / total) * 100) : 0,
+      attendanceRate: total ? Math.round((present / total) * 100) : 0,
+    };
+  }, [studentViews, dailyDrafts]);
+
+  const termSummary = useMemo(() => {
+    const drafts = studentViews.map(
+      (item) => termDrafts[item.id] || normalizeTermDraft(),
+    );
+
+    const completed = drafts.filter(
+      (draft) => draft.daysOpened > 0,
+    ).length;
+
+    const totalOpened = drafts.reduce(
+      (sum, draft) => sum + draft.daysOpened,
+      0,
+    );
+
+    const totalPresent = drafts.reduce(
+      (sum, draft) => sum + draft.daysPresent,
+      0,
+    );
+
+    return {
+      total: drafts.length,
+      completed,
+      missing: Math.max(0, drafts.length - completed),
+      average: totalOpened
+        ? Math.round((totalPresent / totalOpened) * 100)
+        : 0,
+      opened: totalOpened,
+      present: totalPresent,
+      absent: drafts.reduce(
+        (sum, draft) => sum + draft.daysAbsent,
+        0,
+      ),
+      late: drafts.reduce(
+        (sum, draft) => sum + draft.timesLate,
+        0,
+      ),
+    };
+  }, [studentViews, termDrafts]);
+
+  const activeFilterCount = [
+    structureId,
+    periodId,
+    classId,
+    entryMode === "daily" ? date : "",
+    entryMode === "daily" && statusFilter !== "all"
+      ? statusFilter
+      : "",
+  ].filter(Boolean).length;
+
+  const setDailyStatus = (
+    studentId: string,
+    status: AttendanceStatus,
+  ) => {
+    setDailyDrafts((current) => ({
+      ...current,
+      [studentId]: status,
+    }));
+  };
+
+  const clearDailyStatus = (studentId: string) => {
+    setDailyDrafts((current) => {
+      const next = { ...current };
+      delete next[studentId];
+      return next;
+    });
+  };
+
+  const updateTermDraft = (
+    studentId: string,
+    field: "daysOpened" | "daysPresent" | "timesLate",
+    rawValue: unknown,
+  ) => {
+    setTermDrafts((current) => {
+      const previous =
+        current[studentId] || normalizeTermDraft();
+
+      const next = normalizeTermDraft({
+        ...previous,
+        [field]: clamp(rawValue),
+      });
+
+      return {
+        ...current,
+        [studentId]: next,
+      };
+    });
+  };
+
+  const applyBulkDaysOpened = () => {
+    const daysOpened = clamp(bulkDaysOpened);
+
+    if (!classId || !structureId || !periodId) {
+      notify(
+        "error",
+        "Select an academic structure, period and class first.",
+      );
+      return;
+    }
+
+    if (!daysOpened) {
+      notify("error", "Enter a valid number of days opened.");
+      return;
+    }
+
+    const target =
+      bulkScope === "shown" ? visibleStudents : studentViews;
+
+    if (!target.length) {
+      notify("info", "There are no students to update.");
+      return;
+    }
+
+    setTermDrafts((current) => {
+      const next = { ...current };
+
+      target.forEach((item) => {
+        const previous =
+          next[item.id] || normalizeTermDraft();
+
+        next[item.id] = normalizeTermDraft({
+          ...previous,
+          daysOpened,
+          daysPresent: Math.min(
+            previous.daysPresent,
+            daysOpened,
+          ),
+        });
+      });
+
+      return next;
+    });
+
+    notify(
+      "success",
+      `Days opened applied to ${target.length} ${
+        target.length === 1 ? "student" : "students"
+      }.`,
+    );
+  };
+
+  const saveDaily = async () => {
+    for (const item of studentViews) {
+      const status = dailyDrafts[item.id];
+      const existing = attendanceByStudent.get(item.id) as any;
+
+      if (!status) {
+        if (existing?.id) {
+          await softDeleteLocal(
+            "attendance",
+            idOf(existing.id),
+          );
+        }
+        continue;
+      }
+
+      const payload: Partial<Attendance> = {
+        accountId: accountId ?? undefined,
+        schoolId,
+        branchId,
+        studentId: item.id,
+        classId,
+        academicStructureId: structureId,
+        academicPeriodId: periodId,
+        date,
+        status,
+        isDeleted: false,
+      };
+
+      if (existing?.id) {
+        await updateLocal(
+          "attendance",
+          idOf(existing.id),
+          payload,
+        );
+      } else {
+        await createLocal(
+          "attendance",
+          payload as Attendance,
+        );
+      }
+    }
+  };
+
+  const saveTerm = async () => {
+    for (const item of studentViews) {
+      const draft =
+        termDrafts[item.id] || normalizeTermDraft();
+
+      const existing = summaryByStudent.get(item.id) as any;
+
+      if (
+        !draft.daysOpened &&
+        !draft.daysPresent &&
+        !draft.timesLate
+      ) {
+        if (existing?.id) {
+          await softDeleteLocal(
+            "studentAttendanceSummaries",
+            idOf(existing.id),
+          );
+        }
+        continue;
+      }
+
+      if (draft.daysPresent > draft.daysOpened) {
+        throw new Error(
+          `${item.name} has more days present than days opened.`,
+        );
+      }
+
+      const payload: Partial<StudentAttendanceSummary> = {
+        accountId: accountId ?? undefined,
+        schoolId,
+        branchId,
+        studentId: item.id,
+        classId,
+        academicStructureId: structureId,
+        academicPeriodId: periodId,
+        entryMode: "manual",
+        daysOpened: draft.daysOpened,
+        daysPresent: draft.daysPresent,
+        daysAbsent: Math.max(
+          0,
+          draft.daysOpened - draft.daysPresent,
+        ),
+        timesLate: draft.timesLate,
+        attendancePercent: percent(
+          draft.daysPresent,
+          draft.daysOpened,
+        ),
+        active: true,
+        isDeleted: false,
+      } as Partial<StudentAttendanceSummary>;
+
+      if (existing?.id) {
+        await updateLocal(
+          "studentAttendanceSummaries",
+          idOf(existing.id),
+          payload,
+        );
+      } else {
+        await createLocal(
+          "studentAttendanceSummaries",
+          payload as StudentAttendanceSummary,
+        );
+      }
+    }
+  };
+
+  const save = async () => {
+    if (!canEdit) {
+      notify(
+        "error",
+        "You do not have permission to edit attendance.",
+      );
+      return;
+    }
+
+    if (!authenticated || !accountId) {
+      notify("error", "Sign in first.");
+      return;
+    }
+
+    if (!schoolId || !branchId) {
+      notify("error", "Select a school branch first.");
+      return;
+    }
+
+    if (!structureId) {
+      notify("error", "Select an academic structure.");
+      return;
+    }
+
+    if (!periodId) {
+      notify("error", "Select an academic period.");
+      return;
+    }
+
+    if (!classId) {
+      notify("error", "Select a class.");
+      return;
+    }
+
+    if (entryMode === "daily" && !date) {
+      notify("error", "Select a date.");
+      return;
+    }
+
+    try {
+      setSaving(true);
+
+      if (entryMode === "daily") {
+        await saveDaily();
+      } else {
+        await saveTerm();
+      }
+
+      await load();
+
+      notify(
+        "success",
+        entryMode === "daily"
+          ? "Daily attendance saved successfully."
+          : "Term attendance totals saved successfully.",
+      );
+    } catch (error) {
+      console.error("Failed to save attendance:", error);
+      notify(
+        "error",
+        error instanceof Error
+          ? error.message
+          : "Failed to save attendance.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (
+    accountLoading ||
+    contextLoading ||
+    settingsLoading ||
+    loading
+  ) {
+    return (
+      <RouteState
+        primary={primary}
+        title="Opening Student Attendance..."
+        text="Checking branch, academic context, enrollments and attendance records."
+      />
+    );
+  }
+
+  if (!authenticated || !accountId) {
+    return (
+      <RouteState
+        primary={primary}
+        title="Redirecting to login..."
+        text="You must sign in before recording attendance."
+      />
+    );
+  }
+
+  if (!schoolId || !branchId) {
+    return (
+      <RouteState
+        primary={primary}
+        title="No branch workspace selected"
+        text="Select the correct branch workspace and reopen attendance."
+        action={
+          <button
+            type="button"
+            className="ba-state-button"
+            onClick={() => router.push("/account")}
+          >
+            Go to Account Setup
+          </button>
+        }
+      />
+    );
+  }
+
   return (
-    <section className="ba-empty">
-      <div className="ba-empty-icon">{icon}</div>
-      <h3>{title}</h3>
-      <p>{text}</p>
-    </section>
+    <PermissionGate
+      allowed={canView}
+      fallback={
+        <RouteState
+          primary={primary}
+          title="Attendance access restricted"
+          text="Your active membership does not allow you to view student attendance."
+        />
+      }
+    >
+      <main
+        className="ba-page"
+        style={
+          {
+            "--ba-primary": primary,
+          } as React.CSSProperties
+        }
+      >
+        <style>{css}</style>
+
+        {toast ? (
+          <section className={`ba-toast ${toast.tone}`}>
+            <span>{toast.message}</span>
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+            >
+              ×
+            </button>
+          </section>
+        ) : null}
+
+        <section className="ba-search-card">
+          <button
+            type="button"
+            className={`status-dot-mini ${
+              entryMode === "daily"
+                ? dailySummary.total &&
+                  dailySummary.completion === 100
+                  ? "green"
+                  : dailySummary.marked
+                    ? "orange"
+                    : "gray"
+                : termSummary.total &&
+                    termSummary.completed === termSummary.total
+                  ? "green"
+                  : termSummary.completed
+                    ? "orange"
+                    : "gray"
+            }`}
+            aria-label="Open attendance status"
+            onClick={() => setStatusOpen(true)}
+          />
+
+          <label className="ba-search">
+            <span>⌕</span>
+            <input
+              value={search}
+              onChange={(event) =>
+                setSearch(event.target.value)
+              }
+              placeholder={
+                entryMode === "daily"
+                  ? "Search attendance..."
+                  : "Search term totals..."
+              }
+            />
+          </label>
+
+          <button
+            type="button"
+            className="ba-save-inline"
+            onClick={save}
+            disabled={saving || !canEdit}
+          >
+            {saving ? "..." : "Save"}
+          </button>
+
+          <button
+            type="button"
+            className={`ba-filter-button ${
+              activeFilterCount ? "active" : ""
+            }`}
+            onClick={() => setFilterOpen(true)}
+            aria-label="Open attendance filters"
+          >
+            <SliderIcon />
+            {activeFilterCount ? (
+              <b>{activeFilterCount}</b>
+            ) : null}
+          </button>
+
+          <button
+            type="button"
+            className="ba-icon-button"
+            onClick={() => setMoreOpen(true)}
+            aria-label="Open more actions"
+          >
+            ⋯
+          </button>
+        </section>
+
+        {classId || structureId || periodId ? (
+          <section className="ba-filter-chips">
+            {classId ? (
+              <span>Class: {selectedClassName}</span>
+            ) : null}
+            {structureId ? (
+              <span>{selectedStructureName}</span>
+            ) : null}
+            {periodId ? (
+              <span>{selectedPeriodName}</span>
+            ) : null}
+            {entryMode === "daily" && date ? (
+              <span>{date}</span>
+            ) : null}
+            <span>
+              {entryMode === "daily"
+                ? "Daily Register"
+                : "Term Totals"}
+            </span>
+          </section>
+        ) : null}
+
+        {viewMode === "analytics" ? (
+          <AnalyticsView
+            entryMode={entryMode}
+            daily={dailySummary}
+            term={termSummary}
+          />
+        ) : entryMode === "daily" ? (
+          viewMode === "table" ? (
+            <DailyTable
+              rows={visibleStudents}
+              drafts={dailyDrafts}
+              setStatus={setDailyStatus}
+              clearStatus={clearDailyStatus}
+              primary={primary}
+              editable={canEdit}
+            />
+          ) : (
+            <section className="ba-list">
+              {visibleStudents.map((item) => {
+                const status = dailyDrafts[item.id];
+
+                return (
+                  <article
+                    className="attendance-row"
+                    key={item.id}
+                  >
+                    <Avatar
+                      name={item.name}
+                      photo={item.photo}
+                      primary={primary}
+                    />
+
+                    <span className="attendance-main">
+                      <strong>{item.name}</strong>
+                      <small>{item.admissionNumber}</small>
+                      <em>
+                        {selectedClassName} · {date}
+                      </em>
+                    </span>
+
+                    <span className="attendance-status-actions">
+                      {(
+                        [
+                          "present",
+                          "absent",
+                          "late",
+                        ] as AttendanceStatus[]
+                      ).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className={`${value} ${
+                            status === value ? "active" : ""
+                          }`}
+                          disabled={!canEdit}
+                          title={statusLabel(value)}
+                          onClick={() =>
+                            setDailyStatus(item.id, value)
+                          }
+                        >
+                          {value.slice(0, 1).toUpperCase()}
+                        </button>
+                      ))}
+
+                      <button
+                        type="button"
+                        className="clear"
+                        disabled={!canEdit}
+                        title="Clear"
+                        onClick={() =>
+                          clearDailyStatus(item.id)
+                        }
+                      >
+                        ×
+                      </button>
+
+                      <span
+                        className={`status-dot-mini ${statusTone(
+                          status,
+                        )}`}
+                      />
+                    </span>
+                  </article>
+                );
+              })}
+            </section>
+          )
+        ) : viewMode === "table" ? (
+          <TermTable
+            rows={visibleStudents}
+            drafts={termDrafts}
+            updateDraft={updateTermDraft}
+            primary={primary}
+            editable={canEdit}
+          />
+        ) : (
+          <section className="ba-list">
+            {visibleStudents.map((item) => {
+              const draft =
+                termDrafts[item.id] || normalizeTermDraft();
+
+              return (
+                <article className="term-row" key={item.id}>
+                  <div className="term-student">
+                    <Avatar
+                      name={item.name}
+                      photo={item.photo}
+                      primary={primary}
+                    />
+
+                    <span>
+                      <strong>{item.name}</strong>
+                      <small>{item.admissionNumber}</small>
+                    </span>
+
+                    <b>{draft.attendancePercent}%</b>
+                  </div>
+
+                  <div className="term-input-grid">
+                    <NumberField
+                      label="Opened"
+                      value={draft.daysOpened}
+                      disabled={!canEdit}
+                      onChange={(value) =>
+                        updateTermDraft(
+                          item.id,
+                          "daysOpened",
+                          value,
+                        )
+                      }
+                    />
+
+                    <NumberField
+                      label="Present"
+                      value={draft.daysPresent}
+                      disabled={!canEdit}
+                      onChange={(value) =>
+                        updateTermDraft(
+                          item.id,
+                          "daysPresent",
+                          value,
+                        )
+                      }
+                    />
+
+                    <NumberField
+                      label="Absent"
+                      value={draft.daysAbsent}
+                      readOnly
+                    />
+
+                    <NumberField
+                      label="Late"
+                      value={draft.timesLate}
+                      disabled={!canEdit}
+                      onChange={(value) =>
+                        updateTermDraft(
+                          item.id,
+                          "timesLate",
+                          value,
+                        )
+                      }
+                    />
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        )}
+
+        {!visibleStudents.length ? (
+          <section className="ba-empty">
+            <div className="ba-empty-icon">📅</div>
+            <h3>
+              {classId
+                ? "No students found"
+                : "Select a class"}
+            </h3>
+            <p>
+              {classId
+                ? "No students match the current search or filters."
+                : "Open the slider filter and choose an academic structure, period and class."}
+            </p>
+          </section>
+        ) : null}
+
+        {filterOpen ? (
+          <FilterSheet
+            entryMode={entryMode}
+            structureId={structureId}
+            periodId={periodId}
+            classId={classId}
+            date={date}
+            statusFilter={statusFilter}
+            structures={structures}
+            periods={filteredPeriods}
+            classes={classes}
+            bulkDaysOpened={bulkDaysOpened}
+            bulkScope={bulkScope}
+            onEntryMode={(value) => {
+              setEntryMode(value);
+              setViewMode("cards");
+              if (value === "termTotals") {
+                setStatusFilter("all");
+              }
+            }}
+            onStructure={(value) => {
+              setStructureId(value);
+              setPeriodId("");
+              setClassId("");
+            }}
+            onPeriod={(value) => {
+              setPeriodId(value);
+              setClassId("");
+            }}
+            onClass={setClassId}
+            onDate={setDate}
+            onStatus={setStatusFilter}
+            onBulkDaysOpened={setBulkDaysOpened}
+            onBulkScope={setBulkScope}
+            onApplyBulkDaysOpened={applyBulkDaysOpened}
+            onClose={() => setFilterOpen(false)}
+          />
+        ) : null}
+
+        {moreOpen ? (
+          <MoreSheet
+            entryMode={entryMode}
+            viewMode={viewMode}
+            canEdit={canEdit}
+            onViewMode={(value) => {
+              setViewMode(value);
+              setMoreOpen(false);
+            }}
+            onMarkAll={(status) => {
+              setDailyDrafts((current) => {
+                const next = { ...current };
+                visibleStudents.forEach((item) => {
+                  next[item.id] = status;
+                });
+                return next;
+              });
+              setMoreOpen(false);
+            }}
+            onClearShown={() => {
+              if (entryMode === "daily") {
+                setDailyDrafts((current) => {
+                  const next = { ...current };
+                  visibleStudents.forEach((item) => {
+                    delete next[item.id];
+                  });
+                  return next;
+                });
+              } else {
+                setTermDrafts((current) => {
+                  const next = { ...current };
+                  visibleStudents.forEach((item) => {
+                    next[item.id] = normalizeTermDraft();
+                  });
+                  return next;
+                });
+              }
+              setMoreOpen(false);
+            }}
+            onOpenBulkDays={() => {
+              setMoreOpen(false);
+              setFilterOpen(true);
+            }}
+            onRefresh={async () => {
+              setMoreOpen(false);
+              await load();
+            }}
+            onClose={() => setMoreOpen(false)}
+          />
+        ) : null}
+
+        {statusOpen ? (
+          <StatusSheet
+            entryMode={entryMode}
+            daily={dailySummary}
+            term={termSummary}
+            onClose={() => setStatusOpen(false)}
+          />
+        ) : null}
+      </main>
+    </PermissionGate>
+  );
+}
+
+function SliderIcon() {
+  return (
+    <svg
+      className="ba-slider-icon"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path d="M4 7h9" />
+      <path d="M17 7h3" />
+      <circle cx="15" cy="7" r="2" />
+      <path d="M4 17h3" />
+      <path d="M11 17h9" />
+      <circle cx="9" cy="17" r="2" />
+    </svg>
   );
 }
 
@@ -283,1223 +1592,142 @@ function Avatar({
           : `linear-gradient(135deg, ${primary}, rgba(15,23,42,.9))`,
       }}
     >
-      {!photo &&
-        String(name || "S")
-          .slice(0, 1)
-          .toUpperCase()}
+      {!photo
+        ? String(name || "S")
+            .slice(0, 1)
+            .toUpperCase()
+        : null}
     </div>
   );
 }
 
-function SliderIcon() {
+function NumberField({
+  label,
+  value,
+  onChange,
+  readOnly,
+  disabled,
+}: {
+  label: string;
+  value: number;
+  onChange?: (value: number) => void;
+  readOnly?: boolean;
+  disabled?: boolean;
+}) {
   return (
-    <svg className="ba-slider-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 7h9" />
-      <path d="M17 7h3" />
-      <circle cx="15" cy="7" r="2" />
-      <path d="M4 17h3" />
-      <path d="M11 17h9" />
-      <circle cx="9" cy="17" r="2" />
-    </svg>
-  );
-}
-
-export default function StudentAttendance() {
-  const dataRevision = useDataRevision();
-
-  const router = useRouter();
-
-  const { accountId, authenticated, loading: accountLoading } = useAccount();
-  const { settings, loading: settingsLoading } = useSettings();
-  const {
-    activeSchool,
-    activeSchoolId,
-    activeBranch,
-    activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch();
-  const { activeMembership } = useActiveMembership();
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedWorkspaceSchoolId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeSchoolId,
-    activeSchool: activeSchool as any,
-    settings: settings as any,
-  });
-
-  const branchId = selectedWorkspaceBranchId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeBranchId,
-    activeBranch: activeBranch as any,
-    settings: settings as any,
-  });
-
-  const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
-
-  const { loading, setLoading } = useBackgroundLoader();
-  const [saving, setSaving] = useState(false);
-
-  const [students, setStudents] = useState<Student[]>([]);
-  const [classes, setClasses] = useState<Class[]>([]);
-  const [academicStructures, setAcademicStructures] = useState<
-    AcademicStructure[]
-  >([]);
-  const [periods, setPeriods] = useState<AcademicPeriod[]>([]);
-  const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
-  const [attendanceRows, setAttendanceRows] = useState<Attendance[]>([]);
-
-  const [viewMode, setViewMode] = useState<ViewMode>("cards");
-  const [academicStructureId, setAcademicStructureId] = useState<string>(
-    settings?.currentAcademicStructureId
-      ? String(settings.currentAcademicStructureId)
-      : "",
-  );
-  const [academicPeriodId, setAcademicPeriodId] = useState<string>(
-    settings?.currentAcademicPeriodId
-      ? String(settings.currentAcademicPeriodId)
-      : "",
-  );
-  const [classId, setClassId] = useState("");
-  const [date, setDate] = useState(todayISO());
-  const [search, setSearch] = useState("");
-  const [attendanceFilter, setAttendanceFilter] =
-    useState<AttendanceFilter>("all");
-  const [statusMap, setStatusMap] = useState<AttendanceMap>({});
-
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
-  const [toast, setToast] = useState<{
-    tone: ToastTone;
-    message: string;
-  } | null>(null);
-
-  useEffect(() => {
-    if (accountLoading || contextLoading) return;
-    if (!authenticated || !accountId) router.replace("/login");
-    else if (!schoolId || !branchId) router.replace("/account");
-  }, [
-    accountLoading,
-    contextLoading,
-    authenticated,
-    accountId,
-    schoolId,
-    branchId,
-    router,
-  ]);
-
-  const sameTenant = (row: TenantRow) =>
-    (!row.accountId || row.accountId === accountId) &&
-    (!row.schoolId || sameId(row.schoolId, schoolId)) &&
-    (!row.branchId || sameId(row.branchId, branchId)) &&
-    !row.isDeleted;
-
-  const showToast = (tone: ToastTone, message: string) => {
-    setToast({ tone, message });
-    window.setTimeout(
-      () =>
-        setToast((current) => (current?.message === message ? null : current)),
-      4200,
-    );
-  };
-
-  const clearData = () => {
-    setStudents([]);
-    setClasses([]);
-    setAcademicStructures([]);
-    setPeriods([]);
-    setEnrollments([]);
-    setAttendanceRows([]);
-  };
-
-  const load = async () => {
-    if (!authenticated || !accountId || !schoolId || !branchId) {
-      clearData();
-      setLoading(false);
-      return;
-    }
-
-    try {
-      setLoading(true);
-      const [
-        studentRows,
-        classRows,
-        structureRows,
-        periodRows,
-        enrollmentRows,
-        attendanceData,
-      ] = await Promise.all([
-        tableSafe("students")?.toArray?.() || [],
-        tableSafe("classes")?.toArray?.() || [],
-        tableSafe("academicStructures")?.toArray?.() || [],
-        tableSafe("academicPeriods")?.toArray?.() || [],
-        tableSafe("studentEnrollments")?.toArray?.() || [],
-        tableSafe("attendance")?.toArray?.() || [],
-      ]);
-
-      setStudents(
-        (studentRows as Student[])
-          .filter(
-            (row: any) =>
-              sameTenant(row as TenantRow) &&
-              row.status !== "withdrawn" &&
-              row.status !== "graduated",
-          )
-          .sort((a: any, b: any) =>
-            String(a.fullName || "").localeCompare(String(b.fullName || "")),
-          ),
-      );
-      setClasses(
-        (classRows as Class[])
-          .filter((row) => sameTenant(row as TenantRow) && isActiveRow(row))
-          .sort((a: any, b: any) =>
-            String(a.name || "").localeCompare(String(b.name || "")),
-          ),
-      );
-      setAcademicStructures(
-        (structureRows as AcademicStructure[])
-          .filter((row) => sameTenant(row as TenantRow) && isActiveRow(row))
-          .sort((a: any, b: any) =>
-            String(a.name || "").localeCompare(String(b.name || "")),
-          ),
-      );
-      setPeriods(
-        (periodRows as AcademicPeriod[])
-          .filter((row) => sameTenant(row as TenantRow) && isActiveRow(row))
-          .sort(
-            (a: any, b: any) => Number(a.order || 0) - Number(b.order || 0),
-          ),
-      );
-      setEnrollments(
-        (enrollmentRows as StudentEnrollment[]).filter((row) =>
-          sameTenant(row as TenantRow),
-        ),
-      );
-      setAttendanceRows(
-        (attendanceData as Attendance[]).filter((row) =>
-          sameTenant(row as TenantRow),
-        ),
-      );
-    } catch (error) {
-      console.error("Failed to load student attendance:", error);
-      clearData();
-      showToast("error", "Failed to load student attendance.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (accountLoading || settingsLoading || contextLoading) return;
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    authenticated,
-    accountId,
-    schoolId,
-    branchId,
-    accountLoading,
-    settingsLoading,
-    contextLoading,
-    dataRevision,
-  ]);
-
-  useEffect(() => {
-    if (!academicStructureId && settings?.currentAcademicStructureId)
-      setAcademicStructureId(String(settings.currentAcademicStructureId));
-    if (!academicPeriodId && settings?.currentAcademicPeriodId)
-      setAcademicPeriodId(String(settings.currentAcademicPeriodId));
-  }, [
-    academicPeriodId,
-    academicStructureId,
-    settings?.currentAcademicPeriodId,
-    settings?.currentAcademicStructureId,
-  ]);
-
-  const studentMap = useMemo(
-    () => new Map(students.map((row: any) => [idOf(row.id), row])),
-    [students],
-  );
-  const classMap = useMemo(
-    () => new Map(classes.map((row: any) => [idOf(row.id), row])),
-    [classes],
-  );
-  const structureMap = useMemo(
-    () => new Map(academicStructures.map((row: any) => [idOf(row.id), row])),
-    [academicStructures],
-  );
-  const periodMap = useMemo(
-    () => new Map(periods.map((row: any) => [idOf(row.id), row])),
-    [periods],
-  );
-
-  const filteredPeriods = useMemo(() => {
-    if (!academicStructureId) return periods;
-    return periods.filter((row: any) =>
-      sameId(row.academicStructureId, academicStructureId),
-    );
-  }, [academicStructureId, periods]);
-
-  const availableClassIds = useMemo(() => {
-    const ids = new Set<string>();
-    enrollments.forEach((row: any) => {
-      if (row.status !== "active") return;
-      if (
-        academicStructureId &&
-        !sameId(row.academicStructureId, academicStructureId)
-      )
-        return;
-      if (academicPeriodId && !sameId(row.academicPeriodId, academicPeriodId))
-        return;
-      if (row.classId) ids.add(String(row.classId));
-    });
-    return ids;
-  }, [academicPeriodId, academicStructureId, enrollments]);
-
-  const availableClasses = useMemo(() => {
-    // Golden-standard behavior: keep all active branch classes selectable.
-    // Enrollment rows are still preferred for loading students, but hiding classes
-    // without enrollment makes attendance feel broken in fresh branches.
-    const enrolled = classes.filter(
-      (row: any) => row.id && availableClassIds.has(String(row.id)),
-    );
-    const remaining = classes.filter(
-      (row: any) => !row.id || !availableClassIds.has(String(row.id)),
-    );
-    return [...enrolled, ...remaining];
-  }, [availableClassIds, classes]);
-
-  const attendanceKeyMap = useMemo(() => {
-    const map = new Map<string, Attendance>();
-    attendanceRows.forEach((row: any) => {
-      if (!classId || !academicStructureId || !academicPeriodId || !date)
-        return;
-      if (!sameId(row.classId, classId)) return;
-      if (!sameId(row.academicStructureId, academicStructureId)) return;
-      if (!sameId(row.academicPeriodId, academicPeriodId)) return;
-      if (row.date !== date) return;
-      map.set(idOf(row.studentId), row);
-    });
-    return map;
-  }, [academicPeriodId, academicStructureId, attendanceRows, classId, date]);
-
-  const studentRows = useMemo<StudentRow[]>(() => {
-    if (!classId || !academicStructureId || !academicPeriodId) return [];
-
-    const seen = new Set<string>();
-
-    const fromEnrollments = enrollments
-      .filter(
-        (row: any) =>
-          sameId(row.classId, classId) &&
-          sameId(row.academicStructureId, academicStructureId) &&
-          sameId(row.academicPeriodId, academicPeriodId) &&
-          row.status === "active" &&
-          !row.isDeleted,
-      )
-      .map((enrollment: any) => {
-        const student = studentMap.get(idOf(enrollment.studentId)) as
-          | Student
-          | undefined;
-        if (!student) return undefined;
-        const sid = idOf((student as any).id);
-        if (!sid) return undefined;
-        seen.add(sid);
-        return {
-          student,
-          enrollment,
-          source: "enrollment" as const,
-          existingAttendance: attendanceKeyMap.get(sid),
-        };
-      })
-      .filter(Boolean) as StudentRow[];
-
-    const fromCurrentClass = students
-      .filter((student: any) => {
-        const sid = idOf(student.id);
-        if (!sid || seen.has(sid)) return false;
-        if (!sameId(student.currentClassId, classId)) return false;
-        if (student.isDeleted || student.active === false) return false;
-        if (
-          [
-            "withdrawn",
-            "graduated",
-            "deleted",
-            "archived",
-            "inactive",
-          ].includes(String(student.status || "").toLowerCase())
-        )
-          return false;
-        return true;
-      })
-      .map((student: any) => {
-        const sid = idOf(student.id);
-        return {
-          student,
-          source: "currentClass" as const,
-          existingAttendance: attendanceKeyMap.get(sid),
-        };
-      });
-
-    return [...fromEnrollments, ...fromCurrentClass].sort((a, b) =>
-      String((a.student as any).fullName || "").localeCompare(
-        String((b.student as any).fullName || ""),
-      ),
-    );
-  }, [
-    academicPeriodId,
-    academicStructureId,
-    attendanceKeyMap,
-    classId,
-    enrollments,
-    studentMap,
-    students,
-  ]);
-
-  useEffect(() => {
-    if (!classId || !academicStructureId || !academicPeriodId || !date) {
-      setStatusMap({});
-      return;
-    }
-    const next: AttendanceMap = {};
-    attendanceRows
-      .filter(
-        (row: any) =>
-          sameId(row.classId, classId) &&
-          sameId(row.academicStructureId, academicStructureId) &&
-          sameId(row.academicPeriodId, academicPeriodId) &&
-          row.date === date &&
-          !row.isDeleted,
-      )
-      .forEach((row: any) => {
-        const studentId = idOf(row.studentId);
-        if (studentId && ["present", "absent", "late"].includes(row.status))
-          next[studentId] = row.status as AttendanceStatus;
-      });
-    setStatusMap(next);
-  }, [academicPeriodId, academicStructureId, attendanceRows, classId, date]);
-
-  const filteredStudents = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return studentRows.filter(({ student }) => {
-      const studentAny: any = student;
-      const sid = idOf(studentAny.id);
-      const status = statusMap[sid];
-      if (attendanceFilter === "unmarked" && status) return false;
-      if (
-        ["present", "absent", "late"].includes(attendanceFilter) &&
-        status !== attendanceFilter
-      )
-        return false;
-      if (!query) return true;
-      return `${studentAny.fullName} ${studentAny.admissionNumber || ""} ${studentAny.gender || ""}`
-        .toLowerCase()
-        .includes(query);
-    });
-  }, [attendanceFilter, search, statusMap, studentRows]);
-
-  const summary = useMemo(() => {
-    const total = filteredStudents.length;
-    const present = filteredStudents.filter(
-      ({ student }) => statusMap[idOf((student as any).id)] === "present",
-    ).length;
-    const absent = filteredStudents.filter(
-      ({ student }) => statusMap[idOf((student as any).id)] === "absent",
-    ).length;
-    const late = filteredStudents.filter(
-      ({ student }) => statusMap[idOf((student as any).id)] === "late",
-    ).length;
-    const marked = present + absent + late;
-    const unmarked = Math.max(0, total - marked);
-    const completion = total ? Math.round((marked / total) * 100) : 0;
-    return { total, marked, present, absent, late, unmarked, completion };
-  }, [filteredStudents, statusMap]);
-
-  const fullSummary = useMemo(() => {
-    const total = studentRows.length;
-    const present = studentRows.filter(
-      ({ student }) => statusMap[idOf((student as any).id)] === "present",
-    ).length;
-    const absent = studentRows.filter(
-      ({ student }) => statusMap[idOf((student as any).id)] === "absent",
-    ).length;
-    const late = studentRows.filter(
-      ({ student }) => statusMap[idOf((student as any).id)] === "late",
-    ).length;
-    const marked = present + absent + late;
-    const completion = total ? Math.round((marked / total) * 100) : 0;
-    const attendanceRate = total ? Math.round((present / total) * 100) : 0;
-    return { total, present, absent, late, marked, completion, attendanceRate };
-  }, [statusMap, studentRows]);
-
-  const countsByStatus = useMemo(
-    () => [
-      { label: "Present", value: fullSummary.present },
-      { label: "Absent", value: fullSummary.absent },
-      { label: "Late", value: fullSummary.late },
-      {
-        label: "Unmarked",
-        value: Math.max(0, fullSummary.total - fullSummary.marked),
-      },
-    ],
-    [fullSummary],
-  );
-
-  const activeFilterCount = useMemo(() => {
-    return [
-      academicStructureId,
-      academicPeriodId,
-      classId,
-      date,
-      attendanceFilter !== "all" ? attendanceFilter : "",
-    ].filter(Boolean).length;
-  }, [academicPeriodId, academicStructureId, attendanceFilter, classId, date]);
-
-  const selectedClassName = classId
-    ? (classMap.get(idOf(classId)) as any)?.name || "Selected Class"
-    : "Select a class";
-  const selectedStructureName = academicStructureId
-    ? (structureMap.get(idOf(academicStructureId)) as any)?.name ||
-      "Selected Structure"
-    : "No structure";
-  const selectedPeriodName = academicPeriodId
-    ? (periodMap.get(idOf(academicPeriodId)) as any)?.name || "Selected Period"
-    : "No period";
-
-  const setStudentStatus = (studentId: string, status: AttendanceStatus) =>
-    setStatusMap((prev) => ({ ...prev, [studentId]: status }));
-  const clearStudentStatus = (studentId: string) =>
-    setStatusMap((prev) => {
-      const next = { ...prev };
-      delete next[studentId];
-      return next;
-    });
-
-  const markAll = (status: AttendanceStatus) => {
-    const next: AttendanceMap = {};
-    filteredStudents.forEach(({ student }) => {
-      const sid = idOf((student as any).id);
-      if (sid) next[sid] = status;
-    });
-    setStatusMap((prev) => ({ ...prev, ...next }));
-    setMoreOpen(false);
-  };
-
-  const clearShown = () => {
-    setStatusMap((prev) => {
-      const next = { ...prev };
-      filteredStudents.forEach(({ student }) => {
-        const sid = idOf((student as any).id);
-        if (sid) delete next[sid];
-      });
-      return next;
-    });
-    setMoreOpen(false);
-  };
-
-  const clearFilters = () => {
-    setAttendanceFilter("all");
-    setSearch("");
-  };
-
-  const saveAttendance = async () => {
-    if (!authenticated || !accountId)
-      return showToast("error", "Sign in first.");
-    if (!schoolId) return showToast("error", "Select school first.");
-    if (!branchId) return showToast("error", "Select branch first.");
-    if (!classId) return showToast("error", "Select class.");
-    if (!academicStructureId)
-      return showToast("error", "Select academic structure.");
-    if (!academicPeriodId) return showToast("error", "Select academic period.");
-    if (!date) return showToast("error", "Select date.");
-
-    try {
-      setSaving(true);
-      for (const { student } of studentRows) {
-        const sid = idOf((student as any).id);
-        if (!sid) continue;
-        const status = statusMap[sid];
-        const existing = attendanceKeyMap.get(sid);
-
-        if ((existing as any)?.id && !status) {
-          await softDeleteLocal("attendance", idOf((existing as any).id));
-          continue;
+    <label>
+      <span>{label}</span>
+      <input
+        type="number"
+        min={0}
+        inputMode="numeric"
+        value={value}
+        readOnly={readOnly}
+        disabled={disabled}
+        onChange={(event) =>
+          onChange?.(Number(event.target.value))
         }
-        if (!status) continue;
+      />
+    </label>
+  );
+}
 
-        const payload: Partial<Attendance> = {
-          accountId,
-          schoolId: schoolId,
-          branchId: branchId,
-          studentId: sid,
-          classId: classId,
-          academicStructureId: academicStructureId,
-          academicPeriodId: academicPeriodId,
-          date,
-          status,
-          isDeleted: false,
-          active: true,
-        } as Partial<Attendance>;
-
-        if ((existing as any)?.id)
-          await updateLocal(
-            "attendance",
-            idOf((existing as any).id),
-            payload,
-          );
-        else await createLocal("attendance", payload as unknown as Attendance);
-      }
-      await load();
-      showToast("success", "Attendance saved successfully.");
-    } catch (error) {
-      console.error("Failed to save attendance:", error);
-      showToast("error", "Failed to save attendance.");
-    } finally {
-      setSaving(false);
-    }
+function AnalyticsView({
+  entryMode,
+  daily,
+  term,
+}: {
+  entryMode: EntryMode;
+  daily: {
+    total: number;
+    present: number;
+    absent: number;
+    late: number;
+    marked: number;
+    unmarked: number;
+    completion: number;
+    attendanceRate: number;
   };
-
-  if (accountLoading || contextLoading || settingsLoading || loading) {
-    return (
-      <State
-        primary={primary}
-        title="Opening Student Attendance..."
-        text="Checking account, branch, academic context, enrollments, and attendance records."
-      />
-    );
-  }
-
-  if (!authenticated || !accountId) {
-    return (
-      <State
-        primary={primary}
-        title="Redirecting to login..."
-        text="You must sign in before recording attendance."
-      />
-    );
-  }
-
-  if (!schoolId || !branchId) {
-    return (
-      <main
-        className="ba-page"
-        style={{ "--ba-primary": primary } as React.CSSProperties}
-      >
-        <style>{css}</style>
-        <section className="ba-state">
-          <h2>No branch workspace selected</h2>
-          <p>
-            Student attendance belongs to the selected branch-admin workspace.
-            Use Select Role again if the wrong branch is active.
-          </p>
-          <button
-            type="button"
-            className="ba-state-button"
-            onClick={() => router.push("/account")}
-          >
-            Go to Account Setup
-          </button>
-        </section>
-      </main>
-    );
-  }
-
+  term: {
+    total: number;
+    completed: number;
+    missing: number;
+    average: number;
+    opened: number;
+    present: number;
+    absent: number;
+    late: number;
+  };
+}) {
   return (
-    <main
-      className="ba-page"
-      style={{ "--ba-primary": primary } as React.CSSProperties}
-    >
-      <style>{css}</style>
-
-      {toast && (
-        <section className={`ba-toast ${toast.tone}`}>
-          {toast.message}
-          <button
-            type="button"
-            onClick={() => setToast(null)}
-            aria-label="Close notification"
-          >
-            ✕
-          </button>
-        </section>
-      )}
-
-      <section
-        className="ba-search-card"
-        aria-label="Student attendance search and actions"
-      >
-        <span
-          className={`status-dot-mini ${fullSummary.completion === 100 && fullSummary.total > 0 ? "green" : fullSummary.marked ? "orange" : "gray"}`}
-          title={`${fullSummary.marked}/${fullSummary.total} marked`}
-        />
-
-        <label className="ba-search">
-          <span>⌕</span>
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search attendance..."
-            aria-label="Search attendance"
+    <section className="ba-analysis-grid">
+      {entryMode === "daily" ? (
+        <>
+          <Analysis title="Present" value={daily.present} />
+          <Analysis title="Absent" value={daily.absent} />
+          <Analysis title="Late" value={daily.late} />
+          <Analysis
+            title="Completion"
+            value={`${daily.completion}%`}
           />
-        </label>
-
-        <button
-          type="button"
-          className="ba-save-inline"
-          onClick={saveAttendance}
-          disabled={saving}
-          aria-label="Save attendance"
-        >
-          {saving ? "..." : "Save"}
-        </button>
-
-        <button
-          type="button"
-          className={`ba-filter-button ${activeFilterCount ? "active" : ""}`}
-          onClick={() => setFilterOpen(true)}
-          aria-label="Open filters"
-          title="Filters"
-        >
-          <SliderIcon />
-          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
-        </button>
-
-        <button
-          type="button"
-          className="ba-icon-button"
-          onClick={() => setMoreOpen(true)}
-          aria-label="More options"
-        >
-          ⋯
-        </button>
-      </section>
-
-      {(classId || academicStructureId || academicPeriodId || date) && (
-        <section className="ba-filter-chips" aria-label="Attendance context">
-          {classId && (
-            <button type="button" onClick={() => setClassId("")}>
-              Class: {selectedClassName} ×
-            </button>
-          )}
-          {academicStructureId && (
-            <button
-              type="button"
-              onClick={() => {
-                setAcademicStructureId("");
-                setAcademicPeriodId("");
-                setClassId("");
-              }}
-            >
-              Structure: {selectedStructureName} ×
-            </button>
-          )}
-          {academicPeriodId && (
-            <button
-              type="button"
-              onClick={() => {
-                setAcademicPeriodId("");
-                setClassId("");
-              }}
-            >
-              Period: {selectedPeriodName} ×
-            </button>
-          )}
-          {date && (
-            <button type="button" onClick={() => setDate(todayISO())}>
-              Date: {date} ×
-            </button>
-          )}
-          {attendanceFilter !== "all" && (
-            <button type="button" onClick={() => setAttendanceFilter("all")}>
-              Status: {statusLabel(attendanceFilter as AttendanceStatus)} ×
-            </button>
-          )}
-        </section>
-      )}
-
-      {viewMode === "summary" && (
-        <section className="ba-analysis-grid attendance-analysis-grid">
-          <AnalysisCard
-            title="Attendance Breakdown"
-            rows={countsByStatus}
-            total={Math.max(1, fullSummary.total)}
+          <Analysis
+            title="Attendance rate"
+            value={`${daily.attendanceRate}%`}
           />
-          <article className="ba-analysis">
-            <span>Attendance Rate</span>
-            <strong>{fullSummary.attendanceRate}%</strong>
-            <p>
-              Present students divided by all enrolled students for this
-              register.
-            </p>
-          </article>
-          <article className="ba-analysis">
-            <span>Completion</span>
-            <strong>{fullSummary.completion}%</strong>
-            <p>
-              {fullSummary.marked}/{fullSummary.total} student(s) marked for{" "}
-              {selectedClassName}.
-            </p>
-          </article>
-          <article className="ba-analysis">
-            <span>Selected Register</span>
-            <strong>{summary.total}</strong>
-            <p>
-              {selectedClassName} · {selectedStructureName} ·{" "}
-              {selectedPeriodName}
-            </p>
-          </article>
-        </section>
+          <Analysis title="Unmarked" value={daily.unmarked} />
+        </>
+      ) : (
+        <>
+          <Analysis
+            title="Completed"
+            value={term.completed}
+          />
+          <Analysis title="Missing" value={term.missing} />
+          <Analysis
+            title="Average attendance"
+            value={`${term.average}%`}
+          />
+          <Analysis title="Days opened" value={term.opened} />
+          <Analysis title="Present" value={term.present} />
+          <Analysis title="Times late" value={term.late} />
+        </>
       )}
-
-      {viewMode === "table" && (
-        <TableView
-          rows={filteredStudents}
-          statusMap={statusMap}
-          setStudentStatus={setStudentStatus}
-          clearStudentStatus={clearStudentStatus}
-        />
-      )}
-
-      {viewMode === "cards" && (
-        <section className="ba-list">
-          {filteredStudents.map(({ student }) => {
-            const studentAny: any = student;
-            const sid = idOf(studentAny.id);
-            const current = statusMap[sid];
-            return (
-              <AttendanceListItem
-                key={String(sid)}
-                student={student}
-                selectedClassName={selectedClassName}
-                date={date}
-                primary={primary}
-                current={current}
-                setStudentStatus={setStudentStatus}
-                clearStudentStatus={clearStudentStatus}
-              />
-            );
-          })}
-
-          {!filteredStudents.length && (
-            <Empty
-              icon="📅"
-              title="No students loaded"
-              text={
-                classId
-                  ? "No students match the current filter."
-                  : "Open filters and select academic structure, period, and class. The register uses enrollments first, then current-class fallback."
-              }
-            />
-          )}
-        </section>
-      )}
-
-      {filterOpen && (
-        <FilterSheet
-          academicStructureId={academicStructureId}
-          academicPeriodId={academicPeriodId}
-          classId={classId}
-          date={date}
-          attendanceFilter={attendanceFilter}
-          academicStructures={academicStructures}
-          filteredPeriods={filteredPeriods}
-          availableClasses={availableClasses}
-          setAcademicStructureId={(value) => {
-            setAcademicStructureId(value);
-            setAcademicPeriodId("");
-            setClassId("");
-          }}
-          setAcademicPeriodId={(value) => {
-            setAcademicPeriodId(value);
-            setClassId("");
-          }}
-          setClassId={setClassId}
-          setDate={setDate}
-          setAttendanceFilter={setAttendanceFilter}
-          clearFilters={clearFilters}
-          onClose={() => setFilterOpen(false)}
-        />
-      )}
-
-      {moreOpen && (
-        <MoreSheet
-          viewMode={viewMode}
-          summary={summary}
-          fullSummary={fullSummary}
-          selectedClassName={selectedClassName}
-          setViewMode={(mode) => {
-            setViewMode(mode);
-            setMoreOpen(false);
-          }}
-          markAll={markAll}
-          clearShown={clearShown}
-          onRefresh={async () => {
-            setMoreOpen(false);
-            await load();
-          }}
-          onClose={() => setMoreOpen(false)}
-        />
-      )}
-    </main>
+    </section>
   );
 }
 
-function State({
-  primary,
+function Analysis({
   title,
-  text,
+  value,
 }: {
-  primary: string;
   title: string;
-  text: string;
+  value: React.ReactNode;
 }) {
   return (
-    <main
-      className="ba-page"
-      style={{ "--ba-primary": primary } as React.CSSProperties}
-    >
-      <style>{css}</style>
-      <section className="ba-state">
-        <div className="ba-spinner" />
-        <h2>{title}</h2>
-        <p>{text}</p>
-      </section>
-    </main>
-  );
-}
-
-function AttendanceListItem({
-  student,
-  selectedClassName,
-  date,
-  primary,
-  current,
-  setStudentStatus,
-  clearStudentStatus,
-}: {
-  student: Student;
-  selectedClassName: string;
-  date: string;
-  primary: string;
-  current?: AttendanceStatus;
-  setStudentStatus: (studentId: string, status: AttendanceStatus) => void;
-  clearStudentStatus: (studentId: string) => void;
-}) {
-  const studentAny: any = student;
-  const sid = idOf(studentAny.id);
-
-  return (
-    <article className="attendance-row">
-      <Avatar
-        name={studentAny.fullName}
-        photo={studentAny.photo}
-        primary={primary}
-      />
-
-      <span className="attendance-main">
-        <strong>{studentAny.fullName || "Unnamed student"}</strong>
-        <small>{studentAny.admissionNumber || "No admission number"}</small>
-        <em>
-          {selectedClassName}
-          {date ? ` · ${date}` : ""}
-        </em>
-      </span>
-
-      <span
-        className="attendance-status-actions"
-        aria-label="Attendance status actions"
-      >
-        <button
-          type="button"
-          className={`present ${current === "present" ? "active" : ""}`}
-          onClick={() => setStudentStatus(sid, "present")}
-        >
-          P
-        </button>
-        <button
-          type="button"
-          className={`absent ${current === "absent" ? "active" : ""}`}
-          onClick={() => setStudentStatus(sid, "absent")}
-        >
-          A
-        </button>
-        <button
-          type="button"
-          className={`late ${current === "late" ? "active" : ""}`}
-          onClick={() => setStudentStatus(sid, "late")}
-        >
-          L
-        </button>
-        <button
-          type="button"
-          className="clear"
-          onClick={() => clearStudentStatus(sid)}
-        >
-          ×
-        </button>
-        <span
-          className={`status-dot-mini ${statusTone(current)}`}
-          title={statusLabel(current)}
-          aria-label={statusLabel(current)}
-        />
-      </span>
+    <article className="ba-analysis">
+      <span>{title}</span>
+      <strong>{value}</strong>
     </article>
   );
 }
 
-function FilterSheet({
-  academicStructureId,
-  academicPeriodId,
-  classId,
-  date,
-  attendanceFilter,
-  academicStructures,
-  filteredPeriods,
-  availableClasses,
-  setAcademicStructureId,
-  setAcademicPeriodId,
-  setClassId,
-  setDate,
-  setAttendanceFilter,
-  clearFilters,
-  onClose,
-}: {
-  academicStructureId: string;
-  academicPeriodId: string;
-  classId: string;
-  date: string;
-  attendanceFilter: AttendanceFilter;
-  academicStructures: AcademicStructure[];
-  filteredPeriods: AcademicPeriod[];
-  availableClasses: Class[];
-  setAcademicStructureId: (value: string) => void;
-  setAcademicPeriodId: (value: string) => void;
-  setClassId: (value: string) => void;
-  setDate: (value: string) => void;
-  setAttendanceFilter: (value: AttendanceFilter) => void;
-  clearFilters: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="ba-sheet">
-        <div className="ba-sheet-head">
-          <div>
-            <h2>Attendance Filters</h2>
-            <p>Select the register context and optional status filter.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close filters">
-            ✕
-          </button>
-        </div>
-
-        <div className="ba-form compact">
-          <label>
-            <span>Academic Structure</span>
-            <select
-              value={academicStructureId}
-              onChange={(event) => setAcademicStructureId(event.target.value)}
-            >
-              <option value="">Select academic structure</option>
-              {academicStructures.map((row: any) => (
-                <option key={String(row.id)} value={String(row.id)}>
-                  {row.name}
-                  {row.level ? ` · ${row.level}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Academic Period</span>
-            <select
-              value={academicPeriodId}
-              onChange={(event) => setAcademicPeriodId(event.target.value)}
-            >
-              <option value="">Select academic period</option>
-              {filteredPeriods.map((row: any) => (
-                <option key={String(row.id)} value={String(row.id)}>
-                  {row.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Class</span>
-            <select
-              value={classId}
-              onChange={(event) => setClassId(event.target.value)}
-            >
-              <option value="">Select class</option>
-              {availableClasses.map((row: any) => (
-                <option key={String(row.id)} value={String(row.id)}>
-                  {row.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Date</span>
-            <input
-              type="date"
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Status</span>
-            <select
-              value={attendanceFilter}
-              onChange={(event) =>
-                setAttendanceFilter(event.target.value as AttendanceFilter)
-              }
-            >
-              <option value="all">All students</option>
-              <option value="present">Present</option>
-              <option value="absent">Absent</option>
-              <option value="late">Late</option>
-              <option value="unmarked">Unmarked</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="ba-sheet-actions">
-          <button type="button" onClick={clearFilters}>
-            Clear Search/Status
-          </button>
-          <button type="button" className="primary" onClick={onClose}>
-            Apply
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function MoreSheet({
-  viewMode,
-  summary,
-  fullSummary,
-  selectedClassName,
-  setViewMode,
-  markAll,
-  clearShown,
-  onRefresh,
-  onClose,
-}: {
-  viewMode: ViewMode;
-  summary: {
-    total: number;
-    marked: number;
-    present: number;
-    absent: number;
-    late: number;
-    unmarked: number;
-    completion: number;
-  };
-  fullSummary: {
-    total: number;
-    present: number;
-    absent: number;
-    late: number;
-    marked: number;
-    completion: number;
-    attendanceRate: number;
-  };
-  selectedClassName: string;
-  setViewMode: (mode: ViewMode) => void;
-  markAll: (status: AttendanceStatus) => void;
-  clearShown: () => void;
-  onRefresh: () => void | Promise<void>;
-  onClose: () => void;
-}) {
-  return (
-    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="ba-sheet small">
-        <div className="ba-sheet-head">
-          <div>
-            <h2>More</h2>
-            <p>
-              {summary.marked}/{summary.total} shown marked ·{" "}
-              {fullSummary.completion}% register completion.
-            </p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close menu">
-            ✕
-          </button>
-        </div>
-
-        <div className="ba-menu-list">
-          <button
-            type="button"
-            className={viewMode === "cards" ? "active" : ""}
-            onClick={() => setViewMode("cards")}
-          >
-            <span>☰</span>
-            <b>List view</b>
-            <small>Compact attendance rows</small>
-          </button>
-          <button
-            type="button"
-            className={viewMode === "table" ? "active" : ""}
-            onClick={() => setViewMode("table")}
-          >
-            <span>☷</span>
-            <b>Table view</b>
-            <small>Dense register for laptop work</small>
-          </button>
-          <button
-            type="button"
-            className={viewMode === "summary" ? "active" : ""}
-            onClick={() => setViewMode("summary")}
-          >
-            <span>◔</span>
-            <b>Analytics</b>
-            <small>Breakdown, rate and completion</small>
-          </button>
-          <button type="button" onClick={() => markAll("present")}>
-            <span>✓</span>
-            <b>Mark shown present</b>
-            <small>{selectedClassName}</small>
-          </button>
-          <button type="button" onClick={() => markAll("absent")}>
-            <span>×</span>
-            <b>Mark shown absent</b>
-            <small>{summary.total} shown student(s)</small>
-          </button>
-          <button type="button" onClick={() => markAll("late")}>
-            <span>◷</span>
-            <b>Mark shown late</b>
-            <small>{summary.total} shown student(s)</small>
-          </button>
-          <button type="button" className="danger" onClick={clearShown}>
-            <span>⌫</span>
-            <b>Clear shown</b>
-            <small>Remove local marks before saving</small>
-          </button>
-          <button type="button" onClick={onRefresh}>
-            <span>↻</span>
-            <b>Refresh</b>
-            <small>Reload local branch attendance</small>
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function TableView({
+function DailyTable({
   rows,
-  statusMap,
-  setStudentStatus,
-  clearStudentStatus,
+  drafts,
+  setStatus,
+  clearStatus,
+  primary,
+  editable,
 }: {
-  rows: StudentRow[];
-  statusMap: AttendanceMap;
-  setStudentStatus: (studentId: string, status: AttendanceStatus) => void;
-  clearStudentStatus: (studentId: string) => void;
+  rows: StudentView[];
+  drafts: DailyDraftMap;
+  setStatus: (
+    studentId: string,
+    status: AttendanceStatus,
+  ) => void;
+  clearStatus: (studentId: string) => void;
+  primary: string;
+  editable: boolean;
 }) {
   return (
     <section className="ba-table-card">
@@ -1509,74 +1737,57 @@ function TableView({
             <tr>
               <th>Students ({rows.length})</th>
               <th>Admission No.</th>
-              <th>Gender</th>
-              <th>Enrollment</th>
-              <th>Existing Row</th>
               <th>Status</th>
-              <th>Actions</th>
+              <th>Entry</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ student, enrollment, existingAttendance, source }) => {
-              const studentAny: any = student;
-              const sid = idOf(studentAny.id);
-              const current = statusMap[sid];
+            {rows.map((item) => {
+              const current = drafts[item.id];
+
               return (
-                <tr key={String(sid)}>
+                <tr key={item.id}>
                   <td>
-                    <strong>{studentAny.fullName}</strong>
-                    <span>{studentAny.address || "No address"}</span>
+                    <div className="table-student">
+                      <Avatar
+                        name={item.name}
+                        photo={item.photo}
+                        primary={primary}
+                      />
+                      <strong>{item.name}</strong>
+                    </div>
                   </td>
-                  <td>{studentAny.admissionNumber || "—"}</td>
-                  <td>{studentAny.gender || "—"}</td>
+                  <td>{item.admissionNumber}</td>
+                  <td>{statusLabel(current)}</td>
                   <td>
-                    <strong>
-                      {enrollment
-                        ? String((enrollment as any).status || "active")
-                        : "current class"}
-                    </strong>
-                    <span>
-                      {enrollment
-                        ? `Enrollment #${(enrollment as any).id || "—"}`
-                        : source === "currentClass"
-                          ? "Current class fallback"
-                          : "—"}
-                    </span>
-                  </td>
-                  <td>
-                    {(existingAttendance as any)?.id ? "Saved before" : "New"}
-                  </td>
-                  <td>
-                    <Chip tone={statusTone(current)}>
-                      {statusLabel(current)}
-                    </Chip>
-                  </td>
-                  <td>
-                    <div className="ba-table-actions">
+                    <div className="table-actions">
+                      {(
+                        [
+                          "present",
+                          "absent",
+                          "late",
+                        ] as AttendanceStatus[]
+                      ).map((status) => (
+                        <button
+                          type="button"
+                          key={status}
+                          disabled={!editable}
+                          className={
+                            current === status ? "active" : ""
+                          }
+                          onClick={() =>
+                            setStatus(item.id, status)
+                          }
+                        >
+                          {status.slice(0, 1).toUpperCase()}
+                        </button>
+                      ))}
                       <button
                         type="button"
-                        onClick={() => setStudentStatus(sid, "present")}
+                        disabled={!editable}
+                        onClick={() => clearStatus(item.id)}
                       >
-                        Present
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setStudentStatus(sid, "absent")}
-                      >
-                        Absent
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setStudentStatus(sid, "late")}
-                      >
-                        Late
-                      </button>
-                      <button
-                        type="button"
-                        className="ba-delete"
-                        onClick={() => clearStudentStatus(sid)}
-                      >
-                        Clear
+                        ×
                       </button>
                     </div>
                   </td>
@@ -1585,169 +1796,1378 @@ function TableView({
             })}
           </tbody>
         </table>
-        {!rows.length && (
-          <div className="ba-empty-table">
-            No students match this register/filter.
-          </div>
-        )}
       </div>
     </section>
   );
 }
 
-function AnalysisCard({
-  title,
+function TermTable({
   rows,
-  total,
+  drafts,
+  updateDraft,
+  primary,
+  editable,
 }: {
-  title: string;
-  rows: { label: string; value: number }[];
-  total: number;
+  rows: StudentView[];
+  drafts: TermDraftMap;
+  updateDraft: (
+    studentId: string,
+    field: "daysOpened" | "daysPresent" | "timesLate",
+    value: number,
+  ) => void;
+  primary: string;
+  editable: boolean;
 }) {
   return (
-    <article className="ba-analysis">
-      <span>{title}</span>
-      <strong>{rows.reduce((sum, row) => sum + row.value, 0)}</strong>
-      <div className="ba-analysis-list">
-        {rows.map((row) => {
-          const share = total ? Math.round((row.value / total) * 100) : 0;
-          return (
-            <section key={row.label}>
-              <div>
-                <b>{row.label}</b>
-                <small>
-                  {row.value} · {share}%
-                </small>
-              </div>
-              <div className="ba-progress">
-                <i style={{ width: `${Math.max(4, share)}%` }} />
-              </div>
-            </section>
-          );
-        })}
+    <section className="ba-table-card">
+      <div className="ba-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Students ({rows.length})</th>
+              <th>Opened</th>
+              <th>Present</th>
+              <th>Absent</th>
+              <th>Late</th>
+              <th>Attendance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((item) => {
+              const draft =
+                drafts[item.id] || normalizeTermDraft();
+
+              return (
+                <tr key={item.id}>
+                  <td>
+                    <div className="table-student">
+                      <Avatar
+                        name={item.name}
+                        photo={item.photo}
+                        primary={primary}
+                      />
+                      <span>
+                        <strong>{item.name}</strong>
+                        <small>{item.admissionNumber}</small>
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <input
+                      className="table-number"
+                      type="number"
+                      min={0}
+                      value={draft.daysOpened}
+                      disabled={!editable}
+                      onChange={(event) =>
+                        updateDraft(
+                          item.id,
+                          "daysOpened",
+                          Number(event.target.value),
+                        )
+                      }
+                    />
+                  </td>
+                  <td>
+                    <input
+                      className="table-number"
+                      type="number"
+                      min={0}
+                      value={draft.daysPresent}
+                      disabled={!editable}
+                      onChange={(event) =>
+                        updateDraft(
+                          item.id,
+                          "daysPresent",
+                          Number(event.target.value),
+                        )
+                      }
+                    />
+                  </td>
+                  <td>
+                    <input
+                      className="table-number"
+                      type="number"
+                      value={draft.daysAbsent}
+                      readOnly
+                    />
+                  </td>
+                  <td>
+                    <input
+                      className="table-number"
+                      type="number"
+                      min={0}
+                      value={draft.timesLate}
+                      disabled={!editable}
+                      onChange={(event) =>
+                        updateDraft(
+                          item.id,
+                          "timesLate",
+                          Number(event.target.value),
+                        )
+                      }
+                    />
+                  </td>
+                  <td>
+                    <strong>
+                      {draft.attendancePercent}%
+                    </strong>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
-    </article>
+    </section>
+  );
+}
+
+function FilterSheet(props: {
+  entryMode: EntryMode;
+  structureId: string;
+  periodId: string;
+  classId: string;
+  date: string;
+  statusFilter: AttendanceFilter;
+  structures: AcademicStructure[];
+  periods: AcademicPeriod[];
+  classes: Class[];
+  bulkDaysOpened: string;
+  bulkScope: BulkScope;
+  onEntryMode: (value: EntryMode) => void;
+  onStructure: (value: string) => void;
+  onPeriod: (value: string) => void;
+  onClass: (value: string) => void;
+  onDate: (value: string) => void;
+  onStatus: (value: AttendanceFilter) => void;
+  onBulkDaysOpened: (value: string) => void;
+  onBulkScope: (value: BulkScope) => void;
+  onApplyBulkDaysOpened: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Sheet
+      title="Attendance Setup"
+      text="Choose the register type and working context."
+      onClose={props.onClose}
+    >
+      <div className="filter-section">
+        <span className="filter-section-label">
+          Register Type
+        </span>
+
+        <section className="mode-switch">
+          <button
+            type="button"
+            className={
+              props.entryMode === "daily" ? "active" : ""
+            }
+            onClick={() => props.onEntryMode("daily")}
+          >
+            <strong>Daily Register</strong>
+            <small>Present, absent and late by date</small>
+          </button>
+
+          <button
+            type="button"
+            className={
+              props.entryMode === "termTotals"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              props.onEntryMode("termTotals")
+            }
+          >
+            <strong>Term Totals</strong>
+            <small>Opened, present, absent and late</small>
+          </button>
+        </section>
+      </div>
+
+      <div className="ba-form">
+        <Field label="Academic Structure">
+          <select
+            value={props.structureId}
+            onChange={(event) =>
+              props.onStructure(event.target.value)
+            }
+          >
+            <option value="">Select structure</option>
+            {props.structures.map((row: any) => (
+              <option
+                key={idOf(row.id)}
+                value={idOf(row.id)}
+              >
+                {row.name || "Unnamed"}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="Academic Period">
+          <select
+            value={props.periodId}
+            onChange={(event) =>
+              props.onPeriod(event.target.value)
+            }
+          >
+            <option value="">Select period</option>
+            {props.periods.map((row: any) => (
+              <option
+                key={idOf(row.id)}
+                value={idOf(row.id)}
+              >
+                {row.name || "Unnamed"}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="Class">
+          <select
+            value={props.classId}
+            onChange={(event) =>
+              props.onClass(event.target.value)
+            }
+          >
+            <option value="">Select class</option>
+            {props.classes.map((row: any) => (
+              <option
+                key={idOf(row.id)}
+                value={idOf(row.id)}
+              >
+                {row.name || "Unnamed"}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        {props.entryMode === "daily" ? (
+          <>
+            <Field label="Date">
+              <input
+                type="date"
+                value={props.date}
+                onChange={(event) =>
+                  props.onDate(event.target.value)
+                }
+              />
+            </Field>
+
+            <Field label="Status">
+              <select
+                value={props.statusFilter}
+                onChange={(event) =>
+                  props.onStatus(
+                    event.target.value as AttendanceFilter,
+                  )
+                }
+              >
+                <option value="all">All students</option>
+                <option value="present">Present</option>
+                <option value="absent">Absent</option>
+                <option value="late">Late</option>
+                <option value="unmarked">Unmarked</option>
+              </select>
+            </Field>
+          </>
+        ) : (
+          <>
+            <Field label="Days Opened">
+              <input
+                type="number"
+                min={0}
+                value={props.bulkDaysOpened}
+                onChange={(event) =>
+                  props.onBulkDaysOpened(
+                    event.target.value,
+                  )
+                }
+                placeholder="e.g. 65"
+              />
+            </Field>
+
+            <Field label="Apply To">
+              <select
+                value={props.bulkScope}
+                onChange={(event) =>
+                  props.onBulkScope(
+                    event.target.value as BulkScope,
+                  )
+                }
+              >
+                <option value="all">All students</option>
+                <option value="shown">
+                  Shown students
+                </option>
+              </select>
+            </Field>
+
+            <button
+              type="button"
+              className="ba-sheet-action"
+              onClick={props.onApplyBulkDaysOpened}
+            >
+              Apply Days Opened
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="ba-sheet-footer">
+        <button
+          type="button"
+          className="primary"
+          onClick={props.onClose}
+        >
+          Apply
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
+function MoreSheet(props: {
+  entryMode: EntryMode;
+  viewMode: ViewMode;
+  canEdit: boolean;
+  onViewMode: (value: ViewMode) => void;
+  onMarkAll: (status: AttendanceStatus) => void;
+  onClearShown: () => void;
+  onOpenBulkDays: () => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Sheet
+      title="More"
+      text="Change views, use bulk actions or refresh."
+      onClose={props.onClose}
+    >
+      <section className="more-section">
+        <span>View</span>
+        <div className="more-grid">
+          {(
+            [
+              ["cards", "Cards"],
+              ["table", "Table"],
+              ["analytics", "Analytics"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              type="button"
+              key={value}
+              className={
+                props.viewMode === value ? "active" : ""
+              }
+              onClick={() => props.onViewMode(value)}
+            >
+              <strong>{label}</strong>
+              <small>
+                {value === "cards"
+                  ? "Compact mobile-first rows"
+                  : value === "table"
+                    ? "Dense desktop register"
+                    : "Attendance summary"}
+              </small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {props.entryMode === "daily" ? (
+        <section className="more-section">
+          <span>Daily Actions</span>
+          <div className="more-actions">
+            <button
+              type="button"
+              disabled={!props.canEdit}
+              onClick={() => props.onMarkAll("present")}
+            >
+              Mark shown present
+            </button>
+            <button
+              type="button"
+              disabled={!props.canEdit}
+              onClick={() => props.onMarkAll("absent")}
+            >
+              Mark shown absent
+            </button>
+            <button
+              type="button"
+              disabled={!props.canEdit}
+              onClick={() => props.onMarkAll("late")}
+            >
+              Mark shown late
+            </button>
+            <button
+              type="button"
+              disabled={!props.canEdit}
+              onClick={props.onClearShown}
+            >
+              Clear shown
+            </button>
+          </div>
+        </section>
+      ) : (
+        <section className="more-section">
+          <span>Term Actions</span>
+          <div className="more-actions">
+            <button
+              type="button"
+              disabled={!props.canEdit}
+              onClick={props.onOpenBulkDays}
+            >
+              Set days opened
+            </button>
+            <button
+              type="button"
+              disabled={!props.canEdit}
+              onClick={props.onClearShown}
+            >
+              Clear shown totals
+            </button>
+          </div>
+        </section>
+      )}
+
+      <section className="more-section">
+        <span>System</span>
+        <div className="more-actions">
+          <button
+            type="button"
+            onClick={props.onRefresh}
+          >
+            Refresh attendance
+          </button>
+        </div>
+      </section>
+    </Sheet>
+  );
+}
+
+function StatusSheet({
+  entryMode,
+  daily,
+  term,
+  onClose,
+}: {
+  entryMode: EntryMode;
+  daily: {
+    total: number;
+    present: number;
+    absent: number;
+    late: number;
+    marked: number;
+    unmarked: number;
+    completion: number;
+    attendanceRate: number;
+  };
+  term: {
+    total: number;
+    completed: number;
+    missing: number;
+    average: number;
+    opened: number;
+    present: number;
+    absent: number;
+    late: number;
+  };
+  onClose: () => void;
+}) {
+  return (
+    <Sheet
+      title="Attendance Status"
+      text={
+        entryMode === "daily"
+          ? "Current daily register progress."
+          : "Current term totals progress."
+      }
+      onClose={onClose}
+    >
+      <div className="status-list">
+        {entryMode === "daily" ? (
+          <>
+            <StatusLine
+              label="Students"
+              value={daily.total}
+            />
+            <StatusLine
+              label="Marked"
+              value={daily.marked}
+            />
+            <StatusLine
+              label="Unmarked"
+              value={daily.unmarked}
+            />
+            <StatusLine
+              label="Present"
+              value={daily.present}
+            />
+            <StatusLine
+              label="Absent"
+              value={daily.absent}
+            />
+            <StatusLine
+              label="Late"
+              value={daily.late}
+            />
+            <StatusLine
+              label="Completion"
+              value={`${daily.completion}%`}
+            />
+          </>
+        ) : (
+          <>
+            <StatusLine
+              label="Students"
+              value={term.total}
+            />
+            <StatusLine
+              label="Completed"
+              value={term.completed}
+            />
+            <StatusLine
+              label="Missing"
+              value={term.missing}
+            />
+            <StatusLine
+              label="Average attendance"
+              value={`${term.average}%`}
+            />
+            <StatusLine
+              label="Times late"
+              value={term.late}
+            />
+          </>
+        )}
+      </div>
+    </Sheet>
+  );
+}
+
+function StatusLine({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function Sheet({
+  title,
+  text,
+  children,
+  onClose,
+}: {
+  title: string;
+  text: string;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="ba-sheet-backdrop"
+      role="presentation"
+      onMouseDown={onClose}
+    >
+      <section
+        className="ba-sheet"
+        role="dialog"
+        aria-modal="true"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="ba-sheet-head">
+          <div>
+            <h2>{title}</h2>
+            <p>{text}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={`Close ${title}`}
+          >
+            ×
+          </button>
+        </div>
+
+        {children}
+      </section>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label>
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function RouteState({
+  primary,
+  title,
+  text,
+  action,
+}: {
+  primary: string;
+  title: string;
+  text: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <main
+      className="ba-page"
+      style={
+        {
+          "--ba-primary": primary,
+        } as React.CSSProperties
+      }
+    >
+      <style>{css}</style>
+      <section className="ba-state">
+        <h2>{title}</h2>
+        <p>{text}</p>
+        {action}
+      </section>
+    </main>
   );
 }
 
 const css = `
-@keyframes spin { to { transform: rotate(360deg); } }
-
-.ba-page {
-  --ease: cubic-bezier(.2,.8,.2,1);
-  min-height: 100dvh;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  padding: calc(8px * var(--local-density-scale, 1));
-  padding-bottom: max(40px, env(safe-area-inset-bottom));
-  background: radial-gradient(circle at top left, color-mix(in srgb, var(--ba-primary) 9%, transparent), transparent 30rem), var(--bg, #f7f8fb);
-  color: var(--text, #111827);
-  font-family: var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  font-size: var(--font-size, 14px);
-  overflow-x: hidden;
+.ba-page{
+  --ba-page-bg:var(--bg,var(--background,#f7f8fb));
+  --ba-surface:var(--surface,var(--card,var(--background,#fff)));
+  --ba-surface-2:var(--surface-2,var(--muted-surface,color-mix(in srgb,var(--ba-surface) 92%,var(--ba-text) 8%)));
+  --ba-text:var(--text,var(--foreground,#172033));
+  --ba-muted:var(--muted,color-mix(in srgb,var(--ba-text) 62%,transparent));
+  --ba-border:var(--border,color-mix(in srgb,var(--ba-text) 14%,transparent));
+  --ba-soft:color-mix(in srgb,var(--ba-text) 6%,transparent);
+  color:var(--ba-text);
+  background:var(--ba-page-bg);
+  color-scheme:light dark;
+  display:grid;
+  gap:10px;
+  padding:clamp(8px,1.8vw,16px);
+  min-width:0;
 }
-.ba-page *, .ba-page *::before, .ba-page *::after { box-sizing: border-box; min-width: 0; }
-.ba-page button, .ba-page input, .ba-page select, .ba-page textarea { font: inherit; max-width: 100%; }
-.ba-page button { -webkit-tap-highlight-color: transparent; }
-.ba-page input, .ba-page select, .ba-page textarea { width: 100%; min-height: 44px; border: 1px solid var(--input-border, var(--border, rgba(0,0,0,.10))); border-radius: 16px; padding: 0 12px; background: var(--input-bg, var(--surface, #fff)); color: var(--input-text, var(--text, #111827)); outline: none; font-weight: 750; }
-.ba-page input:focus, .ba-page select:focus, .ba-page textarea:focus { border-color: color-mix(in srgb, var(--ba-primary) 52%, var(--border, rgba(0,0,0,.10))); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ba-primary) 12%, transparent); }
+.ba-search-card{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto auto auto;
+  align-items:center;
+  gap:6px;
+  min-width:0;
+}
+.status-dot-mini{
+  width:10px;
+  height:10px;
+  border:0;
+  border-radius:999px;
+  padding:0;
+  flex:0 0 auto;
+  background:#94a3b8;
+  box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent);
+}
+button.status-dot-mini{cursor:pointer}
+.status-dot-mini.green{background:#22c55e}
+.status-dot-mini.orange{background:#f59e0b}
+.status-dot-mini.red{background:#ef4444}
+.status-dot-mini.gray{background:#94a3b8}
+.ba-search{
+  height:38px;
+  min-width:0;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  padding:0 10px;
+  border:1px solid var(--ba-border);
+  border-radius:12px;
+  background:var(--ba-surface);
+}
+.ba-search>span{
+  font-size:19px;
+  line-height:1;
+  opacity:.55;
+  transform:translateY(-1px);
+}
+.ba-search input{
+  width:100%;
+  min-width:0;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:inherit;
+  font:inherit;
+  font-size:12px;
+}
+.ba-save-inline,.ba-filter-button,.ba-icon-button{
+  height:38px;
+  border:1px solid var(--ba-border);
+  border-radius:11px;
+  background:var(--ba-surface);
+  color:inherit;
+  font:inherit;
+  font-size:10px;
+  font-weight:850;
+  cursor:pointer;
+}
+.ba-save-inline{
+  padding:0 12px;
+  color:var(--ba-primary);
+}
+.ba-save-inline:disabled{opacity:.45;cursor:not-allowed}
+.ba-filter-button,.ba-icon-button{
+  width:38px;
+  display:grid;
+  place-items:center;
+  position:relative;
+}
+.ba-filter-button.active{
+  color:var(--ba-primary);
+  border-color:color-mix(in srgb,var(--ba-primary) 34%,transparent);
+}
+.ba-filter-button b{
+  position:absolute;
+  top:-5px;
+  right:-5px;
+  min-width:16px;
+  height:16px;
+  display:grid;
+  place-items:center;
+  padding:0 3px;
+  border-radius:999px;
+  background:var(--ba-primary);
+  color:#fff;
+  font-size:8px;
+}
+.ba-slider-icon{
+  width:17px;
+  height:17px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.8;
+  stroke-linecap:round;
+}
+.ba-icon-button{font-size:18px;line-height:1}
+.ba-filter-chips{
+  display:flex;
+  gap:5px;
+  flex-wrap:wrap;
+}
+.ba-filter-chips span{
+  border:1px solid var(--ba-border);
+  border-radius:999px;
+  background:var(--ba-surface);
+  padding:4px 8px;
+  font-size:8.5px;
+  font-weight:750;
+  color:var(--ba-muted);
+}
+.ba-list{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(min(100%,310px),1fr));
+  gap:7px;
+}
+.attendance-row,.term-row{
+  min-width:0;
+  border:1px solid var(--ba-border);
+  border-radius:13px;
+  background:var(--ba-surface);
+}
+.attendance-row{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:center;
+  gap:8px;
+  padding:8px;
+}
+.ba-avatar{
+  width:34px;
+  height:34px;
+  border-radius:10px;
+  display:grid;
+  place-items:center;
+  color:#fff;
+  font-size:12px;
+  font-weight:900;
+  flex:0 0 auto;
+}
+.attendance-main{
+  min-width:0;
+  display:grid;
+  gap:1px;
+}
+.attendance-main strong,.term-student strong{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:10.5px;
+}
+.attendance-main small,.term-student small{
+  color:var(--ba-muted);
+  font-size:8.5px;
+}
+.attendance-main em{
+  color:var(--ba-muted);
+  font-size:7.5px;
+  font-style:normal;
+}
+.attendance-status-actions{
+  display:flex;
+  align-items:center;
+  gap:4px;
+}
+.attendance-status-actions button{
+  width:27px;
+  height:27px;
+  border:1px solid var(--ba-border);
+  border-radius:8px;
+  background:transparent;
+  color:var(--ba-muted);
+  font-size:9px;
+  font-weight:900;
+  cursor:pointer;
+}
+.attendance-status-actions button:disabled{opacity:.45;cursor:not-allowed}
+.attendance-status-actions button.present.active{
+  color:#15803d;
+  border-color:color-mix(in srgb,#22c55e 45%,transparent);
+  background:color-mix(in srgb,#22c55e 10%,transparent);
+}
+.attendance-status-actions button.absent.active{
+  color:#b91c1c;
+  border-color:color-mix(in srgb,#ef4444 45%,transparent);
+  background:color-mix(in srgb,#ef4444 10%,transparent);
+}
+.attendance-status-actions button.late.active{
+  color:#b45309;
+  border-color:color-mix(in srgb,#f59e0b 45%,transparent);
+  background:color-mix(in srgb,#f59e0b 10%,transparent);
+}
+.attendance-status-actions button.clear{font-size:13px}
+.attendance-status-actions .status-dot-mini{
+  width:7px;
+  height:7px;
+  margin-left:1px;
+}
+.term-row{padding:8px}
+.term-student{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:center;
+  gap:8px;
+  margin-bottom:8px;
+}
+.term-student>span{
+  min-width:0;
+  display:grid;
+}
+.term-student>b{
+  color:var(--ba-primary);
+  font-size:12px;
+}
+.term-input-grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:6px;
+}
+.term-input-grid label{
+  min-width:0;
+  display:grid;
+  gap:3px;
+}
+.term-input-grid label span{
+  color:var(--ba-muted);
+  font-size:7.5px;
+  font-weight:800;
+  text-transform:uppercase;
+}
+.term-input-grid input{
+  width:100%;
+  min-width:0;
+  box-sizing:border-box;
+  border:1px solid var(--ba-border);
+  border-radius:8px;
+  background:var(--ba-soft);
+  color:inherit;
+  padding:7px 5px;
+  font:inherit;
+  font-size:9px;
+}
+.ba-table-card{
+  border:1px solid var(--ba-border);
+  border-radius:13px;
+  overflow:hidden;
+  background:var(--ba-surface);
+}
+.ba-table-scroll{overflow:auto}
+.ba-table-scroll table{
+  width:100%;
+  min-width:690px;
+  border-collapse:collapse;
+  font-size:9px;
+}
+.ba-table-scroll th,.ba-table-scroll td{
+  text-align:left;
+  padding:8px;
+  border-bottom:1px solid var(--ba-border);
+}
+.ba-table-scroll th{
+  color:var(--ba-muted);
+  font-size:8px;
+  text-transform:uppercase;
+  letter-spacing:.03em;
+}
+.table-student{
+  display:flex;
+  align-items:center;
+  gap:7px;
+}
+.table-student .ba-avatar{
+  width:28px;
+  height:28px;
+  border-radius:8px;
+}
+.table-student>span{
+  display:grid;
+}
+.table-student small{
+  color:var(--ba-muted);
+  font-size:7.5px;
+}
+.table-actions{
+  display:flex;
+  gap:4px;
+}
+.table-actions button{
+  min-width:26px;
+  height:26px;
+  border:1px solid var(--ba-border);
+  border-radius:7px;
+  background:transparent;
+  color:inherit;
+  font-size:8px;
+  font-weight:900;
+}
+.table-actions button.active{
+  color:#fff;
+  border-color:var(--ba-primary);
+  background:var(--ba-primary);
+}
+.table-number{
+  width:68px;
+  border:1px solid var(--ba-border);
+  border-radius:7px;
+  background:var(--ba-soft);
+  color:inherit;
+  padding:6px;
+  font:inherit;
+  font-size:9px;
+}
+.ba-analysis-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(135px,1fr));
+  gap:7px;
+}
+.ba-analysis{
+  border:1px solid var(--ba-border);
+  border-radius:12px;
+  background:var(--ba-surface);
+  padding:10px;
+  display:grid;
+  gap:4px;
+}
+.ba-analysis span{
+  color:var(--ba-muted);
+  font-size:8px;
+  font-weight:800;
+  text-transform:uppercase;
+}
+.ba-analysis strong{
+  color:var(--ba-primary);
+  font-size:17px;
+}
+.ba-empty,.ba-state{
+  min-height:220px;
+  display:grid;
+  place-items:center;
+  align-content:center;
+  gap:6px;
+  text-align:center;
+  padding:24px;
+  border:1px dashed var(--ba-border);
+  border-radius:15px;
+}
+.ba-empty-icon{font-size:26px}
+.ba-empty h3,.ba-state h2{
+  margin:0;
+  font-size:14px;
+}
+.ba-empty p,.ba-state p{
+  max-width:440px;
+  margin:0;
+  color:var(--ba-muted);
+  font-size:9.5px;
+  line-height:1.6;
+}
+.ba-state-button{
+  margin-top:8px;
+  border:0;
+  border-radius:10px;
+  background:var(--ba-primary);
+  color:#fff;
+  padding:9px 12px;
+  font-size:9px;
+  font-weight:850;
+}
+.ba-toast{
+  position:sticky;
+  top:8px;
+  z-index:60;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  border:1px solid var(--ba-border);
+  border-radius:11px;
+  background:var(--ba-surface);
+  padding:9px 11px;
+  font-size:9px;
+  font-weight:750;
+}
+.ba-toast.success{border-color:color-mix(in srgb,#22c55e 38%,transparent)}
+.ba-toast.error{border-color:color-mix(in srgb,#ef4444 38%,transparent)}
+.ba-toast.info{border-color:color-mix(in srgb,var(--ba-primary) 38%,transparent)}
+.ba-toast button{
+  border:0;
+  background:transparent;
+  color:inherit;
+  font-size:16px;
+}
+.ba-sheet-backdrop{
+  position:fixed;
+  inset:0;
+  z-index:100;
+  display:grid;
+  place-items:end center;
+  padding:8px;
+  background:rgba(15,23,42,.58);
+}
+.ba-sheet{
+  width:min(580px,100%);
+  max-height:92vh;
+  overflow:auto;
+  border:1px solid var(--ba-border);
+  border-radius:20px 20px 12px 12px;
+  background:var(--ba-surface);
+  color:var(--ba-text);
+  padding:12px;
+  box-sizing:border-box;
+}
+.ba-sheet-head{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:10px;
+  padding-bottom:10px;
+  border-bottom:1px solid var(--ba-border);
+}
+.ba-sheet-head h2{
+  margin:0;
+  font-size:13px;
+}
+.ba-sheet-head p{
+  margin:2px 0 0;
+  color:var(--ba-muted);
+  font-size:8.5px;
+}
+.ba-sheet-head>button{
+  width:30px;
+  height:30px;
+  border:1px solid var(--ba-border);
+  border-radius:9px;
+  background:transparent;
+  color:inherit;
+  font-size:17px;
+}
+.filter-section,.more-section{
+  display:grid;
+  gap:7px;
+  padding:11px 0;
+}
+.filter-section-label,.more-section>span{
+  color:var(--ba-muted);
+  font-size:8px;
+  font-weight:900;
+  text-transform:uppercase;
+}
+.mode-switch,.more-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px;
+}
+.mode-switch button,.more-grid button{
+  min-width:0;
+  display:grid;
+  gap:2px;
+  text-align:left;
+  border:1px solid var(--ba-border);
+  border-radius:11px;
+  background:transparent;
+  color:inherit;
+  padding:9px;
+}
+.mode-switch button.active,.more-grid button.active{
+  border-color:color-mix(in srgb,var(--ba-primary) 42%,transparent);
+  background:color-mix(in srgb,var(--ba-primary) 8%,transparent);
+}
+.mode-switch strong,.more-grid strong{
+  font-size:9.5px;
+}
+.mode-switch small,.more-grid small{
+  color:var(--ba-muted);
+  font-size:7.5px;
+}
+.ba-form{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+}
+.ba-form label{
+  min-width:0;
+  display:grid;
+  gap:4px;
+}
+.ba-form label>span{
+  color:var(--ba-muted);
+  font-size:8px;
+  font-weight:850;
+  text-transform:uppercase;
+}
+.ba-form select,.ba-form input{
+  width:100%;
+  box-sizing:border-box;
+  border:1px solid var(--ba-border);
+  border-radius:9px;
+  background:var(--ba-surface);
+  color:inherit;
+  padding:9px;
+  font:inherit;
+  font-size:9px;
+}
+.ba-sheet-action{
+  align-self:end;
+  min-height:34px;
+  border:1px solid color-mix(in srgb,var(--ba-primary) 38%,transparent);
+  border-radius:9px;
+  background:color-mix(in srgb,var(--ba-primary) 8%,transparent);
+  color:var(--ba-primary);
+  font-size:8.5px;
+  font-weight:850;
+}
+.ba-sheet-footer{
+  display:flex;
+  justify-content:flex-end;
+  padding-top:12px;
+}
+.ba-sheet-footer button{
+  border:1px solid var(--ba-border);
+  border-radius:9px;
+  background:transparent;
+  color:inherit;
+  padding:9px 13px;
+  font-size:8.5px;
+  font-weight:850;
+}
+.ba-sheet-footer button.primary{
+  border-color:var(--ba-primary);
+  background:var(--ba-primary);
+  color:#fff;
+}
+.more-actions{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px;
+}
+.more-actions button{
+  min-height:36px;
+  border:1px solid var(--ba-border);
+  border-radius:9px;
+  background:transparent;
+  color:inherit;
+  padding:8px;
+  text-align:left;
+  font-size:8.5px;
+  font-weight:750;
+}
+.more-actions button:disabled{opacity:.45}
+.status-list{
+  display:grid;
+  gap:0;
+  padding-top:7px;
+}
+.status-list>div{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding:9px 1px;
+  border-bottom:1px solid var(--ba-border);
+  font-size:9px;
+}
+.status-list span{color:var(--ba-muted)}
+.status-list strong{color:var(--ba-primary)}
+@media(max-width:640px){
+  .ba-page{padding:7px;gap:8px}
+  .ba-search-card{gap:4px}
+  .ba-search{height:36px;padding:0 8px}
+  .ba-save-inline,.ba-filter-button,.ba-icon-button{height:36px}
+  .ba-filter-button,.ba-icon-button{width:36px}
+  .attendance-row{
+    grid-template-columns:auto minmax(0,1fr);
+  }
+  .attendance-status-actions{
+    grid-column:1/-1;
+    justify-content:flex-end;
+  }
+  .term-input-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ba-form,.mode-switch,.more-grid,.more-actions{
+    grid-template-columns:1fr;
+  }
+}
 
-.ba-state, .ba-search-card, .ba-table-card, .ba-analysis, .ba-empty, .ba-sheet, .attendance-row { background: var(--card-bg, var(--surface, #fff)); border: 1px solid var(--border, rgba(0,0,0,.10)); box-shadow: 0 12px 28px rgba(15,23,42,.045); }
-.ba-state { min-height: min(420px, calc(100dvh - 32px)); width: min(520px, 100%); margin: 0 auto; display: grid; place-items: center; align-content: center; gap: 10px; padding: 22px; border-radius: 28px; text-align: center; }
-.ba-spinner { width: 38px; height: 38px; border-radius: 999px; border: 4px solid color-mix(in srgb, var(--ba-primary) 18%, transparent); border-top-color: var(--ba-primary); animation: spin .8s linear infinite; }
-.ba-state h2 { margin: 0; font-size: 22px; font-weight: 1000; letter-spacing: -.04em; }
-.ba-state p { max-width: 34rem; margin: 0; color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; }
-.ba-state-button { min-height: 42px; border: 0; border-radius: 999px; padding: 0 16px; background: var(--ba-primary); color: #fff; font-weight: 950; cursor: pointer; }
-.ba-toast { position: sticky; top: 8px; z-index: 40; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; padding: 12px 14px; border-radius: 18px; font-size: 13px; font-weight: 850; box-shadow: 0 18px 40px rgba(15,23,42,.12); }
-.ba-toast.success { background: rgba(34,197,94,.14); color: #166534; }
-.ba-toast.error { background: rgba(239,68,68,.12); color: #991b1b; }
-.ba-toast.info { background: rgba(59,130,246,.13); color: #1d4ed8; }
-.ba-toast button { border: 0; background: transparent; color: currentColor; font-weight: 1000; cursor: pointer; }
+/* ======================================================
+   THEME / DARK-MODE ALIGNMENT
+   Mirrors the semantic surface system used by Subjects.tsx.
+   ====================================================== */
+.ba-search,
+.ba-save-inline,
+.ba-filter-button,
+.ba-icon-button,
+.attendance-row,
+.term-row,
+.ba-table-card,
+.ba-analysis,
+.ba-sheet,
+.ba-state,
+.ba-toast{
+  background:var(--ba-surface);
+  color:var(--ba-text);
+  border-color:var(--ba-border);
+}
 
-.ba-search-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; margin-top: 2px; padding: 8px; border-radius: 24px; }
-.ba-search { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; padding: 0 11px; border-radius: 18px; background: color-mix(in srgb, var(--muted,#64748b) 7%, transparent); }
-.ba-search span { color: var(--muted,#64748b); font-size: 17px; font-weight: 1000; }
-.ba-search input { min-height: 42px; border: 0; padding: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 14px; }
-.ba-icon-button, .ba-filter-button, .ba-save-inline { height: 42px; border: 1px solid var(--border, rgba(0,0,0,.10)); border-radius: 999px; display: grid; place-items: center; background: var(--card-bg, var(--surface,#fff)); color: var(--text,#111827); font-size: 18px; font-weight: 1000; cursor: pointer; box-shadow: 0 10px 22px rgba(15,23,42,.045); }
-.ba-icon-button, .ba-filter-button { width: 42px; }
-.ba-save-inline { min-width: 58px; padding: 0 12px; border-color: var(--ba-primary); background: var(--ba-primary); color: #fff; font-size: 12px; box-shadow: 0 12px 28px color-mix(in srgb, var(--ba-primary) 22%, transparent); }
-.ba-save-inline:disabled { opacity: .65; cursor: not-allowed; }
-.ba-filter-button { position: relative; background: color-mix(in srgb, var(--ba-primary) 8%, var(--card-bg,#fff)); color: var(--ba-primary); }
-.ba-filter-button.active { background: var(--ba-primary); color: #fff; border-color: var(--ba-primary); }
-.ba-filter-button b { position: absolute; top: -4px; right: -4px; min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 999px; background: #ef4444; color: #fff; font-size: 10px; border: 2px solid var(--card-bg,#fff); }
-.ba-slider-icon { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.status-dot-mini { width: 10px; height: 10px; display: inline-block; border-radius: 999px; background: var(--muted,#64748b); box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 10%, transparent); }
-.status-dot-mini.green { background: #22c55e; } .status-dot-mini.orange { background: #f59e0b; } .status-dot-mini.red { background: #ef4444; } .status-dot-mini.gray { background: #94a3b8; }
-.ba-filter-chips { display: flex; gap: 7px; overflow-x: auto; padding: 8px 1px 0; scrollbar-width: none; -ms-overflow-style: none; }
-.ba-filter-chips::-webkit-scrollbar { display: none; }
-.ba-filter-chips button { flex: 0 0 auto; min-height: 31px; border: 0; border-radius: 999px; padding: 0 10px; background: color-mix(in srgb, var(--ba-primary) 11%, transparent); color: var(--ba-primary); font-size: 11px; font-weight: 950; white-space: nowrap; cursor: pointer; }
-.ba-list { display: grid; gap: 7px; margin-top: 10px; }
-.attendance-row { width: 100%; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px; border-radius: 22px; text-align: left; transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
-.attendance-row:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--ba-primary) 24%, var(--border, rgba(0,0,0,.10))); box-shadow: 0 16px 34px rgba(15,23,42,.07); }
-.ba-avatar { width: 48px; height: 48px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 18px; color: #fff; font-size: 17px; font-weight: 1000; box-shadow: 0 12px 24px rgba(15,23,42,.12); }
-.attendance-main, .attendance-main strong, .attendance-main small, .attendance-main em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.attendance-main strong { color: var(--text,#111827); font-size: 14px; font-weight: 1000; letter-spacing: -.02em; }
-.attendance-main small { margin-top: 3px; color: var(--muted,#64748b); font-size: 12px; font-weight: 850; font-style: normal; }
-.attendance-main em { margin-top: 3px; color: color-mix(in srgb, var(--muted,#64748b) 86%, var(--text,#111827)); font-size: 11px; font-weight: 750; font-style: normal; }
-.attendance-status-actions { display: grid; grid-template-columns: repeat(4, 31px); align-items: center; justify-content: end; gap: 5px; }
-.attendance-status-actions button { width: 31px; height: 31px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; background: var(--surface,#fff); color: var(--muted, var(--text)); font-size: 11px; font-weight: 1000; cursor: pointer; }
-.attendance-status-actions button.present.active { border-color: rgba(34,197,94,.45); background: rgba(34,197,94,.14); color: #16a34a; }
-.attendance-status-actions button.absent.active { border-color: rgba(239,68,68,.45); background: rgba(239,68,68,.14); color: #dc2626; }
-.attendance-status-actions button.late.active { border-color: rgba(245,158,11,.45); background: rgba(245,158,11,.16); color: #b45309; }
-.attendance-status-actions .status-dot-mini { grid-column: 4; justify-self: end; margin-top: 2px; }
-.ba-chip { max-width: 100%; display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize; }
-.ba-chip.green { background: rgba(34,197,94,.12); color: #16a34a; } .ba-chip.red { background: rgba(239,68,68,.12); color: #dc2626; } .ba-chip.blue { background: rgba(59,130,246,.12); color: #2563eb; } .ba-chip.gray { background: color-mix(in srgb,var(--muted,#64748b) 14%,transparent); color: var(--muted,#64748b); } .ba-chip.orange { background: rgba(245,158,11,.14); color: #b45309; } .ba-chip.purple { background: rgba(147,51,234,.12); color: #7e22ce; }
-.ba-table-card { margin-top: 10px; padding: 10px; border-radius: 24px; }
-.ba-table-scroll { width: 100%; max-width: 100%; overflow-x: auto; border-radius: 18px; border: 1px solid var(--border,rgba(0,0,0,.08)); }
-.ba-table-scroll table { width: 100%; min-width: 920px; border-collapse: collapse; background: var(--card-bg, var(--surface, var(--bg, transparent))); }
-.ba-table-scroll th, .ba-table-scroll td { padding: 10px; border-bottom: 1px solid var(--border,rgba(0,0,0,.08)); vertical-align: top; text-align: left; font-size: 13px; }
-.ba-table-scroll th { background: var(--table-header-bg, color-mix(in srgb, var(--ba-primary) 6%, var(--card-bg, var(--surface, var(--bg, transparent))))); color: var(--table-header-text, var(--muted, var(--text))); font-size: 11px; font-weight: 1000; text-transform: uppercase; letter-spacing: .07em; }
-.ba-table-scroll td strong, .ba-table-scroll td span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ba-table-scroll td span { margin-top: 3px; color: var(--muted, var(--text)); font-size: 11px; }
-.ba-table-actions { display: flex; flex-wrap: wrap; gap: 7px; }
-.ba-table-actions button { min-height: 34px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; padding: 0 10px; background: var(--surface,#fff); color: var(--text,#111827); font-size: 11px; font-weight: 950; cursor: pointer; }
-.ba-table-actions button:first-child { background: var(--ba-primary); color: #fff; border-color: var(--ba-primary); }
-.ba-table-actions .ba-delete { color: var(--muted,#64748b); background: color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff)); border-color: color-mix(in srgb,var(--muted,#64748b) 24%,var(--border,rgba(0,0,0,.10))); }
-.ba-empty-table { padding: 22px; text-align: center; color: var(--muted,#64748b); font-weight: 850; }
-.ba-analysis-grid { display: grid; grid-template-columns: minmax(0,1fr); gap: 10px; margin-top: 10px; }
-.ba-analysis { padding: 13px; border-radius: 24px; }
-.ba-analysis span { color: var(--muted, var(--text)); font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .08em; }
-.ba-analysis strong { display: block; margin-top: 8px; font-size: clamp(22px,7vw,30px); line-height: 1; font-weight: 1000; letter-spacing: -.06em; overflow-wrap: anywhere; }
-.ba-analysis p { margin: 8px 0 0; color: var(--muted,#64748b); font-size: 12px; line-height: 1.5; }
-.ba-analysis-list { display: grid; gap: 10px; margin-top: 12px; }
-.ba-analysis-list section { display: grid; gap: 6px; padding: 10px; border-radius: 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent); }
-.ba-analysis-list section > div:first-child { display: flex; justify-content: space-between; gap: 10px; }
-.ba-analysis-list b, .ba-analysis-list small { font-size: 12px; }
-.ba-analysis-list small { color: var(--muted,#64748b); font-weight: 850; }
-.ba-progress { height: 8px; border-radius: 999px; background: color-mix(in srgb,var(--muted,#64748b) 18%,transparent); overflow: hidden; }
-.ba-progress i { display: block; height: 100%; border-radius: inherit; background: var(--ba-primary); }
-.ba-empty { display: grid; place-items: center; align-content: center; gap: 8px; min-height: 220px; text-align: center; border-style: dashed; border-radius: 24px; padding: 13px; }
-.ba-empty-icon { width: 56px; height: 56px; display: grid; place-items: center; border-radius: 22px; background: color-mix(in srgb,var(--ba-primary) 12%,var(--surface,#fff)); font-size: 28px; }
-.ba-empty h3 { margin: 0; font-size: 18px; font-weight: 1000; }
-.ba-empty p { margin: 0; color: var(--muted,#64748b); font-size: 13px; line-height: 1.6; }
-.ba-sheet-backdrop { position: fixed; inset: 0; z-index: 70; display: grid; place-items: end center; padding: 10px; background: rgba(15,23,42,.48); backdrop-filter: blur(10px); }
-.ba-sheet { width: min(680px, 100%); max-height: min(86dvh, 760px); overflow-y: auto; border-radius: 28px; padding: 14px; }
-.ba-sheet.small { width: min(520px, 100%); }
-.ba-sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 2px 2px 14px; }
-.ba-sheet-head h2 { margin: 0; color: var(--text,#111827); font-size: 20px; font-weight: 1000; letter-spacing: -.05em; }
-.ba-sheet-head p { margin: 4px 0 0; color: var(--muted,#64748b); font-size: 12px; line-height: 1.5; }
-.ba-sheet-head button { width: 38px; height: 38px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; background: var(--surface,#fff); color: var(--text,#111827); font-weight: 1000; cursor: pointer; }
-.ba-form { display: grid; grid-template-columns: minmax(0,1fr); gap: 10px; }
-.ba-form label { display: grid; gap: 6px; }
-.ba-form span { color: var(--muted, var(--text)); font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
-.ba-sheet-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-.ba-sheet-actions button { min-height: 40px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; padding: 0 14px; background: var(--surface,#fff); color: var(--text,#111827); font-size: 12px; font-weight: 950; cursor: pointer; }
-.ba-sheet-actions button.primary { border-color: var(--ba-primary); background: var(--ba-primary); color: #fff; }
-.ba-menu-list { display: grid; gap: 8px; }
-.ba-menu-list button { width: 100%; min-height: 60px; display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; align-items: center; text-align: left; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 18px; padding: 10px; background: var(--surface,#fff); color: var(--text,#111827); cursor: pointer; }
-.ba-menu-list button > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 14px; background: color-mix(in srgb,var(--ba-primary) 10%,transparent); color: var(--ba-primary); font-weight: 1000; }
-.ba-menu-list b, .ba-menu-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ba-menu-list b { font-size: 13px; font-weight: 1000; }
-.ba-menu-list small { margin-top: 2px; color: var(--muted, var(--text)); font-size: 11px; font-weight: 750; }
-.ba-menu-list button.active { border-color: color-mix(in srgb,var(--ba-primary) 45%,var(--border,rgba(0,0,0,.10))); background: color-mix(in srgb,var(--ba-primary) 8%,var(--surface,#fff)); }
-.ba-menu-list button.danger b { color: #dc2626; }
-@media (min-width: 680px) { .ba-page { padding: calc(12px * var(--local-density-scale,1)); } .ba-list { grid-template-columns: repeat(2,minmax(0,1fr)); } .ba-analysis-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .ba-form.compact { grid-template-columns: repeat(2,minmax(0,1fr)); } .ba-sheet-backdrop { place-items: center; padding: 18px; } }
-@media (min-width: 1040px) { .ba-page { padding: calc(16px * var(--local-density-scale,1)); } .ba-search-card, .ba-filter-chips, .ba-list, .ba-analysis-grid { width: min(1180px, 100%); margin-left: auto; margin-right: auto; } .ba-list { grid-template-columns: repeat(3,minmax(0,1fr)); } .attendance-analysis-grid { grid-template-columns: repeat(4,minmax(0,1fr)); } }
-@media (max-width: 560px) { .ba-page { padding: calc(6px * var(--local-density-scale,1)); } .ba-search-card { grid-template-columns: auto minmax(0,1fr) auto auto; } .ba-icon-button { display: grid; } .ba-save-inline { min-width: 48px; padding: 0 9px; } .attendance-row { grid-template-columns: auto minmax(0,1fr); align-items: start; } .attendance-status-actions { grid-column: 1 / -1; grid-template-columns: repeat(4,minmax(0,1fr)) auto; width: 100%; } .attendance-status-actions button { width: 100%; } .attendance-status-actions .status-dot-mini { grid-column: 5; align-self: center; margin-top: 0; } .ba-sheet-actions { display: grid; grid-template-columns: 1fr; } }
+.ba-filter-chips span,
+.ba-filter-chips button,
+.filter-section,
+.mode-switch,
+.term-input-grid label,
+.ba-form label,
+.status-card,
+.bulk-card{
+  background:var(--ba-surface-2);
+  color:var(--ba-text);
+  border-color:var(--ba-border);
+}
+
+.ba-page input,
+.ba-page select,
+.ba-page textarea,
+.table-number,
+.term-input-grid input{
+  background:var(--ba-surface);
+  color:var(--ba-text);
+  border-color:var(--ba-border);
+}
+
+.ba-page input::placeholder,
+.ba-page textarea::placeholder{
+  color:var(--ba-muted);
+  opacity:1;
+}
+
+.ba-table-scroll th{
+  background:var(--ba-surface-2);
+  color:var(--ba-muted);
+}
+
+.ba-table-scroll td{
+  background:var(--ba-surface);
+  color:var(--ba-text);
+}
+
+.ba-table-scroll tbody tr:hover td{
+  background:color-mix(in srgb,var(--ba-primary) 7%,var(--ba-surface));
+}
+
+.attendance-status-actions button,
+.table-actions button,
+.mode-switch button,
+.ba-more-list button,
+.ba-sheet-actions button{
+  background:var(--ba-surface-2);
+  color:var(--ba-text);
+  border-color:var(--ba-border);
+}
+
+.attendance-status-actions button.clear{
+  color:var(--ba-muted);
+}
+
+.attendance-main strong,
+.term-student strong,
+.table-student strong,
+.ba-analysis strong,
+.ba-sheet-head h3,
+.ba-state h2,
+.ba-empty h3{
+  color:var(--ba-text);
+}
+
+.attendance-main small,
+.attendance-main em,
+.term-student small,
+.table-student small,
+.ba-analysis span,
+.ba-sheet-head p,
+.ba-empty p,
+.ba-state p,
+.filter-section-label,
+.ba-form label>span{
+  color:var(--ba-muted);
+}
+
+.ba-sheet-backdrop{
+  background:color-mix(in srgb,#020617 68%,transparent);
+}
+
+.ba-page input:disabled,
+.ba-page select:disabled,
+.ba-page textarea:disabled,
+.ba-page button:disabled{
+  opacity:.58;
+}
+
+@media (prefers-color-scheme: dark){
+  .ba-page{
+    --ba-soft:color-mix(in srgb,var(--ba-text) 8%,transparent);
+  }
+}
+
 `;

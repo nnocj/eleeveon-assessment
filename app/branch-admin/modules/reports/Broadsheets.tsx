@@ -79,6 +79,7 @@ import {
   School,
   Student,
   StudentEnrollment,
+  StudentAttendanceSummary,
   Parent,
   StudentParent,
   ClassTeacher,
@@ -533,6 +534,9 @@ export default function Broadsheets() {
   const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
+  const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
+    StudentAttendanceSummary[]
+  >([]);
   const [computedResults, setComputedResults] = useState<ComputedResult[]>([]);
   const [reportCards, setReportCards] = useState<ReportCard[]>([]);
   const [reportCardItems, setReportCardItems] = useState<ReportCardItem[]>([]);
@@ -601,6 +605,7 @@ export default function Broadsheets() {
     setGradingSystems([]);
     setGradeRules([]);
     setAttendance([]);
+    setStudentAttendanceSummaries([]);
     setComputedResults([]);
     setReportCards([]);
     setReportCardItems([]);
@@ -701,6 +706,7 @@ export default function Broadsheets() {
         gradingRows,
         ruleRows,
         attendanceRows,
+        studentAttendanceSummaryRows,
         computedRows,
         reportCardRows,
         reportCardItemRows,
@@ -731,6 +737,7 @@ export default function Broadsheets() {
         db.gradingSystems.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
+        db.studentAttendanceSummaries.toArray(),
         db.computedResults.toArray(),
         db.reportCards.toArray(),
         db.reportCardItems.toArray(),
@@ -939,6 +946,9 @@ export default function Broadsheets() {
         ruleRows.filter((row) => sameTenant(row) && row.active !== false),
       );
       setAttendance(attendanceRows.filter(sameTenant));
+      setStudentAttendanceSummaries(
+        studentAttendanceSummaryRows.filter(sameTenant),
+      );
       setComputedResults(computedRows.filter(sameTenant));
       setReportCards(scopedReportCards);
 
@@ -1236,6 +1246,7 @@ export default function Broadsheets() {
       gradingSystems,
       gradeRules,
       attendance,
+      studentAttendanceSummaries,
       computedResults,
       reportCards,
       reportCardItems,
@@ -1262,6 +1273,7 @@ export default function Broadsheets() {
       gradingSystems,
       gradeRules,
       attendance,
+      studentAttendanceSummaries,
       computedResults,
       reportCards,
       reportCardItems,
@@ -3829,3 +3841,4 @@ const css = `
 .student-reports-page .ba-print-zone{padding:8px}
 
 `;
+ 

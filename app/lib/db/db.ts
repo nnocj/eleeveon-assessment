@@ -46,7 +46,274 @@ export type AcademicLevel =
 export type AttendanceStatus =
   | "present"
   | "absent"
-  | "late";
+  | "late"
+  | "excused"
+  | "medical"
+  | "sports"
+  | "trip"
+  | "holiday"
+  | "remote"
+  | "suspended";
+
+export type AttendanceSummaryEntryMode =
+  | "calculated"
+  | "manual";
+
+
+export type AttendancePersonType = "student" | "teacher" | "staff";
+
+export type AttendanceCaptureMethod =
+  | "manual"
+  | "teacher_device"
+  | "student_device"
+  | "student_id"
+  | "qr_code"
+  | "fingerprint"
+  | "face"
+  | "nfc"
+  | "gps"
+  | "api"
+  | "import";
+
+export type AttendanceVerificationStatus =
+  | "verified"
+  | "pending"
+  | "rejected"
+  | "overridden";
+
+export type AttendanceCredentialType =
+  | "qr_code"
+  | "fingerprint"
+  | "face_profile"
+  | "nfc_card"
+  | "student_id"
+  | "device_passkey";
+
+export type AttendanceCredentialStatus =
+  | "pending"
+  | "active"
+  | "expired"
+  | "revoked"
+  | "replaced";
+
+export type AttendanceCredentialEventType =
+  | "generated"
+  | "printed"
+  | "enrolled"
+  | "activated"
+  | "verified"
+  | "failed_verification"
+  | "revoked"
+  | "expired"
+  | "replaced"
+  | "reissued";
+
+export type AttendanceSessionStatus =
+  | "draft"
+  | "open"
+  | "closed"
+  | "cancelled";
+
+/* ============================================================================
+ * SHARED IDENTITY, SAFETY & MOVEMENT TYPES
+ * --------------------------------------------------------------------------
+ * Attendance remains backward compatible. These broader identity contracts
+ * power student/staff attendance, identity cards, authorized pickup, visitors,
+ * school transport and emergency roll calls.
+ * ========================================================================== */
+
+export type IdentitySubjectType =
+  | "student"
+  | "teacher"
+  | "staff"
+  | "parent"
+  | "guardian"
+  | "visitor";
+
+export type IdentityCredentialType =
+  | "qr_code"
+  | "nfc_card"
+  | "rfid_card"
+  | "fingerprint"
+  | "face_profile"
+  | "student_id"
+  | "staff_id"
+  | "parent_pass"
+  | "visitor_pass"
+  | "mobile_pass";
+
+export type IdentityCredentialStatus =
+  | "pending"
+  | "active"
+  | "suspended"
+  | "expired"
+  | "revoked"
+  | "replaced";
+
+export type IdentityCredentialTemplateKey =
+  | "modern_clean"
+  | "classic_school"
+  | "compact_qr_pass"
+  | "premium_gradient"
+  | "custom";
+
+export type IdentityCredentialCardOrientation = "portrait" | "landscape";
+export type IdentityCredentialCardSides = "front_only" | "front_and_back";
+export type IdentityCredentialPhotoShape = "circle" | "rounded" | "square";
+export type IdentityCredentialQrPosition =
+  | "front_left"
+  | "front_right"
+  | "front_center"
+  | "back_left"
+  | "back_right"
+  | "back_center";
+export type IdentityCredentialQrSize = "small" | "medium" | "large";
+export type IdentityCredentialBorderStyle =
+  | "none"
+  | "solid"
+  | "double"
+  | "accent";
+
+export type IdentityCredentialEventType =
+  | "generated"
+  | "printed"
+  | "issued"
+  | "enrolled"
+  | "activated"
+  | "verified"
+  | "verification_failed"
+  | "used"
+  | "suspended"
+  | "reactivated"
+  | "revoked"
+  | "expired"
+  | "replaced"
+  | "reissued";
+
+export type IdentityDeviceType =
+  | "phone"
+  | "tablet"
+  | "computer"
+  | "kiosk"
+  | "qr_scanner"
+  | "barcode_scanner"
+  | "fingerprint_scanner"
+  | "face_terminal"
+  | "nfc_reader"
+  | "rfid_reader"
+  | "vehicle_gateway"
+  | "gps_tracker"
+  | "api_gateway"
+  | "other";
+
+export type IdentityDeviceCapability =
+  | "qr_scan"
+  | "barcode_scan"
+  | "nfc_read"
+  | "rfid_read"
+  | "fingerprint_match"
+  | "face_match"
+  | "gps_capture"
+  | "photo_capture"
+  | "signature_capture";
+
+export type IdentityAccessPointType =
+  | "school_gate"
+  | "branch_gate"
+  | "classroom"
+  | "staff_office"
+  | "reception"
+  | "pickup_desk"
+  | "bus"
+  | "bus_stop"
+  | "assembly_point"
+  | "custom";
+
+export type IdentityPurpose =
+  | "student_attendance"
+  | "staff_clock_in"
+  | "staff_clock_out"
+  | "identity_card_verification"
+  | "parent_pickup"
+  | "visitor_entry"
+  | "visitor_exit"
+  | "transport_board"
+  | "transport_arrival"
+  | "transport_alight"
+  | "emergency_roll_call";
+
+export type IdentityVerificationStatus =
+  | "verified"
+  | "pending"
+  | "rejected"
+  | "overridden";
+
+export type IdentityActivityOutcome =
+  | "accepted"
+  | "pending"
+  | "denied"
+  | "failed"
+  | "duplicate"
+  | "overridden"
+  | "cancelled";
+
+export type StudentIdentityCardStatus =
+  | "draft"
+  | "issued"
+  | "printed"
+  | "active"
+  | "expired"
+  | "revoked"
+  | "replaced";
+
+export type PickupAuthorizationStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "revoked"
+  | "expired";
+
+export type StudentPickupStatus =
+  | "requested"
+  | "verified"
+  | "approved"
+  | "released"
+  | "denied"
+  | "cancelled";
+
+export type VisitorVisitStatus =
+  | "expected"
+  | "pending"
+  | "approved"
+  | "checked_in"
+  | "checked_out"
+  | "denied"
+  | "cancelled";
+
+export type TransportJourneyStatus =
+  | "scheduled"
+  | "boarding"
+  | "in_transit"
+  | "arrived"
+  | "completed"
+  | "cancelled";
+
+export type TransportJourneyEventType =
+  | "boarded"
+  | "arrived_school"
+  | "boarded_home"
+  | "alighted"
+  | "missed"
+  | "denied";
+
+export type EmergencyRollCallEntryStatus =
+  | "unconfirmed"
+  | "safe"
+  | "missing"
+  | "injured"
+  | "evacuated"
+  | "not_expected"
+  | "unknown";
 
 export type PaymentMethod =
   | "cash"
@@ -1359,6 +1626,43 @@ export interface Attendance extends BaseSync {
   academicPeriodId: string;
   date: string;
   status: AttendanceStatus;
+
+  // Optional links keep existing manual attendance records fully compatible.
+  sessionId?: string | null;
+  captureEventId?: string | null;
+  identityActivityEventId?: string | null;
+  credentialId?: string | null;
+  attendanceDeviceId?: string | null;
+  captureMethod?: AttendanceCaptureMethod;
+  verificationStatus?: AttendanceVerificationStatus;
+  capturedAt?: number | null;
+  capturedByUserId?: string | null;
+  verifiedAt?: number | null;
+  verifiedByUserId?: string | null;
+  note?: string;
+}
+
+export interface StudentAttendanceSummary extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  studentId: string;
+  classId: string;
+  academicStructureId: string;
+  academicPeriodId: string;
+
+  entryMode: AttendanceSummaryEntryMode;
+
+  daysPresent: number;
+  daysOpened: number;
+  daysAbsent: number;
+  timesLate?: number;
+
+  attendancePercent: number;
+
+  sourceAttendanceUpdatedAt?: number;
+  calculatedAt?: number;
+  manuallyUpdatedAt?: number;
+  note?: string;
 }
 
 export interface TeacherAttendance extends BaseSync {
@@ -1368,6 +1672,577 @@ export interface TeacherAttendance extends BaseSync {
   date: string;
   clockIn?: string;
   clockOut?: string;
+
+  sessionId?: string | null;
+  clockInCaptureEventId?: string | null;
+  clockOutCaptureEventId?: string | null;
+  clockInIdentityActivityEventId?: string | null;
+  clockOutIdentityActivityEventId?: string | null;
+  clockInMethod?: AttendanceCaptureMethod;
+  clockOutMethod?: AttendanceCaptureMethod;
+  clockInCredentialId?: string | null;
+  clockOutCredentialId?: string | null;
+  attendanceDeviceId?: string | null;
+  verificationStatus?: AttendanceVerificationStatus;
+  status?: AttendanceStatus | "on_leave" | "annual_leave" | "sick_leave" | "workshop" | "meeting" | "official_duty";
+  lateMinutes?: number;
+  earlyDepartureMinutes?: number;
+  workingMinutes?: number;
+  overtimeMinutes?: number;
+  note?: string;
+}
+
+/** A lightweight attendance window for a class, branch, teacher or custom scope. */
+export interface AttendanceSession extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  academicStructureId?: string | null;
+  academicPeriodId?: string | null;
+  classId?: string | null;
+  teacherId?: string | null;
+  scopeType: "branch" | "class" | "teacher" | "staff" | "custom";
+  scopeId?: string | null;
+  date: string;
+  name?: string;
+  openedAt: number;
+  closedAt?: number | null;
+  openedByUserId?: string | null;
+  closedByUserId?: string | null;
+  defaultStatus?: AttendanceStatus;
+  lateAfterMinute?: number | null;
+  absentAfterMinute?: number | null;
+  status: AttendanceSessionStatus;
+  active?: boolean;
+}
+
+/** Registered phone, scanner, kiosk or gateway used to capture attendance. */
+export interface AttendanceDevice extends BaseSync {
+  identityDeviceId?: string | null;
+  schoolId: string;
+  branchId: string;
+  name: string;
+  deviceType: "phone" | "tablet" | "computer" | "fingerprint_scanner" | "face_terminal" | "nfc_reader" | "gateway" | "other";
+  provider?: string | null;
+  providerDeviceId?: string | null;
+  serialNumber?: string | null;
+  platform?: string | null;
+  appVersion?: string | null;
+  locationLabel?: string | null;
+  lastSeenAt?: number | null;
+  lastSyncAt?: number | null;
+  active?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Identity credential used for matching. QR images and biometric images are not
+ * stored here; only compact tokens, hashes, provider references and lifecycle data.
+ */
+export interface AttendanceCredential extends BaseSync {
+  identityCredentialId?: string | null;
+  schoolId: string;
+  branchId: string;
+  personType: AttendancePersonType;
+  personId: string;
+  credentialType: AttendanceCredentialType;
+  status: AttendanceCredentialStatus;
+  credentialReference?: string | null;
+  tokenHash?: string | null;
+  serialNumber?: string | null;
+  provider?: string | null;
+  providerCredentialId?: string | null;
+  generatedAt?: number | null;
+  generatedByUserId?: string | null;
+  enrolledAt?: number | null;
+  enrolledByUserId?: string | null;
+  activatedAt?: number | null;
+  activatedByUserId?: string | null;
+  expiresAt?: number | null;
+  revokedAt?: number | null;
+  revokedByUserId?: string | null;
+  revocationReason?: string | null;
+  replacedAt?: number | null;
+  replacedByCredentialId?: string | null;
+  lastUsedAt?: number | null;
+  metadata?: Record<string, unknown>;
+}
+
+/** Append-only audit trail for generation, enrolment, printing and revocation. */
+export interface AttendanceCredentialEvent extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  credentialId: string;
+  personType: AttendancePersonType;
+  personId: string;
+  eventType: AttendanceCredentialEventType;
+  occurredAt: number;
+  performedByUserId?: string | null;
+  attendanceDeviceId?: string | null;
+  reasonCode?: string | null;
+  note?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * One compact scan/match event. Multiple capture methods feed this same table,
+ * then the shared attendance engine creates or updates Attendance/TeacherAttendance.
+ */
+export interface AttendanceCaptureEvent extends BaseSync {
+  identityActivityEventId?: string | null;
+  identityCredentialId?: string | null;
+  identityDeviceId?: string | null;
+  schoolId: string;
+  branchId: string;
+  sessionId?: string | null;
+  personType: AttendancePersonType;
+  personId: string;
+  credentialId?: string | null;
+  attendanceDeviceId?: string | null;
+  captureMethod: AttendanceCaptureMethod;
+  capturedAt: number;
+  capturedByUserId?: string | null;
+  verificationStatus: AttendanceVerificationStatus;
+  confidenceScore?: number | null;
+  attendanceStatus?: AttendanceStatus | null;
+  attendanceRecordId?: string | null;
+  duplicateOfEventId?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracyMeters?: number | null;
+  failureCode?: string | null;
+  note?: string | null;
+}
+
+/** Optional evidence is isolated so normal attendance sync remains small. */
+export interface AttendanceEvidenceAsset extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  captureEventId: string;
+  mediaAssetId: string;
+  evidenceType: "photo" | "document" | "signature" | "other";
+  retainedUntil?: number | null;
+  active?: boolean;
+}
+
+
+// ======================================================
+// SHARED IDENTITY, SAFETY & MOVEMENT PLATFORM
+// ======================================================
+
+/**
+ * Shared credential used across attendance, cards, pickup, visitors, transport
+ * and emergency roll call. Never store raw biometric samples, PINs or QR
+ * secrets here; store compact hashes and provider references only.
+ */
+export interface IdentityCredential extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  subjectType: IdentitySubjectType;
+  subjectId: string;
+  credentialType: IdentityCredentialType;
+  status: IdentityCredentialStatus;
+  label?: string | null;
+  credentialReference?: string | null;
+  tokenHash?: string | null;
+  serialNumber?: string | null;
+  provider?: string | null;
+  providerCredentialId?: string | null;
+  validFrom?: number | null;
+  expiresAt?: number | null;
+  generatedAt?: number | null;
+  generatedByUserId?: string | null;
+  enrolledAt?: number | null;
+  enrolledByUserId?: string | null;
+  activatedAt?: number | null;
+  activatedByUserId?: string | null;
+  suspendedAt?: number | null;
+  suspendedByUserId?: string | null;
+  suspensionReason?: string | null;
+  revokedAt?: number | null;
+  revokedByUserId?: string | null;
+  revocationReason?: string | null;
+  replacedAt?: number | null;
+  replacedByCredentialId?: string | null;
+  lastUsedAt?: number | null;
+  usageCount?: number;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Branch-scoped visual settings used to render printable or digital identity
+ * credentials. Credential payloads and references remain independent from the
+ * design, so changing a template never invalidates an issued credential.
+ */
+export interface IdentityCredentialDesignSetting extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+
+  name: string;
+  templateKey: IdentityCredentialTemplateKey;
+  subjectType?: IdentitySubjectType | "all";
+  credentialType?: IdentityCredentialType | "all";
+  orientation: IdentityCredentialCardOrientation;
+  sides: IdentityCredentialCardSides;
+
+  isDefault?: boolean;
+  active?: boolean;
+
+  primaryColor?: string | null;
+  secondaryColor?: string | null;
+  accentColor?: string | null;
+  backgroundColor?: string | null;
+  textColor?: string | null;
+  mutedTextColor?: string | null;
+  borderColor?: string | null;
+  borderStyle?: IdentityCredentialBorderStyle;
+  borderRadiusPx?: number | null;
+  backgroundImageMediaId?: string | null;
+  watermarkText?: string | null;
+  watermarkOpacity?: number | null;
+
+  showSchoolLogo?: boolean;
+  showBranchLogo?: boolean;
+  showSchoolName?: boolean;
+  showBranchName?: boolean;
+  showMotto?: boolean;
+  showAddress?: boolean;
+  showPhoto?: boolean;
+  photoShape?: IdentityCredentialPhotoShape;
+  showQrCode?: boolean;
+  qrPosition?: IdentityCredentialQrPosition;
+  qrSize?: IdentityCredentialQrSize;
+  showCredentialReference?: boolean;
+  showIssueDate?: boolean;
+  showExpiryDate?: boolean;
+  showSignature?: boolean;
+  signatureLabel?: string | null;
+  signatureMediaId?: string | null;
+
+  visibleFields?: {
+    fullName?: boolean;
+    admissionNumber?: boolean;
+    staffNumber?: boolean;
+    className?: boolean;
+    organizationName?: boolean;
+    academicYear?: boolean;
+    gender?: boolean;
+    dateOfBirth?: boolean;
+    phone?: boolean;
+    emergencyPhone?: boolean;
+  };
+
+  customLabels?: Record<string, string>;
+  frontLayout?: Record<string, unknown>;
+  backLayout?: Record<string, unknown>;
+  footerText?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IdentityCredentialEvent extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  credentialId: string;
+  subjectType: IdentitySubjectType;
+  subjectId: string;
+  eventType: IdentityCredentialEventType;
+  occurredAt: number;
+  performedByUserId?: string | null;
+  identityDeviceId?: string | null;
+  purpose?: IdentityPurpose | null;
+  reasonCode?: string | null;
+  note?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IdentityDevice extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  name: string;
+  code?: string | null;
+  deviceType: IdentityDeviceType;
+  provider?: string | null;
+  providerDeviceId?: string | null;
+  serialNumber?: string | null;
+  platform?: string | null;
+  appVersion?: string | null;
+  firmwareVersion?: string | null;
+  accessPointId?: string | null;
+  locationLabel?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  capabilities?: IdentityDeviceCapability[];
+  lastSeenAt?: number | null;
+  lastSyncAt?: number | null;
+  status?: "online" | "offline" | "maintenance" | "disabled";
+  active?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IdentityAccessPoint extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  name: string;
+  code?: string | null;
+  accessPointType: IdentityAccessPointType;
+  organizationId?: string | null;
+  classId?: string | null;
+  vehicleId?: string | null;
+  locationLabel?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  allowedRadiusMeters?: number | null;
+  active?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IdentityActivityEvent extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  subjectType: IdentitySubjectType;
+  subjectId: string;
+  credentialId?: string | null;
+  identityDeviceId?: string | null;
+  accessPointId?: string | null;
+  purpose: IdentityPurpose;
+  action?: string | null;
+  occurredAt: number;
+  capturedByUserId?: string | null;
+  verificationStatus: IdentityVerificationStatus;
+  outcome: IdentityActivityOutcome;
+  confidenceScore?: number | null;
+  relatedTable?: string | null;
+  relatedRecordId?: string | null;
+  duplicateOfEventId?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracyMeters?: number | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
+  note?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IdentityEvidenceAsset extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  activityEventId: string;
+  mediaAssetId: string;
+  evidenceType:
+    | "photo"
+    | "document"
+    | "signature"
+    | "video"
+    | "audio"
+    | "location"
+    | "other";
+  retainedUntil?: number | null;
+  active?: boolean;
+}
+
+export interface StudentIdentityCard extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  studentId: string;
+  credentialId: string;
+  cardNumber: string;
+  templateId?: string | null;
+  issuedAt?: number | null;
+  issuedByUserId?: string | null;
+  expiresAt?: number | null;
+  printedAt?: number | null;
+  printCount?: number;
+  replacementOfCardId?: string | null;
+  status: StudentIdentityCardStatus;
+  active?: boolean;
+}
+
+export interface PickupAuthorization extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  studentId: string;
+  authorizedPersonType: "parent" | "guardian" | "other";
+  authorizedPersonId?: string | null;
+  fullName?: string | null;
+  phone?: string | null;
+  relationship?: string | null;
+  photoMediaId?: string | null;
+  credentialId?: string | null;
+  validFrom?: number | null;
+  validUntil?: number | null;
+  recurring?: boolean;
+  allowedDays?: number[];
+  status: PickupAuthorizationStatus;
+  approvedByUserId?: string | null;
+  approvedAt?: number | null;
+  revokedByUserId?: string | null;
+  revokedAt?: number | null;
+  revocationReason?: string | null;
+  note?: string | null;
+}
+
+export interface StudentPickupEvent extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  studentId: string;
+  authorizationId?: string | null;
+  collectorSubjectType: "parent" | "guardian" | "visitor";
+  collectorSubjectId?: string | null;
+  credentialId?: string | null;
+  identityActivityEventId?: string | null;
+  requestedAt?: number | null;
+  approvedAt?: number | null;
+  releasedAt?: number | null;
+  approvedByUserId?: string | null;
+  releasedByUserId?: string | null;
+  status: StudentPickupStatus;
+  denialReason?: string | null;
+  note?: string | null;
+}
+
+export interface VisitorProfile extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  fullName: string;
+  phone?: string | null;
+  email?: string | null;
+  organizationName?: string | null;
+  identificationType?: string | null;
+  identificationLastFour?: string | null;
+  photoMediaId?: string | null;
+  blocked?: boolean;
+  blockReason?: string | null;
+  lastVisitAt?: number | null;
+  active?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface VisitorVisit extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  visitorId: string;
+  purpose: string;
+  hostType?: "teacher" | "staff" | "student" | "office" | null;
+  hostId?: string | null;
+  accessPointId?: string | null;
+  credentialId?: string | null;
+  entryIdentityActivityEventId?: string | null;
+  exitIdentityActivityEventId?: string | null;
+  expectedAt?: number | null;
+  checkedInAt?: number | null;
+  checkedOutAt?: number | null;
+  approvedByUserId?: string | null;
+  status: VisitorVisitStatus;
+  note?: string | null;
+}
+
+export interface SchoolVehicle extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  name: string;
+  registrationNumber: string;
+  vehicleType?: "bus" | "van" | "car" | "other";
+  capacity?: number;
+  driverName?: string | null;
+  driverPhone?: string | null;
+  identityDeviceId?: string | null;
+  active?: boolean;
+}
+
+export interface TransportRoute extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  name: string;
+  code?: string | null;
+  description?: string | null;
+  active?: boolean;
+}
+
+export interface TransportStop extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  routeId: string;
+  name: string;
+  order: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracyMeters?: number | null;
+  expectedArrivalMinute?: number | null;
+  expectedDepartureMinute?: number | null;
+  active?: boolean;
+}
+
+export interface StudentTransportAssignment extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  studentId: string;
+  routeId: string;
+  vehicleId?: string | null;
+  pickupStopId?: string | null;
+  dropoffStopId?: string | null;
+  validFrom?: number | null;
+  validUntil?: number | null;
+  status?: "active" | "suspended" | "expired" | "cancelled";
+  active?: boolean;
+}
+
+export interface TransportJourney extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  vehicleId: string;
+  routeId?: string | null;
+  date: string;
+  direction: "to_school" | "from_school" | "trip";
+  startedAt?: number | null;
+  arrivedAt?: number | null;
+  completedAt?: number | null;
+  startedByUserId?: string | null;
+  status: TransportJourneyStatus;
+  note?: string | null;
+}
+
+export interface TransportJourneyEvent extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  journeyId: string;
+  studentId: string;
+  assignmentId?: string | null;
+  stopId?: string | null;
+  credentialId?: string | null;
+  identityActivityEventId?: string | null;
+  eventType: TransportJourneyEventType;
+  occurredAt: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracyMeters?: number | null;
+  capturedByUserId?: string | null;
+  note?: string | null;
+}
+
+export interface EmergencyRollCallSession extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  name: string;
+  emergencyType: "fire" | "security" | "medical" | "weather" | "drill" | "other";
+  accessPointId?: string | null;
+  startedAt: number;
+  endedAt?: number | null;
+  startedByUserId?: string | null;
+  endedByUserId?: string | null;
+  status: "active" | "completed" | "cancelled";
+  note?: string | null;
+}
+
+export interface EmergencyRollCallEntry extends BaseSync {
+  schoolId: string;
+  branchId: string;
+  sessionId: string;
+  subjectType: IdentitySubjectType;
+  subjectId: string;
+  identityActivityEventId?: string | null;
+  status: EmergencyRollCallEntryStatus;
+  confirmedAt?: number | null;
+  confirmedByUserId?: string | null;
+  note?: string | null;
 }
 
 // ======================================================
@@ -2404,6 +3279,22 @@ export interface SchoolBranchSetting extends BaseSync {
 
   schoolGalleryImages?: string[];
   schoolGalleryMediaIds?: string[];
+
+  // Attendance engine configuration. Defaults preserve today's manual workflow.
+  attendanceEnabled?: boolean;
+  attendanceAllowedMethods?: AttendanceCaptureMethod[];
+  attendanceDefaultMethod?: AttendanceCaptureMethod;
+  attendanceAutoMarkOnVerifiedMatch?: boolean;
+  attendanceRequireTeacherConfirmation?: boolean;
+  attendanceAllowOfflineCapture?: boolean;
+  attendanceBatchSyncSize?: number;
+  attendanceSchoolOpenMinute?: number;
+  attendanceLateAfterMinute?: number;
+  attendanceAbsentAfterMinute?: number;
+  attendanceEvidenceMode?: "off" | "exceptions_only" | "manual_review" | "every_capture";
+  attendanceEvidenceRetentionDays?: number;
+  attendanceFailedEventRetentionDays?: number;
+  attendanceLocalEventRetentionDays?: number;
 }
 
 // ======================================================
@@ -2943,8 +3834,91 @@ export const APP_DB_STORES_V1: Record<string, string> = {
       attendance:
         "id,accountId, schoolId, branchId,studentId,classId,academicPeriodId,date",
 
+      studentAttendanceSummaries:
+        "id,accountId,schoolId,branchId,studentId,classId,academicStructureId,academicPeriodId,entryMode,updatedAt,synced,[accountId+schoolId+branchId+studentId+classId+academicStructureId+academicPeriodId]",
+
       teacherAttendance:
-        "id,accountId, schoolId, branchId,teacherId,date",
+        "id,accountId,schoolId,branchId,teacherId,date,sessionId,verificationStatus,updatedAt,synced,[accountId+branchId+teacherId+date]",
+
+      attendanceSessions:
+        "id,accountId,schoolId,branchId,academicStructureId,academicPeriodId,classId,teacherId,scopeType,scopeId,date,status,openedAt,closedAt,updatedAt,synced,[accountId+branchId+date],[classId+date]",
+
+      attendanceDevices:
+        "id,accountId,schoolId,branchId,deviceType,provider,providerDeviceId,serialNumber,active,lastSeenAt,lastSyncAt,updatedAt,synced,[accountId+branchId+active]",
+
+      attendanceCredentials:
+        "id,accountId,schoolId,branchId,personType,personId,credentialType,status,provider,providerCredentialId,serialNumber,generatedAt,generatedByUserId,enrolledAt,expiresAt,revokedAt,lastUsedAt,updatedAt,synced,[accountId+branchId+personType+personId],[personId+credentialType+status]",
+
+      attendanceCredentialEvents:
+        "id,accountId,schoolId,branchId,credentialId,personType,personId,eventType,occurredAt,performedByUserId,attendanceDeviceId,updatedAt,synced,[credentialId+occurredAt],[personId+occurredAt]",
+
+      attendanceCaptureEvents:
+        "id,accountId,schoolId,branchId,sessionId,personType,personId,credentialId,attendanceDeviceId,captureMethod,capturedAt,verificationStatus,attendanceStatus,attendanceRecordId,duplicateOfEventId,updatedAt,synced,[sessionId+capturedAt],[personId+capturedAt],[accountId+branchId+capturedAt]",
+
+      attendanceEvidenceAssets:
+        "id,accountId,schoolId,branchId,captureEventId,mediaAssetId,evidenceType,retainedUntil,active,updatedAt,synced,[captureEventId+evidenceType]",
+
+
+      // Shared identity foundation.
+      identityCredentials:
+        "id,accountId,schoolId,branchId,subjectType,subjectId,credentialType,status,credentialReference,tokenHash,serialNumber,provider,providerCredentialId,expiresAt,lastUsedAt,updatedAt,synced,[accountId+subjectType+subjectId],[subjectId+credentialType+status],[accountId+credentialReference],[accountId+tokenHash]",
+
+      identityCredentialDesignSettings:
+        "id,accountId,schoolId,branchId,name,templateKey,subjectType,credentialType,orientation,isDefault,active,updatedAt,synced,[accountId+schoolId+branchId],[branchId+active],[branchId+subjectType+credentialType],[branchId+isDefault]",
+
+      identityCredentialEvents:
+        "id,accountId,schoolId,branchId,credentialId,subjectType,subjectId,eventType,occurredAt,identityDeviceId,purpose,updatedAt,synced,[credentialId+occurredAt],[subjectId+occurredAt]",
+
+      identityDevices:
+        "id,accountId,schoolId,branchId,deviceType,status,provider,providerDeviceId,serialNumber,accessPointId,active,lastSeenAt,lastSyncAt,updatedAt,synced,[accountId+branchId+active],[accessPointId+active]",
+
+      identityAccessPoints:
+        "id,accountId,schoolId,branchId,name,code,accessPointType,organizationId,classId,vehicleId,active,updatedAt,synced,[accountId+branchId+accessPointType],[branchId+active]",
+
+      identityActivityEvents:
+        "id,accountId,schoolId,branchId,subjectType,subjectId,credentialId,identityDeviceId,accessPointId,purpose,action,occurredAt,verificationStatus,outcome,relatedTable,relatedRecordId,duplicateOfEventId,updatedAt,synced,[subjectId+occurredAt],[accessPointId+occurredAt],[purpose+occurredAt],[accountId+branchId+occurredAt]",
+
+      identityEvidenceAssets:
+        "id,accountId,schoolId,branchId,activityEventId,mediaAssetId,evidenceType,retainedUntil,active,updatedAt,synced,[activityEventId+evidenceType]",
+
+      studentIdentityCards:
+        "id,accountId,schoolId,branchId,studentId,credentialId,cardNumber,status,issuedAt,expiresAt,printedAt,replacementOfCardId,active,updatedAt,synced,[studentId+status],[accountId+cardNumber]",
+
+      pickupAuthorizations:
+        "id,accountId,schoolId,branchId,studentId,authorizedPersonType,authorizedPersonId,credentialId,status,validFrom,validUntil,approvedAt,revokedAt,updatedAt,synced,[studentId+status],[authorizedPersonId+status]",
+
+      studentPickupEvents:
+        "id,accountId,schoolId,branchId,studentId,authorizationId,collectorSubjectType,collectorSubjectId,credentialId,identityActivityEventId,status,requestedAt,approvedAt,releasedAt,updatedAt,synced,[studentId+releasedAt],[branchId+status+requestedAt]",
+
+      visitorProfiles:
+        "id,accountId,schoolId,branchId,fullName,phone,email,blocked,lastVisitAt,active,updatedAt,synced,[accountId+branchId+phone]",
+
+      visitorVisits:
+        "id,accountId,schoolId,branchId,visitorId,status,expectedAt,checkedInAt,checkedOutAt,credentialId,accessPointId,updatedAt,synced,[visitorId+checkedInAt],[branchId+status+checkedInAt]",
+
+      schoolVehicles:
+        "id,accountId,schoolId,branchId,name,registrationNumber,vehicleType,identityDeviceId,active,updatedAt,synced,[accountId+registrationNumber],[branchId+active]",
+
+      transportRoutes:
+        "id,accountId,schoolId,branchId,name,code,active,updatedAt,synced,[branchId+active]",
+
+      transportStops:
+        "id,accountId,schoolId,branchId,routeId,name,order,active,updatedAt,synced,[routeId+order]",
+
+      studentTransportAssignments:
+        "id,accountId,schoolId,branchId,studentId,routeId,vehicleId,pickupStopId,dropoffStopId,status,validFrom,validUntil,active,updatedAt,synced,[studentId+status],[routeId+active]",
+
+      transportJourneys:
+        "id,accountId,schoolId,branchId,vehicleId,routeId,date,direction,status,startedAt,arrivedAt,completedAt,updatedAt,synced,[vehicleId+date],[routeId+date],[branchId+status+date]",
+
+      transportJourneyEvents:
+        "id,accountId,schoolId,branchId,journeyId,studentId,assignmentId,stopId,credentialId,identityActivityEventId,eventType,occurredAt,updatedAt,synced,[journeyId+studentId+eventType],[studentId+occurredAt]",
+
+      emergencyRollCallSessions:
+        "id,accountId,schoolId,branchId,emergencyType,status,startedAt,endedAt,accessPointId,updatedAt,synced,[branchId+status+startedAt]",
+
+      emergencyRollCallEntries:
+        "id,accountId,schoolId,branchId,sessionId,subjectType,subjectId,status,confirmedAt,identityActivityEventId,updatedAt,synced,[sessionId+subjectType+subjectId],[sessionId+status]",
 
       reportCards:
         "id,accountId, schoolId, branchId,studentId,classId,academicPeriodId",
@@ -3194,7 +4168,41 @@ export class EleeveonDatabase extends Dexie {
   computedResults!: Table<ComputedResult>;
 
   attendance!: Table<Attendance>;
+  studentAttendanceSummaries!: Table<StudentAttendanceSummary>;
   teacherAttendance!: Table<TeacherAttendance>;
+  attendanceSessions!: Table<AttendanceSession, string>;
+  attendanceDevices!: Table<AttendanceDevice, string>;
+  attendanceCredentials!: Table<AttendanceCredential, string>;
+  attendanceCredentialEvents!: Table<AttendanceCredentialEvent, string>;
+  attendanceCaptureEvents!: Table<AttendanceCaptureEvent, string>;
+  attendanceEvidenceAssets!: Table<AttendanceEvidenceAsset, string>;
+
+
+  // Shared identity, safety and movement platform.
+  identityCredentials!: Table<IdentityCredential, string>;
+  identityCredentialDesignSettings!: Table<IdentityCredentialDesignSetting, string>;
+  identityCredentialEvents!: Table<IdentityCredentialEvent, string>;
+  identityDevices!: Table<IdentityDevice, string>;
+  identityAccessPoints!: Table<IdentityAccessPoint, string>;
+  identityActivityEvents!: Table<IdentityActivityEvent, string>;
+  identityEvidenceAssets!: Table<IdentityEvidenceAsset, string>;
+
+  studentIdentityCards!: Table<StudentIdentityCard, string>;
+  pickupAuthorizations!: Table<PickupAuthorization, string>;
+  studentPickupEvents!: Table<StudentPickupEvent, string>;
+
+  visitorProfiles!: Table<VisitorProfile, string>;
+  visitorVisits!: Table<VisitorVisit, string>;
+
+  schoolVehicles!: Table<SchoolVehicle, string>;
+  transportRoutes!: Table<TransportRoute, string>;
+  transportStops!: Table<TransportStop, string>;
+  studentTransportAssignments!: Table<StudentTransportAssignment, string>;
+  transportJourneys!: Table<TransportJourney, string>;
+  transportJourneyEvents!: Table<TransportJourneyEvent, string>;
+
+  emergencyRollCallSessions!: Table<EmergencyRollCallSession, string>;
+  emergencyRollCallEntries!: Table<EmergencyRollCallEntry, string>;
 
   reportCards!: Table<ReportCard>;
   reportCardItems!: Table<ReportCardItem>;
@@ -3338,4 +4346,4 @@ export function isAppDatabaseReady() {
 
 export function getAppDatabaseVersion() {
   return db.isOpen() ? db.verno : undefined;
-}
+} 

@@ -37,6 +37,15 @@
  * - keeps filters and advanced views inside sheets
  * - keeps cards/table/analytics in the same flow as Students.tsx
  * - keeps table colors tied to existing theme variables for dark mode support
+ *
+ * Teacher map and location workflow:
+ * - adds the same shared SchoolMap view used by Students
+ * - saves editable address, coordinates, GPS accuracy, source, precision and privacy/consent fields
+ * - supports current-device GPS capture during teacher create/edit
+ * - maps only branch-scoped, searched and filtered teachers with visible coordinates
+ * - supports creating a teacher from a selected map location
+ * - supports moving an existing teacher marker with the shared floating Save/Cancel workflow
+ * - lets SchoolMap own marker selection, details, and location editing
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -80,11 +89,22 @@ import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
 import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
 import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
 import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
-type ViewMode = "cards" | "table" | "summary";
+import {
+  SchoolMap,
+  type MapCreateRequest,
+  type MapLocationUpdateRequest,
+} from "../../components/maps";
+import { genericEntityToMarker, type MapMarker } from "../../lib/maps";
+type ViewMode = "cards" | "table" | "map" | "summary";
 type ToastTone = "success" | "error" | "info";
 type TeacherRole = "teacher" | "head_teacher" | "lecturer" | "principal";
 type TeacherStatusFilter = "all" | "active" | "inactive";
 type CameraField = "photo" | "coverPhoto" | "signature";
+
+type TeacherCreateDefaults = {
+  latitude?: number;
+  longitude?: number;
+};
 
 type TenantRow = {
   accountId?: string | null;
@@ -216,6 +236,20 @@ type FormState = {
   email: string;
   phone: string;
   relativePhone: string;
+  address: string;
+  latitude: string;
+  longitude: string;
+  accuracyMeters: string;
+  locationLabel: string;
+  formattedAddress: string;
+  locationType: "home" | "workplace" | "pickup_point" | "dropoff_point" | "other";
+  locationSource: "manual" | "device_gps" | "geocoded" | "imported";
+  locationPrecision: "exact" | "approximate" | "area_only";
+  locationCapturedAt?: number;
+  mapVisible: boolean;
+  locationConsentGiven: boolean;
+  locationConsentAt?: number;
+  locationRestricted: boolean;
   employmentDate: string;
   salary: string;
   role: TeacherRole;
@@ -252,6 +286,20 @@ const emptyForm: FormState = {
   email: "",
   phone: "",
   relativePhone: "",
+  address: "",
+  latitude: "",
+  longitude: "",
+  accuracyMeters: "",
+  locationLabel: "",
+  formattedAddress: "",
+  locationType: "home",
+  locationSource: "manual",
+  locationPrecision: "exact",
+  locationCapturedAt: undefined,
+  mapVisible: true,
+  locationConsentGiven: false,
+  locationConsentAt: undefined,
+  locationRestricted: false,
   employmentDate: "",
   salary: "",
   role: "teacher",
@@ -995,6 +1043,54 @@ export default function TeachersPage() {
     [viewRows],
   );
 
+  const teacherMarkers = useMemo<MapMarker[]>(() => {
+    return filteredRows.reduce<MapMarker[]>((markers, item) => {
+      const row: any = item.row;
+
+      const marker = genericEntityToMarker(
+        {
+          ...row,
+          id: item.id,
+          photo: item.photoUrl || row.photo,
+        },
+        {
+          entityType: "teacher",
+          layerId: "teachers",
+          icon: "teacher",
+          imageUrl: item.photoUrl,
+          subtitle: [
+            roleLabel(row.role),
+            item.organizationName,
+            row.locationLabel || row.formattedAddress || row.address || null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        },
+      );
+
+      if (!marker) return markers;
+
+      markers.push({
+        ...marker,
+        description:
+          row.phone || row.email || row.qualification || item.organizationName,
+        metadata: {
+          ...(marker.metadata || {}),
+          teacherId: item.id,
+          role: row.role,
+          organizationName: item.organizationName,
+          active: item.active,
+        },
+      });
+
+      return markers;
+    }, []);
+  }, [filteredRows]);
+
   const updateForm = (patch: Partial<FormState>) =>
     setForm((current) => ({ ...current, ...patch }));
 
@@ -1096,18 +1192,89 @@ export default function TeachersPage() {
     return true;
   };
 
-  const openCreate = () => {
+  const openCreate = (defaults?: TeacherCreateDefaults) => {
     if (!requireTenant()) return;
+
     mediaSessionKey.current = makeMediaSessionKey();
     uploadedMediaAssetIds.current = {};
+
+    const hasMapCoordinate =
+      Number.isFinite(defaults?.latitude) &&
+      Number.isFinite(defaults?.longitude);
+
     setForm({
       ...emptyForm,
       organizationId:
         filterOrganizationId !== "all" ? filterOrganizationId : "",
       role: filterRole !== "all" ? filterRole : "teacher",
       active: filterStatus === "inactive" ? false : true,
+      latitude: hasMapCoordinate ? String(defaults?.latitude) : "",
+      longitude: hasMapCoordinate ? String(defaults?.longitude) : "",
+      locationSource: "manual",
+      locationCapturedAt: hasMapCoordinate ? Date.now() : undefined,
+      mapVisible: true,
     });
     setModalOpen(true);
+  };
+
+  const handleCreateAtLocation = (request: MapCreateRequest) => {
+    if (request.entityType !== "teacher") return;
+
+    openCreate({
+      latitude: request.coordinate.latitude,
+      longitude: request.coordinate.longitude,
+    });
+  };
+
+  const handleTeacherLocationUpdate = async (
+    request: MapLocationUpdateRequest,
+  ) => {
+    if (!authenticated || !accountId || !schoolId || !branchId) {
+      throw new Error(
+        "Sign in and select a school branch first.",
+      );
+    }
+
+    const teacherId = cleanId(
+      request.marker.metadata?.teacherId ||
+        request.marker.id,
+    );
+
+    if (!teacherId) {
+      throw new Error(
+        "The selected teacher could not be identified.",
+      );
+    }
+
+    const existingTeacher = rows.find((row: any) =>
+      sameId(row.id, teacherId),
+    );
+
+    if (!existingTeacher) {
+      throw new Error(
+        "The selected teacher record was not found.",
+      );
+    }
+
+    await updateLocal(
+      "teachers",
+      teacherId,
+      {
+        latitude: request.coordinate.latitude,
+        longitude: request.coordinate.longitude,
+        locationSource: "manual",
+        locationCapturedAt: Date.now(),
+        mapVisible: true,
+        isDeleted: false,
+      } as Partial<Teacher>,
+    );
+
+    showToast(
+      "success",
+      "Teacher location updated.",
+    );
+
+    await load();
   };
 
   const openEdit = (row: Teacher) => {
@@ -1136,6 +1303,21 @@ export default function TeachersPage() {
       email: t.email || "",
       phone: t.phone || "",
       relativePhone: t.relativePhone || "",
+      address: t.address || "",
+      latitude: t.latitude == null ? "" : String(t.latitude),
+      longitude: t.longitude == null ? "" : String(t.longitude),
+      accuracyMeters:
+        t.accuracyMeters == null ? "" : String(t.accuracyMeters),
+      locationLabel: t.locationLabel || "",
+      formattedAddress: t.formattedAddress || "",
+      locationType: t.locationType || "home",
+      locationSource: t.locationSource || "manual",
+      locationPrecision: t.locationPrecision || "exact",
+      locationCapturedAt: t.locationCapturedAt || undefined,
+      mapVisible: t.mapVisible !== false,
+      locationConsentGiven: Boolean(t.locationConsentGiven),
+      locationConsentAt: t.locationConsentAt || undefined,
+      locationRestricted: Boolean(t.locationRestricted),
       employmentDate: t.employmentDate || "",
       salary: t.salary == null ? "" : String(t.salary),
       role: t.role || "teacher",
@@ -1169,6 +1351,18 @@ export default function TeachersPage() {
       return "Age cannot be negative.";
     if (form.salary !== "" && Number(form.salary) < 0)
       return "Salary cannot be negative.";
+    if (form.latitude !== "") {
+      const latitude = Number(form.latitude);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)
+        return "Latitude must be between -90 and 90.";
+    }
+    if (form.longitude !== "") {
+      const longitude = Number(form.longitude);
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)
+        return "Longitude must be between -180 and 180.";
+    }
+    if ((form.latitude === "") !== (form.longitude === ""))
+      return "Enter both latitude and longitude, or clear both.";
     if (form.organizationId && !organizationMap.get(idOf(form.organizationId)))
       return "Selected organization is not in this branch.";
 
@@ -1216,6 +1410,26 @@ export default function TeachersPage() {
         email: form.email.trim() || undefined,
         phone: form.phone.trim() || undefined,
         relativePhone: form.relativePhone.trim() || undefined,
+        address: form.address.trim() || undefined,
+        latitude: form.latitude === "" ? undefined : Number(form.latitude),
+        longitude: form.longitude === "" ? undefined : Number(form.longitude),
+        accuracyMeters:
+          form.accuracyMeters === "" ? undefined : Number(form.accuracyMeters),
+        locationLabel: form.locationLabel.trim() || undefined,
+        formattedAddress: form.formattedAddress.trim() || undefined,
+        locationType: form.locationType,
+        locationSource: form.locationSource,
+        locationPrecision: form.locationPrecision,
+        locationCapturedAt:
+          form.latitude !== "" && form.longitude !== ""
+            ? form.locationCapturedAt || Date.now()
+            : undefined,
+        mapVisible: form.mapVisible,
+        locationConsentGiven: form.locationConsentGiven,
+        locationConsentAt: form.locationConsentGiven
+          ? form.locationConsentAt || Date.now()
+          : undefined,
+        locationRestricted: form.locationRestricted,
         employmentDate: form.employmentDate || undefined,
         salary: form.salary === "" ? undefined : Number(form.salary),
         role: form.role,
@@ -1459,7 +1673,7 @@ export default function TeachersPage() {
         <button
           type="button"
           className="ba-add-inline"
-          onClick={openCreate}
+          onClick={() => openCreate()}
           aria-label="Add teacher"
         >
           +
@@ -1559,6 +1773,44 @@ export default function TeachersPage() {
           toggleActive={toggleActive}
         />
       )}
+      {viewMode === "map" && (
+        <section className="teachers-map-view" aria-label="Teachers map">
+          <div className="teachers-map-summary">
+            <span>Teachers on map</span>
+            <strong>{teacherMarkers.length}</strong>
+            <small>
+              {filteredRows.length - teacherMarkers.length} filtered teacher(s)
+              have no visible coordinates.
+            </small>
+          </div>
+
+          <SchoolMap
+            markers={teacherMarkers}
+            height="min(68vh, 720px)"
+            searchable={false}
+            filterable={false}
+            showLegend={false}
+            cluster
+            fitMarkers
+            allowCreateAtLocation
+            createEntityTypes={["teacher"]}
+            onCreateAtLocation={handleCreateAtLocation}
+            allowLocationEditing
+            onLocationUpdate={handleTeacherLocationUpdate}
+            emptyView={
+              <div className="teachers-map-empty">
+                <span aria-hidden="true">⌖</span>
+                <strong>No teacher locations to display</strong>
+                <small>
+                  Add latitude and longitude to teacher records, or change the
+                  current search and filters.
+                </small>
+              </div>
+            }
+          />
+        </section>
+      )}
+
       {viewMode === "cards" && (
         <section className="ba-list">
           {filteredRows.map((item) => (
@@ -1909,6 +2161,15 @@ function MoreSheet({
           </button>
           <button
             type="button"
+            className={viewMode === "map" ? "active" : ""}
+            onClick={() => setViewMode("map")}
+          >
+            <span>⌖</span>
+            <b>Map view</b>
+            <small>See filtered teachers with saved locations</small>
+          </button>
+          <button
+            type="button"
             className={viewMode === "summary" ? "active" : ""}
             onClick={() => setViewMode("summary")}
           >
@@ -2113,6 +2374,50 @@ function TeacherModal({
   openSignaturePad: () => void;
   save: (event?: React.FormEvent) => void;
 }) {
+  const [locating, setLocating] = useState(false);
+
+  const captureCurrentLocation = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      window.alert("Location access is not available on this device or browser.");
+      return;
+    }
+
+    setLocating(true);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        updateForm({
+          latitude: position.coords.latitude.toFixed(7),
+          longitude: position.coords.longitude.toFixed(7),
+          accuracyMeters: Number.isFinite(position.coords.accuracy)
+            ? String(Math.round(position.coords.accuracy))
+            : "",
+          locationSource: "device_gps",
+          locationCapturedAt: position.timestamp || Date.now(),
+          mapVisible: true,
+        });
+        setLocating(false);
+      },
+      (error) => {
+        setLocating(false);
+        const message =
+          error.code === error.PERMISSION_DENIED
+            ? "Location permission was denied. Allow location access or enter the coordinates manually."
+            : error.code === error.POSITION_UNAVAILABLE
+              ? "Your current location could not be determined."
+              : error.code === error.TIMEOUT
+                ? "Location capture timed out. Please try again."
+                : "Location capture failed.";
+        window.alert(message);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 30000,
+      },
+    );
+  };
+
   return (
     <div className="ba-modal-backdrop">
       <form className="ba-modal" onSubmit={save}>
@@ -2262,6 +2567,227 @@ function TeacherModal({
               />
             </label>
           </div>
+        </section>
+        <section className="ba-form-section">
+          <div className="ba-section-heading-row">
+            <div>
+              <h3>Map Location</h3>
+              <p>
+                Save the teacher&apos;s approved home, workplace, pickup, or
+                other operational location.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              className="ba-media-button secondary"
+              onClick={captureCurrentLocation}
+              disabled={locating}
+            >
+              {locating ? "Getting location..." : "Use Current Location"}
+            </button>
+          </div>
+
+          <div className="ba-form two">
+            <label>
+              <span>Address</span>
+              <textarea
+                value={form.address}
+                onChange={(e) => updateForm({ address: e.target.value })}
+                placeholder="Teacher address"
+              />
+            </label>
+
+            <label>
+              <span>Location Label</span>
+              <input
+                value={form.locationLabel}
+                onChange={(e) => updateForm({ locationLabel: e.target.value })}
+                placeholder="e.g. Teacher home or workplace"
+              />
+            </label>
+
+            <label>
+              <span>Latitude</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                min="-90"
+                max="90"
+                value={form.latitude}
+                onChange={(e) =>
+                  updateForm({
+                    latitude: e.target.value,
+                    locationSource: "manual",
+                  })
+                }
+                placeholder="e.g. 5.603717"
+              />
+            </label>
+
+            <label>
+              <span>Longitude</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                min="-180"
+                max="180"
+                value={form.longitude}
+                onChange={(e) =>
+                  updateForm({
+                    longitude: e.target.value,
+                    locationSource: "manual",
+                  })
+                }
+                placeholder="e.g. -0.186964"
+              />
+            </label>
+
+            <label>
+              <span>Location Type</span>
+              <select
+                value={form.locationType}
+                onChange={(e) =>
+                  updateForm({
+                    locationType: e.target.value as FormState["locationType"],
+                  })
+                }
+              >
+                <option value="home">Home</option>
+                <option value="workplace">Workplace</option>
+                <option value="pickup_point">Pickup point</option>
+                <option value="dropoff_point">Drop-off point</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Location Precision</span>
+              <select
+                value={form.locationPrecision}
+                onChange={(e) =>
+                  updateForm({
+                    locationPrecision:
+                      e.target.value as FormState["locationPrecision"],
+                  })
+                }
+              >
+                <option value="exact">Exact</option>
+                <option value="approximate">Approximate</option>
+                <option value="area_only">Area only</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Accuracy in Metres</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                value={form.accuracyMeters}
+                onChange={(e) =>
+                  updateForm({ accuracyMeters: e.target.value })
+                }
+                placeholder="Filled automatically when using GPS"
+              />
+            </label>
+
+            <label className="wide">
+              <span>Formatted Location Address</span>
+              <textarea
+                value={form.formattedAddress}
+                onChange={(e) =>
+                  updateForm({ formattedAddress: e.target.value })
+                }
+                placeholder="Readable address or directions for this map point"
+              />
+            </label>
+          </div>
+
+          <div className="ba-location-options">
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.mapVisible}
+                onChange={(e) =>
+                  updateForm({ mapVisible: e.target.checked })
+                }
+              />
+              <span>
+                <strong>Show on teacher map</strong>
+                <small>
+                  The point can appear to authorized users within the branch.
+                </small>
+              </span>
+            </label>
+
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.locationConsentGiven}
+                onChange={(e) =>
+                  updateForm({
+                    locationConsentGiven: e.target.checked,
+                    locationConsentAt: e.target.checked
+                      ? form.locationConsentAt || Date.now()
+                      : undefined,
+                  })
+                }
+              />
+              <span>
+                <strong>Location consent recorded</strong>
+                <small>
+                  Confirm that the school is permitted to store this location.
+                </small>
+              </span>
+            </label>
+
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.locationRestricted}
+                onChange={(e) =>
+                  updateForm({ locationRestricted: e.target.checked })
+                }
+              />
+              <span>
+                <strong>Restricted location</strong>
+                <small>
+                  Mark this point as sensitive for stricter access controls.
+                </small>
+              </span>
+            </label>
+          </div>
+
+          {(form.latitude || form.longitude) && (
+            <div className="ba-location-captured">
+              <span>
+                Coordinate source: {form.locationSource.replace("_", " ")}
+              </span>
+              {form.locationCapturedAt ? (
+                <small>
+                  Captured {new Date(form.locationCapturedAt).toLocaleString()}
+                </small>
+              ) : null}
+              <button
+                type="button"
+                onClick={() =>
+                  updateForm({
+                    latitude: "",
+                    longitude: "",
+                    accuracyMeters: "",
+                    locationCapturedAt: undefined,
+                    locationSource: "manual",
+                  })
+                }
+              >
+                Clear coordinates
+              </button>
+            </div>
+          )}
         </section>
         <section className="ba-form-section">
           <h3>Photos</h3>
@@ -3792,6 +4318,186 @@ const css = `
 .ba-camera-actions button:disabled {
   opacity: .65;
   cursor: not-allowed;
+}
+
+
+/* Teacher map and location workflow. */
+.teachers-map-view {
+  display: grid;
+  gap: 10px;
+}
+
+.teachers-map-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ba-primary) 16%, var(--border, rgba(0,0,0,.10)));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ba-primary) 4%, var(--card-bg, var(--surface, #fff)));
+}
+
+.teachers-map-summary span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.teachers-map-summary strong {
+  color: var(--ba-primary);
+  font-size: 17px;
+}
+
+.teachers-map-summary small {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: .64;
+}
+
+.teachers-map-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text, #111827);
+}
+
+.teachers-map-empty > span {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: var(--ba-primary);
+  background: color-mix(in srgb, var(--ba-primary) 10%, transparent);
+  font-size: 22px;
+}
+
+.teachers-map-empty strong {
+  font-size: 13px;
+}
+
+.teachers-map-empty small {
+  max-width: 360px;
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: .62;
+}
+
+@media (max-width: 640px) {
+  .teachers-map-summary {
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .teachers-map-summary small {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+
+.ba-section-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ba-section-heading-row h3 {
+  margin: 0;
+}
+
+.ba-section-heading-row p {
+  margin: 4px 0 0;
+  color: var(--ba-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.ba-location-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ba-check-row {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ba-border);
+  border-radius: 12px;
+  background: var(--ba-card);
+  cursor: pointer;
+}
+
+.ba-check-row input {
+  width: 17px !important;
+  height: 17px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.ba-check-row > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ba-check-row strong {
+  font-size: 0.82rem;
+}
+
+.ba-check-row small {
+  color: var(--ba-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ba-location-captured {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--ba-primary) 8%, var(--ba-card));
+  border: 1px solid color-mix(in srgb, var(--ba-primary) 22%, var(--ba-border));
+  font-size: 0.75rem;
+}
+
+.ba-location-captured small {
+  color: var(--ba-muted);
+}
+
+.ba-location-captured button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--ba-primary);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .ba-section-heading-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ba-section-heading-row .ba-media-button {
+    width: 100%;
+  }
+
+  .ba-location-captured button {
+    margin-left: 0;
+  }
 }
 
 `;

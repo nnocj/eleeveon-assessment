@@ -24,7 +24,7 @@
  * - schoolCurrencySettings
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+/*import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { useAccount } from "../../context/account-context";
@@ -340,7 +340,7 @@ export default function SchoolPaymentsOverview() {
 
       setBranches(
         branchRows
-          .filter((row: Branch) => sameSchool(row, accountId, Number(schoolId)))
+          .filter((row: Branch) => sameSchool(row, accountId, String(schoolId)))
           .sort((a: Branch, b: Branch) => String(a.name || "").localeCompare(String(b.name || ""))) as Branch[]
       );
 
@@ -1539,3 +1539,4 @@ const css = `
   .spy-mini-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
 }
 `;
+*/

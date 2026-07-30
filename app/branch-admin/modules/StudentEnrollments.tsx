@@ -64,6 +64,7 @@ import {
 
 import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
 type ViewMode = "cards" | "table" | "summary";
 type ToastTone = "success" | "error" | "info";
 type EnrollmentStatus = "active" | "completed" | "promoted" | "withdrawn";
@@ -203,6 +204,7 @@ type EnrollmentView = {
   student?: Student;
   studentName: string;
   admissionNumber: string;
+  studentPhotoUrl?: string;
   className: string;
   academicStructureName: string;
   academicPeriodName: string;
@@ -379,6 +381,15 @@ export default function StudentEnrollments() {
 
   const [rows, setRows] = useState<StudentEnrollment[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const resolvedStudentMediaById = useEntityMediaUrls({
+    accountId,
+    ownerTable: "students",
+    rows: students,
+    fields: [
+      { fieldKey: "photo", mediaIdKey: "photoMediaId" },
+      { fieldKey: "coverPhoto", mediaIdKey: "coverPhotoMediaId" },
+    ],
+  });
   const [classes, setClasses] = useState<Class[]>([]);
   const [academicStructures, setAcademicStructures] = useState<
     AcademicStructure[]
@@ -601,6 +612,9 @@ export default function StudentEnrollments() {
         student,
         studentName: student?.fullName || `Student #${row.studentId}`,
         admissionNumber: student?.admissionNumber || "",
+        studentPhotoUrl:
+          resolvedStudentMediaById[idOf(student?.id)]?.photo ||
+          safeRecordMediaValue(student?.photo),
         className,
         academicStructureName:
           structure?.name || `Structure #${row.academicStructureId}`,
@@ -609,7 +623,7 @@ export default function StudentEnrollments() {
         currentClassMatches: sameId(student?.currentClassId, row.classId),
       };
     });
-  }, [classMap, periodMap, rows, studentMap, structureMap]);
+  }, [classMap, periodMap, resolvedStudentMediaById, rows, studentMap, structureMap]);
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -1155,6 +1169,7 @@ export default function StudentEnrollments() {
           remove={remove}
           setStatus={setStatus}
           syncCurrentClass={syncCurrentClass}
+          primary={primary}
         />
       )}
 
@@ -1225,6 +1240,7 @@ export default function StudentEnrollments() {
           remove={remove}
           setStatus={setStatus}
           syncCurrentClass={syncCurrentClass}
+          primary={primary}
           onClose={() => setSelectedItem(null)}
         />
       )}
@@ -1262,7 +1278,7 @@ function EnrollmentListItem({
     <button type="button" className="enrollment-row" onClick={onOpen}>
       <Avatar
         name={item.studentName}
-        photo={safeRecordMediaValue((item.student as any)?.photo)}
+        photo={item.studentPhotoUrl}
         primary={primary}
       />
 
@@ -1543,6 +1559,7 @@ function ActionSheet({
   remove,
   setStatus,
   syncCurrentClass,
+  primary,
   onClose,
 }: {
   item: EnrollmentView;
@@ -1550,6 +1567,7 @@ function ActionSheet({
   remove: (row: StudentEnrollment) => void;
   setStatus: (row: StudentEnrollment, status: EnrollmentStatus) => void;
   syncCurrentClass: (row: StudentEnrollment) => void;
+  primary: string;
   onClose: () => void;
 }) {
   const row: any = item.row;
@@ -1558,11 +1576,18 @@ function ActionSheet({
     <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
       <section className="ba-sheet small">
         <div className="ba-sheet-profile">
-          <div>
-            <h2>{item.studentName}</h2>
-            <p>
-              {item.className} · {statusLabel(row.status)}
-            </p>
+          <div className="enrollment-profile-identity">
+            <Avatar
+              name={item.studentName}
+              photo={item.studentPhotoUrl}
+              primary={primary}
+            />
+            <div>
+              <h2>{item.studentName}</h2>
+              <p>
+                {item.className} · {statusLabel(row.status)}
+              </p>
+            </div>
           </div>
           <button
             type="button"
@@ -1681,12 +1706,14 @@ function TableView({
   remove,
   setStatus,
   syncCurrentClass,
+  primary,
 }: {
   rows: EnrollmentView[];
   openEdit: (row: StudentEnrollment) => void;
   remove: (row: StudentEnrollment) => void;
   setStatus: (row: StudentEnrollment, status: EnrollmentStatus) => void;
   syncCurrentClass: (row: StudentEnrollment) => void;
+  primary: string;
 }) {
   return (
     <section className="ba-table-card">
@@ -1712,8 +1739,17 @@ function TableView({
               return (
                 <tr key={String(item.id)}>
                   <td>
-                    <strong>{item.studentName}</strong>
-                    <span>{item.admissionNumber || "No admission number"}</span>
+                    <div className="enrollment-table-student">
+                      <Avatar
+                        name={item.studentName}
+                        photo={item.studentPhotoUrl}
+                        primary={primary}
+                      />
+                      <div>
+                        <strong>{item.studentName}</strong>
+                        <span>{item.admissionNumber || "No admission number"}</span>
+                      </div>
+                    </div>
                   </td>
                   <td>{item.className}</td>
                   <td>{item.academicStructureName}</td>
@@ -2076,6 +2112,10 @@ const css = `
 .ba-table-scroll th { background:color-mix(in srgb,var(--ba-primary) 6%,var(--card-bg,#fff)); color:var(--muted,#64748b); font-size:11px; font-weight:1000; text-transform:uppercase; letter-spacing:.07em; }
 .ba-table-scroll td strong,.ba-table-scroll td span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ba-table-scroll td span { margin-top:3px; color:var(--muted,#64748b); font-size:11px; }
+.enrollment-table-student,.enrollment-profile-identity { display:flex; align-items:center; gap:10px; min-width:0; }
+.enrollment-table-student > div:last-child,.enrollment-profile-identity > div:last-child { min-width:0; }
+.enrollment-table-student .ba-avatar { width:38px; height:38px; flex-basis:38px; border-radius:14px; font-size:13px; box-shadow:none; }
+.enrollment-profile-identity .ba-avatar { width:56px; height:56px; flex-basis:56px; border-radius:19px; }
 .ba-empty-table { padding:22px; text-align:center; color:var(--muted,#64748b); font-weight:850; }
 .ba-analysis span { color:var(--muted,#64748b); font-size:11px; font-weight:950; text-transform:uppercase; letter-spacing:.08em; }
 .ba-analysis strong { display:block; margin-top:8px; font-size:clamp(22px,7vw,30px); line-height:1; font-weight:1000; letter-spacing:-.06em; overflow-wrap:anywhere; }

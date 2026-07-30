@@ -32,9 +32,9 @@ import { useActiveBranch } from "../context/active-branch-context";
 import Parentdashboard from "./modules/Parentdashboard";
 import Children from "./modules/Children";
 import Childattendance from "./modules/Childattendance";
-import Childresults from "./modules/Childresults";
+import MyChildReports from "./modules/Mychildreports";
+import MyChildCumulativeRecord from "./modules/MyChildCumulativeRecord";
 import Childfees from "./modules/Childfees";
-import Payments from "./modules/Payments";
 import Announcements from "./modules/Announcements";
 import Calendar from "./modules/Calendar";
 import ChildTimeTable from "./modules/ChildTimetable";
@@ -162,9 +162,14 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         icon: "📅",
       },
       {
-        key: "childResults",
-        label: "Results",
+        key: "myChildReport",
+        label: "Reports",
         icon: "📊",
+      },
+      {
+        key: "myChildCumulativeRecord",
+        label: "Cumulative Records",
+        icon: "📑",
       },
     ],
   },
@@ -177,11 +182,7 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         label: "Fee Statements",
         icon: "💳",
       },
-      {
-        key: "payments",
-        label: "Payment History",
-        icon: "🧾",
-      },
+      
     ],
   },
   {
@@ -274,9 +275,9 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   parentDashboard: ParentDashboardRoute,
   children: Children,
   childAttendance: Childattendance,
-  childResults: Childresults,
+  myChildReport: MyChildReports,
+  myChildCumulativeRecord: MyChildCumulativeRecord,
   childFees: Childfees,
-  payments: Payments,
   announcements: Announcements,
   messages: Messages,
   calendar: Calendar,

@@ -1,4 +1,4 @@
-"use client";
+//"use client";
 
 /**
  * app/school-admin/modules/Schoolcommunications.tsx
@@ -18,7 +18,7 @@
  *
  * It does NOT bypass branch admin to message parents/students directly.
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -1987,3 +1987,4 @@ const css = `
   .sc-drawer { width: min(96vw, 700px); padding: 12px; }
 }
 `;
+*/

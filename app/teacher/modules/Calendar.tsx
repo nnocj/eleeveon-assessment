@@ -7,7 +7,7 @@
  * ---------------------------------------------------------
  * Teacher-scoped module for Eleeveon Schools.
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -463,7 +463,7 @@ export default function Calendar() {
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [accountId, schoolId, branchId]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ /*}, [accountId, schoolId, branchId]);
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
@@ -596,3 +596,4 @@ export default function Calendar() {
     </main>
   );
 }
+*/

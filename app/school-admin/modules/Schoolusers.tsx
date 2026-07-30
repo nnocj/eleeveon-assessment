@@ -1,4 +1,4 @@
-"use client";
+//"use client";
 
 /**
  * app/school-admin/modules/Schoolusers_FIXED_LOAD_BRANCH_ADMINS.tsx
@@ -31,6 +31,8 @@
  * - users OR accountUsers
  * - userMemberships OR memberships
  */
+/*
+
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -51,14 +53,14 @@ type AccessFilter = "all" | "active" | "inactive" | "temporary";
 
 type TenantRow = {
   accountId?: string | null;
-  schoolId?: number | null;
-  branchId?: number | null;
+  schoolId?: string | number | null;
+  branchId?: string | number | null;
   isDeleted?: boolean;
   active?: boolean;
 };
 
 type Branch = TenantRow & {
-  id?: number;
+  id?: string | number;
   name?: string;
   code?: string;
   location?: string;
@@ -932,16 +934,16 @@ export default function Schoolusers() {
     try {
       setLoading(true);
 
-      const branchRows = await db.branches.toArray();
+      const branchRows = (await db.branches.toArray()) as any[];
 
-      const schoolBranches = branchRows
-        .filter((row: Branch) => sameSchool(row, accountId, Number(schoolId)))
+      const schoolBranches = (branchRows as Branch[])
+        .filter((row: Branch) => sameSchool(row as any, accountId, String(schoolId)))
         .filter((row: Branch) => row.active !== false);
 
-      const branchIds = new Set(
+      const branchIds = new Set<number>(
         schoolBranches
-          .map((branch: Branch) => branch.id)
-          .filter(Boolean) as number[]
+          .map((branch: Branch) => Number(branch.id))
+          .filter((id) => Number.isFinite(id) && id > 0)
       );
 
       let userRows: AppUser[] = [];
@@ -3066,3 +3068,4 @@ const css = `
   }
 }
 `;
+*/

@@ -135,6 +135,7 @@ import StudentReportCard from "./reports/components/StudentReportCard";
 import CumulativeReportBook from "./reports/components/CumulativeReportBook";
 import CumulativeTranscriptCard from "./reports/components/CumulativeTranscriptCard";
 import BroadsheetCard from "./reports/components/BroadsheetCard";
+import CredentialDesignSettings from "./identity/CredentialDesignSettings";
 
 import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
@@ -227,6 +228,7 @@ type SettingsSection =
   | "dashboardMedia"
   | "reportMedia"
   | "reportTemplates"
+  | "identityCredentials"
   | "gallery";
 
 type ImageField =
@@ -4470,6 +4472,14 @@ export default function Branchsettings() {
         tone: reportTemplateForm.active ? "green" : "gray",
       },
       {
+        key: "identityCredentials" as SettingsSection,
+        icon: "▣",
+        title: "Identity Credential Design",
+        subtitle: "QR cards, school IDs and passes",
+        detail: "Templates, colours, visible fields and print layout",
+        tone: "blue",
+      },
+      {
         key: "gallery" as SettingsSection,
         icon: "🌄",
         title: "Gallery",
@@ -4858,6 +4868,18 @@ export default function Branchsettings() {
         />
       )}
 
+      {sectionOpen === "identityCredentials" && (
+        <CredentialDesignSettings
+          accountId={selectedAccountId}
+          schoolId={selectedSchoolId}
+          branchId={selectedBranchId}
+          school={school}
+          branch={branch}
+          primaryColor={String(primary)}
+          onClose={() => setSectionOpen(null)}
+        />
+      )}
+
       {sectionOpen === "gallery" && (
         <GallerySheet
           images={form.schoolGalleryImages}
@@ -5218,6 +5240,12 @@ function MoreSheet({
       icon: "🧾",
       label: "Report Card Template",
       note: "Template, visibility, labels and report fields",
+    },
+    {
+      key: "identityCredentials",
+      icon: "▣",
+      label: "Identity Credential Design",
+      note: "QR cards, school IDs, parent passes and visitor badges",
     },
     {
       key: "gallery",

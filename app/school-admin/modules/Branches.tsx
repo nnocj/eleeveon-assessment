@@ -2,972 +2,251 @@
 
 /**
  * app/school-admin/modules/Branches.tsx
- * ---------------------------------------------------------
- * SCHOOL ADMIN — BRANCHES
- * ---------------------------------------------------------
+ * Eleeveon School Admin Branches V3.
+ * Assigned-school scoped, offline-first, mobile-first, syncUtils powered.
  *
- * School-scoped branch management.
+ * Rebuilt from the Branch Admin Students golden pattern:
+ * - compact search strip, inline + add, slider filter, More sheet
+ * - cards/table/analytics modes under More
+ * - createLocal(...) for branch creation
+ * - updateLocal(...) for edits and status changes
+ * - softDeleteLocal(...) for local soft delete
+ * - listActiveLocal(...) for active branch lookup
+ * - saveImageAsset(...) for logo/photo/banner image so large Base64 files stay out of branch records
+ * - logoMediaId/photoMediaId/bannerImageMediaId remain small references on the Branch row
+ * - upload and camera capture share the same media pipeline
+ * - unsaved uploads use ownerTempKey and are attached after create/update
+ * - UI uses the same ba-* theme classes as Students for dark mode and local settings support
  *
- * School admin can:
- * - View all branches under the assigned school.
- * - Create/edit branch details.
- * - Activate/deactivate branches.
- * - Search/filter branches.
- * - Switch between card, table and analytics views.
+ * Permanent-ID persistence fix:
+ * - Preserves stable string UUIDs for Branch and School IDs.
+ * - Verifies every create/update directly from Dexie before reporting success.
+ * - Confirms the saved branch belongs to the active account and selected school.
+ * - Keeps media ownership linked to the real branch UUID.
  *
- * School admin cannot:
- * - Switch to another school from here.
- * - Create branches outside the assigned school.
+ * Workspace source fix:
+ * - Resolves account/workspace from eleeveon_open_workspace first.
+ * - Falls back to active membership, AccountContext, settings, then storage.
+ * - Prevents stale owner branch data after role/workspace switching.
+ *
+ * Branch proximity map:
+ * - adds branch buildings as map anchors with a dedicated branch/school icon.
+ * - optionally overlays students, teachers and parents from the selected owner account.
+ * - keeps each people category in its own map layer for distinct colors and icons.
+ * - uses profile-photo markers when a person has an available photo.
+ * - lets owners compare where people live/work relative to branch buildings.
+ * - supports creating and moving branch locations through the shared SchoolMap workflow.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
+import { useActiveMembership } from "../../context/active-membership-context";
 import { useActiveBranch } from "../../context/active-branch-context";
+import { db, type School, type Branch, type Student, type Teacher, type Parent } from "../../lib/db/db";
+import { createLocal, updateLocal, softDeleteLocal, listActiveLocal } from "../../lib/sync/syncUtils";
+import {
+  MediaOwners,
+  MediaFieldKeys,
+  attachCameraStreamToVideo,
+  attachMediaAssetToOwner,
+  captureImageFileFromVideo,
+  createMediaSessionKey as createSharedMediaSessionKey,
+  getCameraUnavailableMessage,
+  getMediaObjectUrl,
+  getOwnerFieldMediaAsset,
+  isCameraApiAvailable,
+  openCameraStream,
+  revokeMediaObjectUrl,
+  saveImageAsset,
+  stopCameraStream,
+  type CameraFacingMode,
+} from "../../lib/media/mediaAssetUtils";
+import {
+  SchoolMap,
+  type MapLocationUpdateRequest,
+} from "../../components/maps";
+import { genericEntityToMarker, type MapMarker } from "../../lib/maps";
 
-import { db } from "../../lib/db/db";
+type ViewMode = "cards" | "table" | "map" | "summary";
+type ToastTone = "success" | "error" | "info";
+type BranchFilter = "all" | "active" | "inactive" | "no_contact" | "no_school";
+type CameraField = "logo" | "photo" | "bannerImage";
+type PeopleLayer = "students" | "teachers" | "parents";
 
-// ======================================================
-// TYPES
-// ======================================================
-
-type ViewMode = "cards" | "table" | "analytics";
-type BranchFilter = "all" | "active" | "inactive";
-
-type Branch = {
-  id?: number;
-  localId?: number;
-  cloudId?: string | null;
-  accountId?: string | null;
-  schoolId?: number | null;
-  branchId?: number | null;
-
-  name?: string;
-  code?: string;
-  location?: string;
-  address?: string;
-  phone?: string;
-  email?: string;
-  headName?: string;
-  headPhone?: string;
-  headEmail?: string;
-
-  active?: boolean;
-  status?: string;
-  isDeleted?: boolean;
-
-  createdAt?: number;
-  updatedAt?: number;
-  version?: number;
-  deviceId?: string;
-  synced?: any;
+type BranchCreateDefaults = {
+  latitude?: number;
+  longitude?: number;
 };
 
-type School = {
-  id?: number;
-  name?: string;
+type TenantRow = {
+  id?: number | string;
   accountId?: string | null;
-  active?: boolean;
+  schoolId?: number | string | null;
+  branchId?: number | string | null;
   isDeleted?: boolean;
+  active?: boolean;
+  status?: string;
+  createdAt?: number | string | null;
+  updatedAt?: number | string | null;
 };
 
 type FormState = {
-  id?: number;
+  id?: string;
+  schoolId: string;
   name: string;
   code: string;
-  location: string;
-  address: string;
   phone: string;
   email: string;
-  headName: string;
-  headPhone: string;
-  headEmail: string;
+  address: string;
+  city: string;
+  latitude: string;
+  longitude: string;
+  accuracyMeters: string;
+  locationLabel: string;
+  formattedAddress: string;
+  locationType: "school" | "campus" | "office" | "other";
+  locationSource: "manual" | "device_gps" | "geocoded" | "imported";
+  locationPrecision: "exact" | "approximate" | "area_only";
+  locationCapturedAt?: number;
+  mapVisible: boolean;
+  locationRestricted: boolean;
+  logo: string;
+  logoMediaId?: string;
+  photo: string;
+  photoMediaId?: string;
+  bannerImage: string;
+  bannerImageMediaId?: string;
   active: boolean;
 };
 
-type Breakdown = {
-  name: string;
-  count: number;
+type BranchView = {
+  id: string;
+  row: Branch;
+  school?: School;
+  schoolName: string;
+  logoUrl?: string;
+  photoUrl?: string;
+  bannerImageUrl?: string;
+  active: boolean;
 };
 
-// ======================================================
-// CONSTANTS
-// ======================================================
+type OpenWorkspaceSession = {
+  membership?: Record<string, any> | null;
+  membershipId?: string | null;
+  role?: string | null;
+  accountId?: string | null;
+  schoolId?: number | string | null;
+  branchId?: number | string | null;
+  openedAt?: number;
+};
 
-const DEFAULT_FORM: FormState = {
+const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
+
+function safeStorageRead(key: string) {
+  if (typeof window === "undefined") return null;
+
+  try {
+    return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeJsonRead<T>(key: string): T | null {
+  const raw = safeStorageRead(key);
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function readOpenWorkspaceSession() {
+  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
+}
+
+const emptyForm: FormState = {
+  schoolId: "",
   name: "",
   code: "",
-  location: "",
-  address: "",
   phone: "",
   email: "",
-  headName: "",
-  headPhone: "",
-  headEmail: "",
+  address: "",
+  city: "",
+  latitude: "",
+  longitude: "",
+  accuracyMeters: "",
+  locationLabel: "",
+  formattedAddress: "",
+  locationType: "school",
+  locationSource: "manual",
+  locationPrecision: "exact",
+  locationCapturedAt: undefined,
+  mapVisible: true,
+  locationRestricted: false,
+  logo: "",
+  logoMediaId: undefined,
+  photo: "",
+  photoMediaId: undefined,
+  bannerImage: "",
+  bannerImageMediaId: undefined,
   active: true,
 };
 
-// ======================================================
-// HELPERS
-// ======================================================
+const idOf = (v: any) => {
+  if (v === undefined || v === null || v === "") return "";
+  return String(v).trim();
+};
 
-const now = () => Date.now();
+const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
+const safeLower = (v: any) => String(v || "").toLowerCase().trim();
+const tableSafe = (name: string) => (db as any)[name];
 
-function normalizeText(value?: string) {
-  return String(value || "").trim().replace(/\s+/g, " ");
+const cleanText = (v: any) => String(v || "").trim();
+const branchName = (row?: Partial<Branch>) => cleanText((row as any)?.name) || "Unnamed branch";
+const schoolName = (row?: Partial<School>) => cleanText((row as any)?.name) || "Unnamed school";
+const isActiveBranch = (row: any) => !row?.isDeleted && row?.active !== false && !["deleted", "archived", "inactive"].includes(safeLower(row?.status));
+const statusLabel = (active?: boolean) => (active === false ? "Inactive" : "Active");
+
+function statusTone(active?: boolean): "green" | "red" | "blue" | "orange" | "gray" {
+  return active === false ? "red" : "green";
 }
 
-function normalizeEmail(value?: string) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function normalizePhone(value?: string) {
-  return String(value || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .replace(/[^\d+()\-\s]/g, "");
-}
-
-function sameSchool(row: Branch, accountId?: string | null, schoolId?: number | null) {
-  if (!row || row.isDeleted) return false;
-  return (
-    (row.accountId || accountId) === accountId &&
-    Number(row.schoolId ?? schoolId) === Number(schoolId)
-  );
-}
-
-function initials(name: string) {
-  return String(name || "B")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("") || "B";
-}
-
-function branchCodeFromName(name: string) {
-  const clean = normalizeText(name);
-  if (!clean) return "";
-
-  const letters = clean
-    .split(/\s+/)
-    .map((part) => part[0]?.toUpperCase())
-    .join("")
-    .replace(/[^A-Z0-9]/g, "");
-
-  return letters.slice(0, 6) || clean.slice(0, 3).toUpperCase();
-}
-
-function formatDate(value?: number) {
-  if (!value) return "Not recorded";
-
+const timeText = (v?: string | number | null) => {
+  if (!v) return "Not set";
+  const t = typeof v === "number" ? v : new Date(v).getTime();
+  if (!Number.isFinite(t)) return "Not set";
   try {
-    return new Intl.DateTimeFormat(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-    }).format(new Date(value));
+    return new Intl.DateTimeFormat("en-GH", { month: "short", day: "2-digit", year: "numeric" }).format(new Date(t));
   } catch {
-    return "Not recorded";
+    return "Not set";
   }
-}
-
-// ======================================================
-// COMPONENT
-// ======================================================
-
-export default function Branches() {
-  const router = useRouter();
-
-  const {
-    accountId,
-    authenticated,
-    loading: accountLoading,
-  } = useAccount();
-
-  const { settings, loading: settingsLoading } = useSettings();
-
-  const {
-    activeSchool,
-    activeSchoolId,
-    loading: contextLoading,
-  } = useActiveBranch();
-
-  const schoolId = activeSchoolId || activeSchool?.id || settings?.schoolId;
-  const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
-
-  // ======================================================
-  // STATE
-  // ======================================================
-
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-
-  const [school, setSchool] = useState<School | null>(null);
-  const [branches, setBranches] = useState<Branch[]>([]);
-
-  const [viewMode, setViewMode] = useState<ViewMode>("cards");
-  const [filter, setFilter] = useState<BranchFilter>("all");
-  const [search, setSearch] = useState("");
-
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [form, setForm] = useState<FormState>(DEFAULT_FORM);
-  const [message, setMessage] = useState("");
-
-  // ======================================================
-  // AUTH
-  // ======================================================
-
-  useEffect(() => {
-    if (accountLoading || contextLoading) return;
-
-    if (!authenticated || !accountId) {
-      router.replace("/login");
-      return;
-    }
-
-    if (!activeSchoolId && !settings?.schoolId) {
-      router.replace("/owner");
-    }
-  }, [
-    accountLoading,
-    contextLoading,
-    authenticated,
-    accountId,
-    activeSchoolId,
-    settings?.schoolId,
-    router,
-  ]);
-
-  // ======================================================
-  // LOAD
-  // ======================================================
-
-  const load = async () => {
-    if (!authenticated || !accountId || !schoolId) {
-      setBranches([]);
-      setSchool(null);
-      setLoading(false);
-      return;
-    }
-
-    try {
-      setLoading(true);
-
-      const [schoolRows, branchRows] = await Promise.all([
-        db.schools.toArray(),
-        db.branches.toArray(),
-      ]);
-
-      const currentSchool =
-        schoolRows.find((row: School) => row.id === Number(schoolId) && row.accountId === accountId && !row.isDeleted) ||
-        activeSchool ||
-        null;
-
-      const scopedBranches = branchRows
-        .filter((row: Branch) => sameSchool(row, accountId, Number(schoolId)))
-        .sort((a: Branch, b: Branch) => String(a.name || "").localeCompare(String(b.name || "")));
-
-      setSchool(currentSchool as School | null);
-      setBranches(scopedBranches as Branch[]);
-    } catch (error) {
-      console.error("Failed to load branches:", error);
-      alert("Failed to load school branches.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, accountId, schoolId]);
-
-  // ======================================================
-  // DERIVED
-  // ======================================================
-
-  const filteredBranches = useMemo(() => {
-    const query = search.trim().toLowerCase();
-
-    return branches.filter((branch) => {
-      const active = branch.active !== false && branch.status !== "inactive";
-
-      if (filter === "active" && !active) return false;
-      if (filter === "inactive" && active) return false;
-
-      if (!query) return true;
-
-      return `
-        ${branch.name}
-        ${branch.code}
-        ${branch.location}
-        ${branch.address}
-        ${branch.phone}
-        ${branch.email}
-        ${branch.headName}
-        ${branch.headPhone}
-        ${branch.headEmail}
-      `
-        .toLowerCase()
-        .includes(query);
-    });
-  }, [branches, filter, search]);
-
-  const summary = useMemo(() => {
-    const active = branches.filter((branch) => branch.active !== false && branch.status !== "inactive").length;
-    const inactive = branches.length - active;
-    const withHead = branches.filter((branch) => normalizeText(branch.headName)).length;
-    const withContact = branches.filter((branch) => normalizeText(branch.phone) || normalizeEmail(branch.email)).length;
-
-    return {
-      total: branches.length,
-      active,
-      inactive,
-      withHead,
-      withContact,
-      missingContact: branches.length - withContact,
-    };
-  }, [branches]);
-
-  const statusBreakdown = useMemo<Breakdown[]>(() => {
-    return [
-      { name: "Active", count: summary.active },
-      { name: "Inactive", count: summary.inactive },
-      { name: "With Branch Head", count: summary.withHead },
-      { name: "Missing Contact", count: summary.missingContact },
-    ].filter((item) => item.count > 0);
-  }, [summary]);
-
-  const locationBreakdown = useMemo<Breakdown[]>(() => {
-    const map = new Map<string, number>();
-
-    branches.forEach((branch) => {
-      const location = normalizeText(branch.location) || "No location";
-      map.set(location, (map.get(location) || 0) + 1);
-    });
-
-    return Array.from(map.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  }, [branches]);
-
-  // ======================================================
-  // ACTIONS
-  // ======================================================
-
-  const updateForm = <K extends keyof FormState>(key: K, value: FormState[K]) => {
-    setForm((current) => {
-      const next = {
-        ...current,
-        [key]: value,
-      };
-
-      if (key === "name" && !current.code.trim()) {
-        next.code = branchCodeFromName(String(value));
-      }
-
-      return next;
-    });
-
-    setMessage("");
-  };
-
-  const openCreate = () => {
-    setForm(DEFAULT_FORM);
-    setMessage("");
-    setDrawerOpen(true);
-  };
-
-  const openEdit = (branch: Branch) => {
-    setForm({
-      id: branch.id,
-      name: branch.name || "",
-      code: branch.code || "",
-      location: branch.location || "",
-      address: branch.address || "",
-      phone: branch.phone || "",
-      email: branch.email || "",
-      headName: branch.headName || "",
-      headPhone: branch.headPhone || "",
-      headEmail: branch.headEmail || "",
-      active: branch.active !== false && branch.status !== "inactive",
-    });
-
-    setMessage("");
-    setDrawerOpen(true);
-  };
-
-  const validate = () => {
-    if (!form.name.trim()) return "Branch name is required.";
-
-    if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
-      return "Please enter a valid branch email address.";
-    }
-
-    if (form.headEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.headEmail.trim())) {
-      return "Please enter a valid branch head email address.";
-    }
-
-    const duplicate = branches.find((branch) => {
-      if (form.id && branch.id === form.id) return false;
-      return (
-        normalizeText(branch.name).toLowerCase() === normalizeText(form.name).toLowerCase() ||
-        Boolean(form.code && branch.code && branch.code.toLowerCase() === form.code.toLowerCase())
-      );
-    });
-
-    if (duplicate) return "A branch with this name or code already exists.";
-
-    return "";
-  };
-
-  const saveBranch = async () => {
-    const error = validate();
-
-    if (error) {
-      setMessage(error);
-      return;
-    }
-
-    if (!accountId || !schoolId) {
-      setMessage("Assigned school context is required.");
-      return;
-    }
-
-    try {
-      setSaving(true);
-
-      const payload: Partial<Branch> = {
-        accountId,
-        schoolId: Number(schoolId),
-        branchId: form.id,
-        name: normalizeText(form.name),
-        code: normalizeText(form.code) || branchCodeFromName(form.name),
-        location: normalizeText(form.location) || undefined,
-        address: normalizeText(form.address) || undefined,
-        phone: normalizePhone(form.phone) || undefined,
-        email: normalizeEmail(form.email) || undefined,
-        headName: normalizeText(form.headName) || undefined,
-        headPhone: normalizePhone(form.headPhone) || undefined,
-        headEmail: normalizeEmail(form.headEmail) || undefined,
-        active: form.active,
-        status: form.active ? "active" : "inactive",
-        isDeleted: false,
-        updatedAt: now(),
-        synced: "pending" as any,
-      };
-
-      if (form.id) {
-        const existing = branches.find((branch) => branch.id === form.id);
-
-        await db.branches.update(form.id, {
-          ...payload,
-          version: Number(existing?.version || 0) + 1,
-        } as any);
-      } else {
-        const id = await db.branches.add({
-          ...payload,
-          branchId: undefined,
-          createdAt: now(),
-          version: 1,
-        } as any);
-
-        await db.branches.update(Number(id), {
-          branchId: Number(id),
-          updatedAt: now(),
-        } as any);
-      }
-
-      setDrawerOpen(false);
-      await load();
-    } catch (error) {
-      console.error("Failed to save branch:", error);
-      setMessage("Failed to save branch. Please try again.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const toggleBranch = async (branch: Branch) => {
-    if (!branch.id) return;
-
-    try {
-      const nextActive = !(branch.active !== false && branch.status !== "inactive");
-
-      await db.branches.update(branch.id, {
-        active: nextActive,
-        status: nextActive ? "active" : "inactive",
-        updatedAt: now(),
-        version: Number(branch.version || 0) + 1,
-        synced: "pending" as any,
-      } as any);
-
-      await load();
-    } catch (error) {
-      console.error("Failed to update branch status:", error);
-      alert("Failed to update branch status.");
-    }
-  };
-
-  // ======================================================
-  // STATES
-  // ======================================================
-
-  if (accountLoading || contextLoading || settingsLoading || loading) {
-    return (
-      <main className="sbranches-page" style={{ "--sbranches-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="sbranches-state-card">
-          <div className="sbranches-spinner" />
-          <h2>Opening branches...</h2>
-          <p>Loading school branches and coverage details.</p>
-        </section>
-      </main>
-    );
-  }
-
-  if (!authenticated || !accountId) {
-    return (
-      <main className="sbranches-page" style={{ "--sbranches-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="sbranches-state-card">
-          <h2>Redirecting to login...</h2>
-          <p>You must sign in before managing branches.</p>
-        </section>
-      </main>
-    );
-  }
-
-  if (!schoolId) {
-    return (
-      <main className="sbranches-page" style={{ "--sbranches-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="sbranches-state-card">
-          <h2>Assigned school required</h2>
-          <p>Branches must be managed inside a locked school context.</p>
-        </section>
-      </main>
-    );
-  }
-
-  // ======================================================
-  // UI
-  // ======================================================
-
-  return (
-    <main className="sbranches-page" style={{ "--sbranches-primary": primary } as React.CSSProperties}>
-      <style>{css}</style>
-
-      <section className="sbranches-hero">
-        <div className="sbranches-hero-left">
-          <div className="sbranches-hero-icon">🏫</div>
-          <div className="sbranches-title-wrap">
-            <p>School Overview</p>
-            <h2>Branches</h2>
-            <span>{school?.name || activeSchool?.name || "Assigned school"} · School scoped</span>
-          </div>
-        </div>
-
-        <div className="sbranches-hero-actions">
-          <button type="button" className="sbranches-ghost-btn" onClick={load}>
-            Refresh
-          </button>
-          <button type="button" className="sbranches-primary-btn" onClick={openCreate}>
-            Add Branch
-          </button>
-        </div>
-      </section>
-
-      <section className="sbranches-context-grid">
-        <article>
-          <div className="sbranches-context-icon">🔒</div>
-          <div>
-            <span>Locked School</span>
-            <strong>{school?.name || activeSchool?.name || "Assigned school"}</strong>
-            <p>School admin manages only branches under the assigned school.</p>
-          </div>
-        </article>
-
-        <article>
-          <div className="sbranches-context-icon">📍</div>
-          <div>
-            <span>Branch Coverage</span>
-            <strong>{summary.active} active branch(es)</strong>
-            <p>Use this page to keep branch contact and location records clean.</p>
-          </div>
-        </article>
-      </section>
-
-      <section className="sbranches-summary-grid">
-        <SummaryCard label="Total Branches" value={summary.total} icon="🏫" />
-        <SummaryCard label="Active" value={summary.active} icon="✅" positive />
-        <SummaryCard label="Inactive" value={summary.inactive} icon="⛔" warning={summary.inactive > 0} />
-        <SummaryCard label="With Head" value={summary.withHead} icon="👤" />
-        <SummaryCard label="With Contact" value={summary.withContact} icon="☎️" positive={summary.withContact > 0} />
-        <SummaryCard label="Missing Contact" value={summary.missingContact} icon="⚠️" warning={summary.missingContact > 0} />
-      </section>
-
-      <section className="sbranches-toolbar">
-        <div className="sbranches-view-tabs">
-          <button type="button" className={viewMode === "cards" ? "active" : ""} onClick={() => setViewMode("cards")}>
-            Cards
-          </button>
-          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
-            Table
-          </button>
-          <button type="button" className={viewMode === "analytics" ? "active" : ""} onClick={() => setViewMode("analytics")}>
-            Analytics
-          </button>
-        </div>
-
-        <Chip tone="gray">{filteredBranches.length} branch(es)</Chip>
-      </section>
-
-      <section className="sbranches-filter-card">
-        <input
-          placeholder="Search branch name, code, location, contact..."
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
-
-        <select value={filter} onChange={(event) => setFilter(event.target.value as BranchFilter)}>
-          <option value="all">All Branches</option>
-          <option value="active">Active Only</option>
-          <option value="inactive">Inactive Only</option>
-        </select>
-
-        <button type="button" onClick={openCreate}>
-          Add Branch
-        </button>
-      </section>
-
-      {viewMode === "analytics" && (
-        <>
-          <Breakdown title="Branch Status" items={statusBreakdown} />
-          <Breakdown title="Branches by Location" items={locationBreakdown} />
-        </>
-      )}
-
-      {viewMode === "table" && (
-        <section className="sbranches-table-card">
-          <div className="sbranches-section-head">
-            <div>
-              <p>Branch Register</p>
-              <h3>School Branches</h3>
-            </div>
-            <Chip tone="blue">School Scoped</Chip>
-          </div>
-
-          <div className="sbranches-table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Branch</th>
-                  <th>Code</th>
-                  <th>Location</th>
-                  <th>Contact</th>
-                  <th>Branch Head</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {filteredBranches.map((branch) => {
-                  const active = branch.active !== false && branch.status !== "inactive";
-
-                  return (
-                    <tr key={branch.id || branch.name}>
-                      <td>
-                        <strong>{branch.name || "Unnamed branch"}</strong>
-                        <span>{branch.address || "No address"}</span>
-                      </td>
-                      <td>{branch.code || "-"}</td>
-                      <td>{branch.location || "-"}</td>
-                      <td>
-                        <strong>{branch.phone || "-"}</strong>
-                        <span>{branch.email || "No email"}</span>
-                      </td>
-                      <td>
-                        <strong>{branch.headName || "-"}</strong>
-                        <span>{branch.headPhone || branch.headEmail || "No head contact"}</span>
-                      </td>
-                      <td><Chip tone={active ? "green" : "red"}>{active ? "Active" : "Inactive"}</Chip></td>
-                      <td>{formatDate(branch.updatedAt || branch.createdAt)}</td>
-                      <td>
-                        <div className="sbranches-table-actions">
-                          <button type="button" onClick={() => openEdit(branch)}>Edit</button>
-                          <button type="button" onClick={() => toggleBranch(branch)}>
-                            {active ? "Deactivate" : "Activate"}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {!filteredBranches.length && (
-                  <tr>
-                    <td colSpan={8}>
-                      <EmptyCard text="No branch matches the selected filters." />
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {viewMode === "cards" && (
-        <section className="sbranches-section">
-          <div className="sbranches-section-head">
-            <div>
-              <p>Branch Register</p>
-              <h3>School Branches</h3>
-            </div>
-            <Chip tone="gray">{filteredBranches.length} branch(es)</Chip>
-          </div>
-
-          <div className="sbranches-list">
-            {filteredBranches.map((branch) => {
-              const active = branch.active !== false && branch.status !== "inactive";
-
-              return (
-                <article key={branch.id || branch.name} className="sbranches-card">
-                  <div className="sbranches-card-top">
-                    <div className="sbranches-avatar">
-                      {initials(branch.name || "Branch")}
-                    </div>
-
-                    <div className="sbranches-card-main">
-                      <h3>{branch.name || "Unnamed branch"}</h3>
-                      <p>{branch.location || "No location"} · {branch.code || "No code"}</p>
-
-                      <div className="sbranches-chip-row">
-                        <Chip tone={active ? "green" : "red"}>{active ? "Active" : "Inactive"}</Chip>
-                        <Chip tone={branch.phone || branch.email ? "blue" : "orange"}>
-                          {branch.phone || branch.email ? "Contact ready" : "Missing contact"}
-                        </Chip>
-                        <Chip tone={branch.headName ? "purple" : "gray"}>
-                          {branch.headName ? "Head assigned" : "No branch head"}
-                        </Chip>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="sbranches-mini-grid">
-                    <MiniStat label="Phone" value={branch.phone || "-"} />
-                    <MiniStat label="Email" value={branch.email || "-"} />
-                    <MiniStat label="Updated" value={formatDate(branch.updatedAt || branch.createdAt)} />
-                  </div>
-
-                  <div className="sbranches-detail-box">
-                    <strong>{branch.headName || "No branch head recorded"}</strong>
-                    <span>{branch.address || "No address recorded"}</span>
-                  </div>
-
-                  <div className="sbranches-action-row">
-                    <button type="button" onClick={() => openEdit(branch)}>Edit Branch</button>
-                    <button type="button" onClick={() => toggleBranch(branch)}>
-                      {active ? "Deactivate" : "Activate"}
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-
-            {!filteredBranches.length && (
-              <EmptyCard text="No branch matches the selected filters." />
-            )}
-          </div>
-        </section>
-      )}
-
-      {drawerOpen && (
-        <div className="sbranches-drawer-layer">
-          <button type="button" className="sbranches-drawer-overlay" aria-label="Close drawer" onClick={() => setDrawerOpen(false)} />
-
-          <aside className="sbranches-drawer">
-            <div className="sbranches-drawer-head">
-              <div>
-                <p>{form.id ? "Edit Branch" : "Add Branch"}</p>
-                <h2>Branch Details</h2>
-                <span>{school?.name || activeSchool?.name || "Assigned school"}</span>
-              </div>
-
-              <button type="button" onClick={() => setDrawerOpen(false)}>✕</button>
-            </div>
-
-            {message && <section className="sbranches-message">{message}</section>}
-
-            <section className="sbranches-form-card">
-              <div className="sbranches-section-head">
-                <div>
-                  <p>Identity</p>
-                  <h3>Branch information</h3>
-                </div>
-              </div>
-
-              <div className="sbranches-form-grid">
-                <label>
-                  <span>Branch Name</span>
-                  <input
-                    value={form.name}
-                    onChange={(event) => updateForm("name", event.target.value)}
-                    placeholder="Example: East Legon Campus"
-                  />
-                </label>
-
-                <label>
-                  <span>Branch Code</span>
-                  <input
-                    value={form.code}
-                    onChange={(event) => updateForm("code", event.target.value.toUpperCase())}
-                    placeholder="Example: ELG"
-                  />
-                </label>
-
-                <label>
-                  <span>Location</span>
-                  <input
-                    value={form.location}
-                    onChange={(event) => updateForm("location", event.target.value)}
-                    placeholder="Town / Area"
-                  />
-                </label>
-
-                <label>
-                  <span>Phone</span>
-                  <input
-                    value={form.phone}
-                    onChange={(event) => updateForm("phone", event.target.value)}
-                    placeholder="024 000 0000"
-                  />
-                </label>
-
-                <label>
-                  <span>Email</span>
-                  <input
-                    value={form.email}
-                    onChange={(event) => updateForm("email", event.target.value)}
-                    placeholder="branch@example.com"
-                  />
-                </label>
-
-                <label className="wide">
-                  <span>Address</span>
-                  <input
-                    value={form.address}
-                    onChange={(event) => updateForm("address", event.target.value)}
-                    placeholder="Branch address"
-                  />
-                </label>
-              </div>
-            </section>
-
-            <section className="sbranches-form-card">
-              <div className="sbranches-section-head">
-                <div>
-                  <p>Leadership</p>
-                  <h3>Branch head contact</h3>
-                </div>
-              </div>
-
-              <div className="sbranches-form-grid">
-                <label>
-                  <span>Branch Head Name</span>
-                  <input
-                    value={form.headName}
-                    onChange={(event) => updateForm("headName", event.target.value)}
-                    placeholder="Name of branch head"
-                  />
-                </label>
-
-                <label>
-                  <span>Branch Head Phone</span>
-                  <input
-                    value={form.headPhone}
-                    onChange={(event) => updateForm("headPhone", event.target.value)}
-                    placeholder="024 000 0000"
-                  />
-                </label>
-
-                <label className="wide">
-                  <span>Branch Head Email</span>
-                  <input
-                    value={form.headEmail}
-                    onChange={(event) => updateForm("headEmail", event.target.value)}
-                    placeholder="head@example.com"
-                  />
-                </label>
-              </div>
-            </section>
-
-            <section className="sbranches-form-card">
-              <label className="sbranches-switch-row">
-                <div>
-                  <strong>Active branch</strong>
-                  <span>Inactive branches remain recorded but should be hidden from active operations.</span>
-                </div>
-
-                <button
-                  type="button"
-                  className={`sbranches-switch ${form.active ? "on" : ""}`}
-                  onClick={() => updateForm("active", !form.active)}
-                  aria-pressed={form.active}
-                >
-                  <span />
-                </button>
-              </label>
-            </section>
-
-            <div className="sbranches-drawer-actions">
-              <button type="button" className="sbranches-ghost-btn" onClick={() => setDrawerOpen(false)}>
-                Cancel
-              </button>
-              <button type="button" className="sbranches-primary-btn" disabled={saving} onClick={saveBranch}>
-                {saving ? "Saving..." : "Save Branch"}
-              </button>
-            </div>
-          </aside>
-        </div>
-      )}
-    </main>
-  );
-}
-
-// ======================================================
-// SMALL COMPONENTS
-// ======================================================
-
-function SummaryCard({
-  label,
-  value,
-  icon,
-  positive = false,
-  warning = false,
-}: {
-  label: string;
-  value: string | number;
-  icon: string;
-  positive?: boolean;
-  warning?: boolean;
-}) {
-  return (
-    <article className={`sbranches-summary-card ${positive ? "positive" : ""} ${warning ? "warning" : ""}`}>
-      <div className="sbranches-summary-icon">{icon}</div>
-      <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
-      </div>
-    </article>
-  );
-}
+};
+
+const mediaKey = (branchId: string, field: CameraField) => `branches:${branchId}:${field}`;
+
+const safeRecordMediaValue = (value?: string) => {
+  const media = String(value || "");
+  if (!media) return undefined;
+  if (media.startsWith("blob:")) return undefined;
+  if (media.startsWith("data:image/")) return undefined;
+  return media;
+};
+
+const BRANCH_MEDIA_OWNER_TABLE = (MediaOwners as any).BRANCHES || (MediaOwners as any).BRANCH || "branches";
+const BRANCH_MEDIA_ENTITY_LABEL = "Branch";
+const BRANCH_FIELD_KEYS: Record<CameraField, string> = {
+  logo: (MediaFieldKeys as any).LOGO || "logo",
+  photo: (MediaFieldKeys as any).PHOTO || "photo",
+  bannerImage: (MediaFieldKeys as any).BANNER_IMAGE || (MediaFieldKeys as any).COVER_PHOTO || "bannerImage",
+};
+
+const createBranchMediaSessionKey = () => createSharedMediaSessionKey(BRANCH_MEDIA_OWNER_TABLE);
 
 function Chip({
   children,
@@ -976,1077 +255,1817 @@ function Chip({
   children: React.ReactNode;
   tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple";
 }) {
-  return <span className={`sbranches-chip ${tone}`}>{children}</span>;
+  return <span className={`ba-chip ${tone}`}>{children}</span>;
 }
 
-function MiniStat({ label, value }: { label: string; value: string | number }) {
+function Avatar({ name, photo, primary }: { name: string; photo?: string; primary: string }) {
   return (
-    <div className="sbranches-mini-stat">
-      <strong>{value}</strong>
-      <span>{label}</span>
+    <div
+      className="ba-avatar"
+      style={{
+        background: photo
+          ? `url(${photo}) center/cover`
+          : `linear-gradient(135deg, ${primary}, rgba(15,23,42,.9))`,
+      }}
+    >
+      {!photo && String(name || "S").slice(0, 1).toUpperCase()}
     </div>
   );
 }
 
-function EmptyCard({ text }: { text: string }) {
+function Empty({ icon, title, text }: { icon: string; title: string; text: string }) {
   return (
-    <section className="sbranches-empty-card">
-      <div className="sbranches-empty-icon">🏫</div>
-      <h3>No branches found</h3>
+    <section className="ba-empty">
+      <div className="ba-empty-icon">{icon}</div>
+      <h3>{title}</h3>
       <p>{text}</p>
     </section>
   );
 }
 
-function Breakdown({ title, items }: { title: string; items: Breakdown[] }) {
-  const total = items.reduce((sum, item) => sum + item.count, 0);
+export default function Branches() {
+  const router = useRouter();
+  const { accountId, authenticated, loading: accountLoading } = useAccount();
+  const { settings, loading: settingsLoading } = useSettings();
+  const { activeMembership } = useActiveMembership() as any;
+  const {
+    activeSchool,
+    activeSchoolId,
+    loading: schoolContextLoading,
+  } = useActiveBranch();
+  const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
+
+  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
+
+  const selectedAccountId = useMemo(
+    () =>
+      cleanText(openWorkspace?.accountId) ||
+      cleanText(openWorkspace?.membership?.accountId) ||
+      cleanText(activeMembership?.accountId) ||
+      cleanText(accountId) ||
+      cleanText(settings?.accountId) ||
+      cleanText(safeStorageRead("accountId")) ||
+      cleanText(safeStorageRead("eleeveon_account_id")),
+    [
+      accountId,
+      activeMembership?.accountId,
+      openWorkspace?.accountId,
+      openWorkspace?.membership?.accountId,
+      settings?.accountId,
+    ]
+  );
+
+  const selectedSchoolId = useMemo(
+    () =>
+      cleanText(openWorkspace?.schoolId) ||
+      cleanText(openWorkspace?.membership?.schoolId) ||
+      cleanText(activeMembership?.schoolId) ||
+      cleanText(activeSchoolId) ||
+      cleanText((activeSchool as any)?.id) ||
+      cleanText(settings?.schoolId) ||
+      cleanText(safeStorageRead("activeSchoolId")),
+    [
+      activeMembership?.schoolId,
+      activeSchoolId,
+      activeSchool,
+      openWorkspace?.schoolId,
+      openWorkspace?.membership?.schoolId,
+      settings?.schoolId,
+    ],
+  );
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [rows, setRows] = useState<Branch[]>([]);
+  const [schools, setSchools] = useState<School[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [parents, setParents] = useState<Parent[]>([]);
+  const [mediaPreviewUrls, setMediaPreviewUrls] = useState<Record<string, string>>({});
+
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const [search, setSearch] = useState("");
+  const [filterStatus, setFilterStatus] = useState<BranchFilter>("all");
+  const [branchLayerVisible, setBranchLayerVisible] = useState(true);
+  const [visiblePeopleLayers, setVisiblePeopleLayers] = useState<Record<PeopleLayer, boolean>>({
+    students: true,
+    teachers: true,
+    parents: true,
+  });
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<BranchView | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [form, setForm] = useState<FormState>(emptyForm);
+  const [toast, setToast] = useState<{ tone: ToastTone; message: string } | null>(null);
+
+  const mediaSessionKeyRef = useRef(createBranchMediaSessionKey());
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraField, setCameraField] = useState<CameraField>("logo");
+  const [cameraFacing, setCameraFacing] = useState<CameraFacingMode>("environment");
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [cameraCapturing, setCameraCapturing] = useState(false);
+
+  useEffect(() => {
+    if (accountLoading || schoolContextLoading) return;
+    if (!authenticated || !selectedAccountId || !selectedSchoolId) {
+      router.replace("/login");
+      return;
+    }
+    if (!selectedSchoolId) router.replace("/account");
+  }, [
+    accountLoading,
+    schoolContextLoading,
+    authenticated,
+    selectedAccountId,
+    selectedSchoolId,
+    router,
+  ]);
+
+  const sameAccount = (row: TenantRow) => (!row.accountId || cleanText(row.accountId) === selectedAccountId) && !row.isDeleted;
+
+  const showToast = (tone: ToastTone, message: string) => {
+    setToast({ tone, message });
+    window.setTimeout(() => setToast((c) => (c?.message === message ? null : c)), 4200);
+  };
+
+  const stopCurrentCamera = () => {
+    stopCameraStream(cameraStreamRef.current);
+    cameraStreamRef.current = null;
+    if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
+  };
+
+  const requireAccount = () => {
+    if (!authenticated || !selectedAccountId || !selectedSchoolId) {
+      showToast("error", "Open your assigned school workspace before managing branches.");
+      return false;
+    }
+    return true;
+  };
+
+  const openCameraForField = (field: CameraField) => {
+    if (!requireAccount()) return;
+    if (!isCameraApiAvailable()) {
+      showToast("error", getCameraUnavailableMessage());
+      return;
+    }
+    setCameraField(field);
+    setCameraOpen(true);
+  };
+
+  const closeCamera = () => {
+    stopCurrentCamera();
+    setCameraOpen(false);
+    setCameraCapturing(false);
+    setCameraStarting(false);
+  };
+
+  const captureCameraPhoto = async () => {
+    if (!cameraVideoRef.current) {
+      showToast("error", "Camera preview is not ready yet.");
+      return;
+    }
+
+    try {
+      setCameraCapturing(true);
+      const file = await captureImageFileFromVideo(cameraVideoRef.current, {
+        fileName: `${cameraField}-${Date.now()}.jpg`,
+        mimeType: "image/jpeg",
+        quality: 0.88,
+        maxWidth: cameraField === "logo" ? 900 : 1440,
+        maxHeight: cameraField === "logo" ? 900 : 900,
+      });
+
+      await handleImageUpload(cameraField, file);
+      closeCamera();
+    } catch (error: any) {
+      console.error("Failed to capture branch image:", error);
+      showToast("error", error?.message || "Failed to capture photo.");
+    } finally {
+      setCameraCapturing(false);
+    }
+  };
+
+  const clearData = () => {
+    Object.values(mediaPreviewUrls).forEach(revokeMediaObjectUrl);
+    setRows([]);
+    setSchools([]);
+    setStudents([]);
+    setTeachers([]);
+    setParents([]);
+    setMediaPreviewUrls({});
+  };
+
+  const resolveBranchMediaUrls = async (branchRows: Branch[]) => {
+    const next: Record<string, string> = {};
+
+    await Promise.all(
+      branchRows.map(async (branch: any) => {
+        const branchId = idOf(branch.id);
+        if (!branchId) return;
+
+        const resolveOwnedAssetUrl = async (field: CameraField, fallbackMediaId?: number | string | null) => {
+          const ownedAsset = await getOwnerFieldMediaAsset({
+            accountId: selectedAccountId || undefined,
+            ownerTable: BRANCH_MEDIA_OWNER_TABLE,
+            ownerId: branchId,
+            fieldKey: BRANCH_FIELD_KEYS[field],
+          });
+
+          if (ownedAsset?.id) {
+            const url = await getMediaObjectUrl(String(ownedAsset.id));
+            if (url) return url;
+          }
+
+          const fallbackId = idOf(fallbackMediaId);
+          if (!fallbackId) return "";
+
+          const fallbackAsset = await tableSafe("mediaAssets")?.get?.(fallbackId);
+          const belongsToThisBranch =
+            fallbackAsset &&
+            !fallbackAsset.isDeleted &&
+            fallbackAsset.active !== false &&
+            fallbackAsset.accountId === selectedAccountId &&
+            fallbackAsset.ownerTable === BRANCH_MEDIA_OWNER_TABLE &&
+            fallbackAsset.fieldKey === BRANCH_FIELD_KEYS[field] &&
+            sameId(fallbackAsset.ownerId, branchId);
+
+          if (!belongsToThisBranch) return "";
+          return getMediaObjectUrl(String(fallbackId));
+        };
+
+        try {
+          const logoUrl = await resolveOwnedAssetUrl("logo", branch.logoMediaId);
+          if (logoUrl) next[mediaKey(branchId, "logo")] = logoUrl;
+
+          const photoUrl = await resolveOwnedAssetUrl("photo", branch.photoMediaId);
+          if (photoUrl) next[mediaKey(branchId, "photo")] = photoUrl;
+
+          const bannerUrl = await resolveOwnedAssetUrl("bannerImage", branch.bannerImageMediaId);
+          if (bannerUrl) next[mediaKey(branchId, "bannerImage")] = bannerUrl;
+        } catch (error) {
+          console.error("Failed to resolve branch media:", branchId, error);
+        }
+      })
+    );
+
+    setMediaPreviewUrls((current) => {
+      Object.values(current).forEach((url) => {
+        if (!Object.values(next).includes(url as string)) revokeMediaObjectUrl(url);
+      });
+      return next;
+    });
+  };
+
+  const load = async () => {
+    if (!authenticated || !selectedAccountId || !selectedSchoolId) {
+      clearData();
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const [branchRows, schoolRows, studentRows, teacherRows, parentRows] = await Promise.all([
+        tableSafe("branches")?.toArray?.() || [],
+        tableSafe("schools")?.toArray?.() || [],
+        tableSafe("students")?.toArray?.() || [],
+        tableSafe("teachers")?.toArray?.() || [],
+        tableSafe("parents")?.toArray?.() || [],
+      ]);
+
+      const scopedSchools = (schoolRows as School[])
+        .filter(
+          (r: any) =>
+            sameAccount(r as TenantRow) &&
+            r.active !== false &&
+            sameId(r.id, selectedSchoolId),
+        )
+        .sort((a: any, b: any) => schoolName(a).localeCompare(schoolName(b)));
+
+      const schoolIds = new Set<string>(scopedSchools.map((r: any) => idOf(r.id)).filter(Boolean));
+
+      const scopedBranches = (branchRows as Branch[])
+        .filter(
+          (r: any) =>
+            sameAccount(r as TenantRow) &&
+            sameId(r.schoolId, selectedSchoolId) &&
+            schoolIds.has(idOf(r.schoolId)),
+        )
+        .sort((a: any, b: any) => branchName(a).localeCompare(branchName(b)));
+
+      setSchools(scopedSchools);
+      setRows(scopedBranches);
+      setStudents(
+        (studentRows as Student[]).filter(
+          (row: any) =>
+            sameAccount(row as TenantRow) &&
+            sameId((row as any).schoolId, selectedSchoolId) &&
+            row.active !== false &&
+            !["withdrawn", "deleted", "archived", "inactive"].includes(safeLower(row.status)),
+        ),
+      );
+      setTeachers(
+        (teacherRows as Teacher[]).filter(
+          (row: any) =>
+            sameAccount(row as TenantRow) &&
+            sameId((row as any).schoolId, selectedSchoolId) &&
+            row.active !== false &&
+            !["deleted", "archived", "inactive"].includes(safeLower(row.status)),
+        ),
+      );
+      setParents(
+        (parentRows as Parent[]).filter(
+          (row: any) =>
+            sameAccount(row as TenantRow) &&
+            sameId((row as any).schoolId, selectedSchoolId) &&
+            row.active !== false &&
+            !["deleted", "archived", "inactive"].includes(safeLower(row.status)),
+        ),
+      );
+      await resolveBranchMediaUrls(scopedBranches);
+    } catch (error) {
+      console.error(error);
+      clearData();
+      showToast("error", "Failed to load school branches.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (accountLoading || settingsLoading) return;
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    authenticated,
+    selectedAccountId,
+    selectedSchoolId,
+    accountLoading,
+    schoolContextLoading,
+    settingsLoading,
+    activeMembership?.role,
+    activeMembership?.accountId,
+    openWorkspace?.openedAt,
+    openWorkspace?.membershipId,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(mediaPreviewUrls).forEach(revokeMediaObjectUrl);
+    };
+  }, [mediaPreviewUrls]);
+
+  useEffect(() => {
+    if (!cameraOpen) return;
+
+    let cancelled = false;
+
+    const startCamera = async () => {
+      try {
+        setCameraStarting(true);
+        stopCurrentCamera();
+
+        const stream = await openCameraStream({ facingMode: cameraFacing, width: 1280, height: 720 });
+        if (cancelled) {
+          stopCameraStream(stream);
+          return;
+        }
+
+        cameraStreamRef.current = stream;
+        if (cameraVideoRef.current) await attachCameraStreamToVideo(cameraVideoRef.current, stream);
+      } catch (error: any) {
+        console.error("Failed to open branch camera:", error);
+        showToast("error", error?.message || getCameraUnavailableMessage());
+        setCameraOpen(false);
+      } finally {
+        if (!cancelled) setCameraStarting(false);
+      }
+    };
+
+    startCamera();
+
+    return () => {
+      cancelled = true;
+      stopCurrentCamera();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraOpen, cameraFacing]);
+
+  const schoolMap = useMemo(() => new Map<string, School>(schools.map((r: any) => [idOf(r.id), r])), [schools]);
+
+  const viewRows = useMemo<BranchView[]>(
+    () =>
+      rows.map((row: any) => {
+        const id = idOf(row.id);
+        const school = schoolMap.get(idOf(row.schoolId));
+        return {
+          id,
+          row,
+          school,
+          schoolName: schoolName(school),
+          logoUrl: mediaPreviewUrls[mediaKey(id, "logo")] || safeRecordMediaValue(row.logo),
+          photoUrl: mediaPreviewUrls[mediaKey(id, "photo")] || safeRecordMediaValue(row.photo),
+          bannerImageUrl: mediaPreviewUrls[mediaKey(id, "bannerImage")] || safeRecordMediaValue(row.bannerImage),
+          active: isActiveBranch(row),
+        };
+      }),
+    [mediaPreviewUrls, rows, schoolMap]
+  );
+
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    return viewRows
+      .filter((item) => {
+        const row: any = item.row;
+        if (filterStatus === "active" && row.active === false) return false;
+        if (filterStatus === "inactive" && row.active !== false) return false;
+        if (filterStatus === "no_contact" && (row.phone || row.email)) return false;
+        if (filterStatus === "no_school" && row.schoolId) return false;
+        if (!q) return true;
+
+        return `${row.name || ""} ${row.code || ""} ${row.phone || ""} ${row.email || ""} ${row.address || ""} ${row.city || ""} ${item.schoolName || ""}`
+          .toLowerCase()
+          .includes(q);
+      })
+      .sort((a, b) => branchName(a.row).localeCompare(branchName(b.row)));
+  }, [filterStatus, search, viewRows]);
+
+  const branchMarkers = useMemo<MapMarker[]>(() => {
+    if (!branchLayerVisible) return [];
+
+    return filteredRows.reduce<MapMarker[]>((markers, item) => {
+      const row: any = item.row;
+      const marker = genericEntityToMarker(
+        {
+          ...row,
+          id: item.id,
+          photo: item.logoUrl || item.photoUrl || row.logo || row.photo,
+        },
+        {
+          entityType: "branch",
+          layerId: "branches",
+          icon: "school",
+          imageUrl: item.logoUrl || item.photoUrl,
+          subtitle: [item.schoolName, row.city, row.address].filter(Boolean).join(" · "),
+          privacy: { allowRestricted: true, requireConsent: false },
+        },
+      );
+
+      if (!marker) return markers;
+
+      markers.push({
+        ...marker,
+        description: row.phone || row.email || "School branch building",
+        metadata: {
+          ...(marker.metadata || {}),
+          branchId: item.id,
+          markerRole: "branch-building",
+          markerColor: "#7c3aed",
+          schoolName: item.schoolName,
+        },
+      });
+      return markers;
+    }, []);
+  }, [branchLayerVisible, filteredRows]);
+
+  const peopleMarkers = useMemo<MapMarker[]>(() => {
+    const markers: MapMarker[] = [];
+
+    const appendPeople = (
+      sourceRows: any[],
+      entityType: "student" | "teacher" | "parent",
+      layerId: PeopleLayer,
+      icon: "student" | "teacher" | "parent",
+      markerColor: string,
+    ) => {
+      if (!visiblePeopleLayers[layerId]) return;
+
+      sourceRows.forEach((row: any) => {
+        if (row.mapVisible === false) return;
+
+        const marker = genericEntityToMarker(row, {
+          entityType,
+          layerId,
+          icon,
+          imageUrl: safeRecordMediaValue(row.photo),
+          subtitle: [
+            row.locationLabel || row.formattedAddress || row.address,
+            branchName(rows.find((branch: any) => sameId(branch.id, row.branchId))),
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        });
+
+        if (!marker) return;
+
+        markers.push({
+          ...marker,
+          metadata: {
+            ...(marker.metadata || {}),
+            [`${entityType}Id`]: idOf(row.id),
+            branchId: idOf(row.branchId),
+            markerRole: entityType,
+            markerColor,
+          },
+        });
+      });
+    };
+
+    appendPeople(students as any[], "student", "students", "student", "#2563eb");
+    appendPeople(teachers as any[], "teacher", "teachers", "teacher", "#16a34a");
+    appendPeople(parents as any[], "parent", "parents", "parent", "#ea580c");
+
+    return markers;
+  }, [parents, rows, students, teachers, visiblePeopleLayers]);
+
+  const mapMarkers = useMemo(
+    () => [...branchMarkers, ...peopleMarkers],
+    [branchMarkers, peopleMarkers],
+  );
+
+  const summary = useMemo(
+    () => ({
+      total: rows.length,
+      schools: schools.length,
+      active: rows.filter((r: any) => r.active !== false && !r.isDeleted).length,
+      inactive: rows.filter((r: any) => r.active === false && !r.isDeleted).length,
+      noContact: rows.filter((r: any) => !r.phone && !r.email).length,
+      noSchool: rows.filter((r: any) => !r.schoolId).length,
+      showing: filteredRows.length,
+    }),
+    [schools.length, filteredRows.length, rows]
+  );
+
+  const activeFilterCount = useMemo(() => (filterStatus === "all" ? 0 : 1), [filterStatus]);
+  const countsByStatus = useMemo(() => groupedCounts(viewRows, (i) => statusLabel((i.row as any).active)), [viewRows]);
+  const countsBySchool = useMemo(() => groupedCounts(viewRows, (i) => i.schoolName || "No school"), [viewRows]);
+  const countsByContact = useMemo(() => groupedCounts(viewRows, (i) => ((i.row as any).phone || (i.row as any).email ? "Contact ready" : "No contact")), [viewRows]);
+
+  const updateForm = (patch: Partial<FormState>) => setForm((current) => ({ ...current, ...patch }));
+
+  const handleImageUpload = async (field: CameraField, file?: File) => {
+    if (!file) return;
+    if (!requireAccount()) return;
+
+    try {
+      const ownerTempKey = form.id ? undefined : mediaSessionKeyRef.current;
+      const result = await saveImageAsset(file, {
+        accountId: selectedAccountId!,
+        schoolId: form.schoolId || undefined,
+        branchId: form.id || undefined,
+        ownerTable: BRANCH_MEDIA_OWNER_TABLE,
+        ownerId: form.id || undefined,
+        ownerTempKey,
+        fieldKey: BRANCH_FIELD_KEYS[field],
+        variant: field === "logo" ? "avatar" : field === "bannerImage" ? "cover" : "image",
+        replaceExisting: true,
+      } as any);
+
+      updateForm({
+        [field]: result.previewUrl,
+        [`${field}MediaId`]: result.assetId,
+      } as Partial<FormState>);
+
+      const label = field === "logo" ? "Branch logo" : field === "photo" ? "Branch photo" : "Branch banner";
+      showToast("success", `${label} optimized.`);
+    } catch (error: any) {
+      console.error("Failed to process branch image:", error);
+      showToast("error", error?.message || "Failed to process image.");
+    }
+  };
+
+  const openCreate = (defaults?: BranchCreateDefaults) => {
+    if (!requireAccount()) return;
+    mediaSessionKeyRef.current = createBranchMediaSessionKey();
+    setSelectedItem(null);
+
+    const hasCoordinate =
+      Number.isFinite(defaults?.latitude) &&
+      Number.isFinite(defaults?.longitude);
+
+    setForm({
+      ...emptyForm,
+      schoolId: selectedSchoolId,
+      active: filterStatus === "inactive" ? false : true,
+      latitude: hasCoordinate ? String(defaults?.latitude) : "",
+      longitude: hasCoordinate ? String(defaults?.longitude) : "",
+      locationSource: "manual",
+      locationCapturedAt: hasCoordinate ? Date.now() : undefined,
+      mapVisible: true,
+    });
+    setModalOpen(true);
+  };
+
+  const handleMapLocationUpdate = async (request: MapLocationUpdateRequest) => {
+    if (!authenticated || !selectedAccountId) {
+      throw new Error("Sign in before updating map locations.");
+    }
+
+    const entityType = String(request.marker.entityType || "");
+    const metadata = request.marker.metadata || {};
+    const tableName =
+      entityType === "branch"
+        ? "branches"
+        : entityType === "student"
+          ? "students"
+          : entityType === "teacher"
+            ? "teachers"
+            : entityType === "parent"
+              ? "parents"
+              : "";
+
+    const entityId = idOf(
+      entityType === "branch"
+        ? metadata.branchId || request.marker.id
+        : entityType === "student"
+          ? metadata.studentId || request.marker.id
+          : entityType === "teacher"
+            ? metadata.teacherId || request.marker.id
+            : metadata.parentId || request.marker.id,
+    );
+
+    if (!tableName || !entityId) {
+      throw new Error("The selected map item could not be identified.");
+    }
+
+    await updateLocal(tableName as any, entityId, {
+      latitude: request.coordinate.latitude,
+      longitude: request.coordinate.longitude,
+      locationSource: "manual",
+      locationCapturedAt: Date.now(),
+      mapVisible: true,
+      isDeleted: false,
+    } as any);
+
+    showToast("success", `${entityType === "branch" ? "Branch" : entityType.charAt(0).toUpperCase() + entityType.slice(1)} location updated.`);
+    await load();
+  };
+
+  const openEdit = (row: Branch) => {
+    const s: any = row;
+    const id = idOf(s.id);
+    mediaSessionKeyRef.current = createBranchMediaSessionKey();
+    setSelectedItem(null);
+    setForm({
+      id,
+      name: s.name || "",
+      schoolId: s.schoolId ? String(s.schoolId) : "",
+      code: s.code || "",
+      phone: s.phone || "",
+      email: s.email || "",
+      address: s.address || "",
+      city: s.city || "",
+      latitude: s.latitude == null ? "" : String(s.latitude),
+      longitude: s.longitude == null ? "" : String(s.longitude),
+      accuracyMeters: s.accuracyMeters == null ? "" : String(s.accuracyMeters),
+      locationLabel: s.locationLabel || "",
+      formattedAddress: s.formattedAddress || "",
+      locationType: s.locationType || "school",
+      locationSource: s.locationSource || "manual",
+      locationPrecision: s.locationPrecision || "exact",
+      locationCapturedAt: s.locationCapturedAt || undefined,
+      mapVisible: s.mapVisible !== false,
+      locationRestricted: Boolean(s.locationRestricted),
+      logo: mediaPreviewUrls[mediaKey(id, "logo")] || safeRecordMediaValue(s.logo) || "",
+      logoMediaId: s.logoMediaId ? String(s.logoMediaId) : undefined,
+      photo: mediaPreviewUrls[mediaKey(id, "photo")] || safeRecordMediaValue(s.photo) || "",
+      photoMediaId: s.photoMediaId ? String(s.photoMediaId) : undefined,
+      bannerImage: mediaPreviewUrls[mediaKey(id, "bannerImage")] || safeRecordMediaValue(s.bannerImage) || "",
+      bannerImageMediaId: s.bannerImageMediaId ? String(s.bannerImageMediaId) : undefined,
+      active: s.active !== false,
+    });
+    setModalOpen(true);
+  };
+
+  const clearFilters = () => setFilterStatus("all");
+
+  const validate = () => {
+    if (!authenticated || !selectedAccountId) return "Sign in first.";
+    if (!selectedSchoolId || !sameId(form.schoolId, selectedSchoolId)) return "This branch must remain in the assigned school.";
+    if (!schools.some((school: any) => sameId(school.id, selectedSchoolId))) return "The assigned school is unavailable in this account.";
+    if (!form.name.trim()) return "Enter branch name.";
+
+    const hasLatitude = form.latitude.trim() !== "";
+    const hasLongitude = form.longitude.trim() !== "";
+
+    if (hasLatitude !== hasLongitude)
+      return "Enter both latitude and longitude, or leave both empty.";
+
+    if (hasLatitude && hasLongitude) {
+      const latitude = Number(form.latitude);
+      const longitude = Number(form.longitude);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)
+        return "Latitude must be between -90 and 90.";
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)
+        return "Longitude must be between -180 and 180.";
+    }
+
+    const duplicate = rows.find((row: any) => {
+      if (form.id && sameId(row.id, form.id)) return false;
+      return (
+        sameId(row.schoolId, form.schoolId) &&
+        cleanText(row.name).toLowerCase() === cleanText(form.name).toLowerCase() &&
+        !row.isDeleted
+      );
+    });
+
+    if (duplicate) return "A branch with this name already exists for the selected school.";
+    if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) return "Enter a valid branch email.";
+    return "";
+  };
+
+  const save = async (event?: React.FormEvent) => {
+    event?.preventDefault();
+
+    const error = validate();
+    if (error) {
+      showToast("error", error);
+      return;
+    }
+
+    if (!authenticated || !selectedAccountId || !selectedSchoolId) return;
+
+    try {
+      setSaving(true);
+      const existing = form.id ? rows.find((row: any) => sameId(row.id, form.id)) : undefined;
+      const payload: Partial<Branch> = {
+        accountId: selectedAccountId,
+        name: form.name.trim(),
+        schoolId: selectedSchoolId,
+        code: form.code.trim() || undefined,
+        phone: form.phone.trim() || undefined,
+        email: form.email.trim() || undefined,
+        address: form.address.trim() || undefined,
+        city: form.city.trim() || undefined,
+        latitude: form.latitude.trim() === "" ? undefined : Number(form.latitude),
+        longitude: form.longitude.trim() === "" ? undefined : Number(form.longitude),
+        accuracyMeters:
+          form.accuracyMeters.trim() === "" ? undefined : Number(form.accuracyMeters),
+        locationLabel: form.locationLabel.trim() || undefined,
+        formattedAddress: form.formattedAddress.trim() || undefined,
+        locationType: form.locationType,
+        locationSource: form.locationSource,
+        locationPrecision: form.locationPrecision,
+        locationCapturedAt:
+          form.latitude.trim() && form.longitude.trim()
+            ? form.locationCapturedAt || Date.now()
+            : undefined,
+        mapVisible: form.mapVisible,
+        locationRestricted: form.locationRestricted,
+        logo: safeRecordMediaValue(form.logo),
+        logoMediaId: form.logoMediaId || undefined,
+        photo: safeRecordMediaValue(form.photo),
+        photoMediaId: form.photoMediaId || undefined,
+        bannerImage: safeRecordMediaValue(form.bannerImage),
+        bannerImageMediaId: form.bannerImageMediaId || undefined,
+        active: form.active,
+        isDeleted: false,
+      } as Partial<Branch>;
+
+      const savedBranch =
+        form.id && existing
+          ? await updateLocal("branches", form.id, payload)
+          : await createLocal("branches", payload as Branch);
+
+      const savedBranchId = idOf((savedBranch as any)?.id || form.id);
+
+      if (!savedBranchId) {
+        throw new Error("The branch record was written without a valid permanent ID.");
+      }
+
+      const persistedBranch = await tableSafe("branches")?.get?.(savedBranchId);
+
+      if (!persistedBranch || persistedBranch.isDeleted) {
+        throw new Error("The branch could not be verified in local storage after saving.");
+      }
+
+      if (cleanText(persistedBranch.accountId) !== selectedAccountId) {
+        throw new Error("The branch was saved under the wrong account workspace.");
+      }
+
+      if (!sameId(persistedBranch.schoolId, selectedSchoolId)) {
+        throw new Error("The branch was not linked to the selected school.");
+      }
+
+      const selectedSchool = await tableSafe("schools")?.get?.(selectedSchoolId);
+
+      if (
+        !selectedSchool ||
+        selectedSchool.isDeleted ||
+        cleanText(selectedSchool.accountId) !== selectedAccountId
+      ) {
+        throw new Error("The selected school is unavailable in this owner account.");
+      }
+
+      await Promise.all(
+        [
+          { id: form.logoMediaId, field: "logo" as CameraField },
+          { id: form.photoMediaId, field: "photo" as CameraField },
+          { id: form.bannerImageMediaId, field: "bannerImage" as CameraField },
+        ]
+          .filter((asset) => Boolean(asset.id))
+          .map((asset) =>
+            attachMediaAssetToOwner({
+              assetId: String(asset.id),
+              ownerTable: BRANCH_MEDIA_OWNER_TABLE,
+              ownerId: savedBranchId,
+              ownerTempKey: mediaSessionKeyRef.current,
+              fieldKey: BRANCH_FIELD_KEYS[asset.field],
+              schoolId: selectedSchoolId,
+              branchId: savedBranchId,
+            } as any)
+          )
+      );
+
+      mediaSessionKeyRef.current = createBranchMediaSessionKey();
+      setModalOpen(false);
+      await load();
+      showToast("success", form.id ? "Branch changes saved." : "Branch created and saved locally.");
+    } catch (error: any) {
+      console.error("Failed to save branch:", error);
+      showToast("error", error?.message || "Failed to save branch.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (item: BranchView) => {
+    const id = idOf((item.row as any).id);
+    if (!id) return;
+
+    const ok = window.confirm(`Delete "${branchName(item.row)}"?`);
+
+    if (!ok) return;
+    await softDeleteLocal("branches", id);
+    setSelectedItem(null);
+    showToast("success", "Branch deleted.");
+    await load();
+  };
+
+  const setActive = async (item: BranchView, active: boolean) => {
+    const id = idOf((item.row as any).id);
+    if (!id) return;
+
+    await updateLocal("branches", id, { active, isDeleted: false } as Partial<Branch>);
+    setSelectedItem(null);
+    showToast("success", active ? "Branch activated." : "Branch deactivated.");
+    await load();
+  };
+
+  if (accountLoading || schoolContextLoading || settingsLoading || loading) {
+    return <State primary={primary} title="Opening Branches..." text="Checking the assigned school, branch records, and media assets." />;
+  }
+
+  if (!authenticated || !selectedAccountId) {
+    return <State primary={primary} title="Redirecting to login..." text="You must open the assigned school workspace before managing branches." />;
+  }
 
   return (
-    <section className="sbranches-section">
-      <div className="sbranches-section-head">
-        <div>
-          <p>Analytics</p>
-          <h3>{title}</h3>
-        </div>
-        <Chip tone="gray">{items.length} group(s)</Chip>
-      </div>
+    <main className="ba-page" style={{ "--ba-primary": primary } as React.CSSProperties}>
+      <style>{css}</style>
 
-      <div className="sbranches-breakdown-grid">
-        {items.map((item) => (
-          <article key={item.name} className="sbranches-breakdown-card">
-            <div className="sbranches-breakdown-top">
-              <strong>{item.name}</strong>
-              <Chip tone="blue">{item.count}</Chip>
-            </div>
+      {toast && (
+        <section className={`ba-toast ${toast.tone}`}>
+          {toast.message}
+          <button type="button" onClick={() => setToast(null)} aria-label="Close notification">✕</button>
+        </section>
+      )}
 
-            <div className="sbranches-bar-track">
-              <div style={{ width: `${total ? Math.round((item.count / total) * 100) : 0}%` }} />
-            </div>
+      <section className="ba-search-card" aria-label="Branch search and actions">
+        <label className="ba-search">
+          <span>⌕</span>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search branches..." aria-label="Search branches" />
+        </label>
 
-            <div className="sbranches-chip-row">
-              <Chip tone="gray">{total ? Math.round((item.count / total) * 100) : 0}%</Chip>
-            </div>
+        <button type="button" className="ba-add-inline" onClick={() => openCreate()} aria-label="Add branch">+</button>
+
+        <button
+          type="button"
+          className={`ba-filter-button ${activeFilterCount ? "active" : ""}`}
+          onClick={() => setFilterOpen(true)}
+          aria-label="Open filters"
+          title="Filters"
+        >
+          <SliderIcon />
+          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
+        </button>
+
+        <button type="button" className="ba-icon-button" onClick={() => setMoreOpen(true)} aria-label="More options">⋯</button>
+      </section>
+
+      {activeFilterCount > 0 && (
+        <section className="ba-filter-chips" aria-label="Active filters">
+          <button type="button" onClick={() => setFilterStatus("all")}>Filter: {filterTitle(filterStatus)} ×</button>
+        </section>
+      )}
+
+      {viewMode === "summary" && (
+        <section className="ba-analysis-grid">
+          <AnalysisCard title="Branches by Status" rows={countsByStatus} total={summary.total} />
+          <AnalysisCard title="School Assignment" rows={countsBySchool} total={summary.total} />
+          <AnalysisCard title="Contact Readiness" rows={countsByContact} total={summary.total} />
+          <article className="ba-analysis ba-current-filter">
+            <span>Current Filter</span>
+            <strong>{summary.showing}</strong>
+            <p>{summary.schools} active school(s) available for {summary.total} school branch record(s).</p>
           </article>
-        ))}
+        </section>
+      )}
 
-        {!items.length && <EmptyCard text={`No ${title.toLowerCase()} available.`} />}
+      {viewMode === "map" && (
+        <section className="branches-map-shell">
+          <div className="branches-map-toolbar" aria-label="Map layers">
+            <CompactMapLayerToggle
+              label="Branch"
+              tone="branch"
+              checked={branchLayerVisible}
+              onChange={setBranchLayerVisible}
+            />
+            <CompactMapLayerToggle
+              label="Student"
+              tone="student"
+              checked={visiblePeopleLayers.students}
+              onChange={(checked) =>
+                setVisiblePeopleLayers((current) => ({ ...current, students: checked }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Teacher"
+              tone="teacher"
+              checked={visiblePeopleLayers.teachers}
+              onChange={(checked) =>
+                setVisiblePeopleLayers((current) => ({ ...current, teachers: checked }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Parent"
+              tone="parent"
+              checked={visiblePeopleLayers.parents}
+              onChange={(checked) =>
+                setVisiblePeopleLayers((current) => ({ ...current, parents: checked }))
+              }
+            />
+          </div>
+
+          <SchoolMap
+            markers={mapMarkers}
+            height="min(72vh, 760px)"
+            searchable={false}
+            filterable={false}
+            showLegend={false}
+            cluster
+            fitMarkers
+            allowLocationEditing
+            onLocationUpdate={handleMapLocationUpdate}
+            emptyView={
+              <div className="branches-map-empty">
+                <span aria-hidden="true">⌖</span>
+                <strong>No mapped branches or people</strong>
+                <small>Save branch coordinates in the branch form, or save coordinates on student, teacher and parent records.</small>
+              </div>
+            }
+          />
+        </section>
+      )}
+
+      {viewMode === "table" && <TableView rows={filteredRows} openEdit={openEdit} remove={remove} setActive={setActive} />}
+
+      {viewMode === "cards" && (
+        <section className="ba-list">
+          {filteredRows.map((item) => (
+            <BranchListItem key={String(item.id)} item={item} primary={primary} onOpen={() => setSelectedItem(item)} />
+          ))}
+
+          {!filteredRows.length && (
+            <Empty icon="🏛️" title="No branches found" text="Add school branch records, connect logo and banner images, and assign each branch to a school." />
+          )}
+        </section>
+      )}
+
+      {filterOpen && <FilterSheet filterStatus={filterStatus} setFilterStatus={setFilterStatus} clearFilters={clearFilters} onClose={() => setFilterOpen(false)} />}
+
+      {moreOpen && (
+        <MoreSheet
+          viewMode={viewMode}
+          setViewMode={(mode) => {
+            setViewMode(mode);
+            setMoreOpen(false);
+          }}
+          onRefresh={async () => {
+            setMoreOpen(false);
+            await load();
+          }}
+          onClose={() => setMoreOpen(false)}
+        />
+      )}
+
+      {selectedItem && <ActionSheet item={selectedItem} openEdit={openEdit} remove={remove} setActive={setActive} onClose={() => setSelectedItem(null)} />}
+
+      {modalOpen && (
+        <BranchModal
+          form={form}
+          saving={saving}
+          schools={schools}
+          setModalOpen={setModalOpen}
+          updateForm={updateForm}
+          handleImageUpload={handleImageUpload}
+          openCameraForField={openCameraForField}
+          save={save}
+        />
+      )}
+
+      {cameraOpen && (
+        <CameraCaptureModal
+          field={cameraField}
+          videoRef={cameraVideoRef}
+          starting={cameraStarting}
+          capturing={cameraCapturing}
+          facing={cameraFacing}
+          setFacing={setCameraFacing}
+          capture={captureCameraPhoto}
+          close={closeCamera}
+          entityLabel={BRANCH_MEDIA_ENTITY_LABEL}
+        />
+      )}
+    </main>
+  );
+}
+
+function State({ primary, title, text }: { primary: string; title: string; text: string }) {
+  return (
+    <main className="ba-page" style={{ "--ba-primary": primary } as React.CSSProperties}>
+      <style>{css}</style>
+      <section className="ba-state">
+        <div className="ba-spinner" />
+        <h2>{title}</h2>
+        <p>{text}</p>
+      </section>
+    </main>
+  );
+}
+
+function BranchListItem({ item, primary, onOpen }: { item: BranchView; primary: string; onOpen: () => void }) {
+  const row: any = item.row;
+  const image = item.logoUrl || item.photoUrl;
+
+  return (
+    <button type="button" className="student-row" onClick={onOpen}>
+      <Avatar name={branchName(row)} photo={image} primary={primary} />
+      <span className="student-main">
+        <strong>{branchName(row)}</strong>
+        <small>{item.schoolName}{row.code ? ` · ${row.code}` : ""}</small>
+        <em>{row.phone || row.email || row.address || "No contact details yet"}</em>
+      </span>
+      <span className="student-side">
+        <span className={`status-dot-mini ${statusTone(row.active)}`} title={statusLabel(row.active)} aria-label={statusLabel(row.active)} />
+        <i>⋯</i>
+      </span>
+    </button>
+  );
+}
+
+function CompactMapLayerToggle({
+  label,
+  tone,
+  checked,
+  onChange,
+}: {
+  label: string;
+  tone: "branch" | "student" | "teacher" | "parent";
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`branches-map-toggle ${tone} ${checked ? "active" : ""}`}
+      aria-pressed={checked}
+      aria-label={`${checked ? "Hide" : "Show"} ${label.toLowerCase()} locations`}
+      onClick={() => onChange(!checked)}
+    >
+      <i aria-hidden="true" />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function SliderIcon() {
+  return (
+    <svg className="ba-slider-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h9" />
+      <path d="M17 7h3" />
+      <circle cx="15" cy="7" r="2" />
+      <path d="M4 17h3" />
+      <path d="M11 17h9" />
+      <circle cx="9" cy="17" r="2" />
+    </svg>
+  );
+}
+
+function filterTitle(filter: BranchFilter) {
+  if (filter === "active") return "Active only";
+  if (filter === "inactive") return "Inactive only";
+  if (filter === "no_contact") return "Missing contact";
+  if (filter === "no_school") return "No school";
+  return "All branches";
+}
+
+function FilterSheet({
+  filterStatus,
+  setFilterStatus,
+  clearFilters,
+  onClose,
+}: {
+  filterStatus: BranchFilter;
+  setFilterStatus: (value: BranchFilter) => void;
+  clearFilters: () => void;
+  onClose: () => void;
+}) {
+  const options: { value: BranchFilter; label: string; note: string }[] = [
+    { value: "all", label: "All branches", note: "Show every owner branch record" },
+    { value: "active", label: "Active only", note: "Branches currently enabled" },
+    { value: "inactive", label: "Inactive only", note: "Branches disabled for daily use" },
+    { value: "no_contact", label: "Missing contact", note: "Branches without phone or email" },
+    { value: "no_school", label: "No school", note: "Branches not assigned to a school" },
+  ];
+
+  return (
+    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="ba-sheet">
+        <div className="ba-sheet-head">
+          <div>
+            <h2>Filters</h2>
+            <p>Keep the owner branch register compact and focused.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close filters">✕</button>
+        </div>
+
+        <div className="ba-menu-list">
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={filterStatus === option.value ? "active" : ""}
+              onClick={() => setFilterStatus(option.value)}
+            >
+              <span>{filterStatus === option.value ? "✓" : "⌁"}</span>
+              <b>{option.label}</b>
+              <small>{option.note}</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="ba-sheet-actions">
+          <button type="button" onClick={clearFilters}>Clear</button>
+          <button type="button" className="primary" onClick={onClose}>Apply</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MoreSheet({
+  viewMode,
+  setViewMode,
+  onRefresh,
+  onClose,
+}: {
+  viewMode: ViewMode;
+  setViewMode: (mode: ViewMode) => void;
+  onRefresh: () => void | Promise<void>;
+  onClose: () => void;
+}) {
+  return (
+    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="ba-sheet small">
+        <div className="ba-sheet-head">
+          <div>
+            <h2>More</h2>
+            <p>Switch views or reload the local owner branch register.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close more options">✕</button>
+        </div>
+
+        <div className="ba-menu-list">
+          <button type="button" className={viewMode === "cards" ? "active" : ""} onClick={() => setViewMode("cards")}>
+            <span>▦</span>
+            <b>Cards</b>
+            <small>Compact branch register</small>
+          </button>
+          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
+            <span>☷</span>
+            <b>Table view</b>
+            <small>Dense laptop-friendly owner records</small>
+          </button>
+          <button type="button" className={viewMode === "map" ? "active" : ""} onClick={() => setViewMode("map")}>
+            <span>⌖</span>
+            <b>Proximity map</b>
+            <small>Branches, students, teachers and parents</small>
+          </button>
+          <button type="button" className={viewMode === "summary" ? "active" : ""} onClick={() => setViewMode("summary")}>
+            <span>◔</span>
+            <b>Analytics</b>
+            <small>Status, contact and school assignment</small>
+          </button>
+          <button type="button" onClick={onRefresh}>
+            <span>↻</span>
+            <b>Refresh</b>
+            <small>Reload local branches and schools</small>
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ActionSheet({
+  item,
+  openEdit,
+  remove,
+  setActive,
+  onClose,
+}: {
+  item: BranchView;
+  openEdit: (row: Branch) => void;
+  remove: (item: BranchView) => void;
+  setActive: (item: BranchView, active: boolean) => void;
+  onClose: () => void;
+}) {
+  const row: any = item.row;
+
+  return (
+    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="ba-sheet small">
+        <div className="ba-sheet-profile">
+          <div>
+            <h2>{branchName(row)}</h2>
+            <p>{item.schoolName} · {statusLabel(row.active)}</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close branch actions">✕</button>
+        </div>
+
+        <div className="student-detail-strip">
+          <span><b>Contact</b>{row.phone || row.email || "Not set"}</span>
+          <span><b>School</b>{item.schoolName || "Not set"}</span>
+          <span><b>Updated</b>{timeText(row.updatedAt || row.createdAt)}</span>
+        </div>
+
+        <div className="ba-menu-list">
+          <button type="button" onClick={() => openEdit(item.row)}>
+            <span>✎</span>
+            <b>Edit branch</b>
+            <small>Update profile, contact, logo and banner</small>
+          </button>
+
+          {row.active === false ? (
+            <button type="button" onClick={() => setActive(item, true)}>
+              <span>✓</span>
+              <b>Activate</b>
+              <small>Enable this branch for account operations</small>
+            </button>
+          ) : (
+            <button type="button" onClick={() => setActive(item, false)}>
+              <span>⏸</span>
+              <b>Deactivate</b>
+              <small>Keep the record but disable daily use</small>
+            </button>
+          )}
+
+          <button type="button" className="danger" onClick={() => remove(item)}>
+            <span>⌫</span>
+            <b>Delete</b>
+            <small>Soft delete this branch locally</small>
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TableView({
+  rows,
+  openEdit,
+  remove,
+  setActive,
+}: {
+  rows: BranchView[];
+  openEdit: (row: Branch) => void;
+  remove: (item: BranchView) => void;
+  setActive: (item: BranchView, active: boolean) => void;
+}) {
+  return (
+    <section className="ba-table-card">
+      <div className="ba-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Branches ({rows.length})</th>
+              <th>Contact</th>
+              <th>School</th>
+              <th>City</th>
+              <th>Status</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((item) => {
+              const row: any = item.row;
+              return (
+                <tr key={String(item.id)}>
+                  <td><strong>{branchName(row)}</strong><span>{row.code || row.address || "No code/address"}</span></td>
+                  <td>{row.phone || row.email || "—"}</td>
+                  <td>{item.schoolName || "—"}</td>
+                  <td>{row.city || "—"}</td>
+                  <td><Chip tone={statusTone(row.active)}>{statusLabel(row.active)}</Chip></td>
+                  <td>{timeText(row.updatedAt || row.createdAt)}</td>
+                  <td>
+                    <div className="ba-table-actions">
+                      <button type="button" onClick={() => openEdit(item.row)}>Edit</button>
+                      <button type="button" onClick={() => setActive(item, row.active === false)}> {row.active === false ? "Activate" : "Deactivate"}</button>
+                      <button type="button" className="ba-delete" onClick={() => remove(item)}>Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!rows.length && <div className="ba-empty-table">No branch matches your filters.</div>}
       </div>
     </section>
   );
 }
 
-// ======================================================
-// CSS
-// ======================================================
+function BranchModal({
+  form,
+  saving,
+  schools,
+  setModalOpen,
+  updateForm,
+  handleImageUpload,
+  openCameraForField,
+  save,
+}: {
+  form: FormState;
+  saving: boolean;
+  schools: School[];
+  setModalOpen: (open: boolean) => void;
+  updateForm: (patch: Partial<FormState>) => void;
+  handleImageUpload: (field: CameraField, file?: File) => void | Promise<void>;
+  openCameraForField: (field: CameraField) => void;
+  save: (event?: React.FormEvent) => void;
+}) {
+  return (
+    <div className="ba-modal-backdrop">
+      <form className="ba-modal" onSubmit={save}>
+        <div className="ba-modal-head">
+          <div>
+            <h2>{form.id ? "Edit Branch" : "Add Branch"}</h2>
+            <p>Branch is saved locally first and syncs through your normal sync pipeline.</p>
+          </div>
+          <button type="button" onClick={() => setModalOpen(false)} aria-label="Close branch form">✕</button>
+        </div>
+
+        <section className="ba-form-section">
+          <h3>Branch Profile</h3>
+          <div className="ba-form">
+            <label className="wide">
+              <span>School</span>
+              <select value={form.schoolId} onChange={(e) => updateForm({ schoolId: e.target.value })}>
+                <option value="">Select school</option>
+                {schools.map((school: any) => (
+                  <option key={String(school.id)} value={String(school.id)}>{schoolName(school)}</option>
+                ))}
+              </select>
+            </label>
+            <label><span>Branch Name</span><input value={form.name} onChange={(e) => updateForm({ name: e.target.value })} placeholder="Branch name" /></label>
+            <label><span>Branch Code</span><input value={form.code} onChange={(e) => updateForm({ code: e.target.value })} placeholder="Code" /></label>
+            <label><span>Phone</span><input value={form.phone} onChange={(e) => updateForm({ phone: e.target.value })} placeholder="Phone" /></label>
+            <label><span>Email</span><input value={form.email} onChange={(e) => updateForm({ email: e.target.value })} placeholder="Email" /></label>
+            <label><span>City</span><input value={form.city} onChange={(e) => updateForm({ city: e.target.value })} placeholder="City" /></label>
+            <label className="wide"><span>Address</span><textarea value={form.address} onChange={(e) => updateForm({ address: e.target.value })} placeholder="Branch address" /></label>
+            <label>
+              <span>Status</span>
+              <select value={form.active ? "active" : "inactive"} onChange={(e) => updateForm({ active: e.target.value === "active" })}>
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="ba-form-section">
+          <h3>Branch Location</h3>
+          <div className="ba-form">
+            <label><span>Location Label</span><input value={form.locationLabel} onChange={(e) => updateForm({ locationLabel: e.target.value })} placeholder="Main campus building" /></label>
+            <label>
+              <span>Location Type</span>
+              <select value={form.locationType} onChange={(e) => updateForm({ locationType: e.target.value as FormState["locationType"] })}>
+                <option value="school">School building</option>
+                <option value="campus">Campus</option>
+                <option value="office">Office</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label><span>Latitude</span><input inputMode="decimal" value={form.latitude} onChange={(e) => updateForm({ latitude: e.target.value })} placeholder="5.6037" /></label>
+            <label><span>Longitude</span><input inputMode="decimal" value={form.longitude} onChange={(e) => updateForm({ longitude: e.target.value })} placeholder="-0.1870" /></label>
+            <label><span>Accuracy (metres)</span><input inputMode="decimal" value={form.accuracyMeters} onChange={(e) => updateForm({ accuracyMeters: e.target.value })} placeholder="Optional" /></label>
+            <label>
+              <span>Precision</span>
+              <select value={form.locationPrecision} onChange={(e) => updateForm({ locationPrecision: e.target.value as FormState["locationPrecision"] })}>
+                <option value="exact">Exact</option>
+                <option value="approximate">Approximate</option>
+                <option value="area_only">Area only</option>
+              </select>
+            </label>
+            <label className="wide"><span>Formatted Address</span><textarea value={form.formattedAddress} onChange={(e) => updateForm({ formattedAddress: e.target.value })} placeholder="Map or standardized address" /></label>
+            <label className="ba-check"><input type="checkbox" checked={form.mapVisible} onChange={(e) => updateForm({ mapVisible: e.target.checked })} /><span>Show branch building on maps</span></label>
+            <label className="ba-check"><input type="checkbox" checked={form.locationRestricted} onChange={(e) => updateForm({ locationRestricted: e.target.checked })} /><span>Restrict exact branch location</span></label>
+          </div>
+        </section>
+
+        <section className="ba-form-section">
+          <h3>Images</h3>
+          <div className="ba-form">
+            <MediaInput title="Logo" field="logo" preview={form.logo} handleImageUpload={handleImageUpload} openCameraForField={openCameraForField} />
+            <MediaInput title="Branch Photo" field="photo" preview={form.photo} handleImageUpload={handleImageUpload} openCameraForField={openCameraForField} />
+            <MediaInput title="Banner Image" field="bannerImage" preview={form.bannerImage} banner handleImageUpload={handleImageUpload} openCameraForField={openCameraForField} />
+          </div>
+        </section>
+
+        <div className="ba-modal-actions">
+          <button type="button" onClick={() => setModalOpen(false)}>Cancel</button>
+          <button type="submit" disabled={saving}>{saving ? "Saving..." : form.id ? "Save Changes" : "Add Branch"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MediaInput({
+  title,
+  field,
+  preview,
+  banner = false,
+  handleImageUpload,
+  openCameraForField,
+}: {
+  title: string;
+  field: CameraField;
+  preview?: string;
+  banner?: boolean;
+  handleImageUpload: (field: CameraField, file?: File) => void | Promise<void>;
+  openCameraForField: (field: CameraField) => void;
+}) {
+  return (
+    <label className={banner ? "wide" : undefined}>
+      <span>{title}</span>
+      <div className="ba-media-actions">
+        <label className="ba-media-button">
+          Upload
+          <input type="file" accept="image/*" onChange={(e) => handleImageUpload(field, e.target.files?.[0])} hidden />
+        </label>
+        <button type="button" className="ba-media-button secondary" onClick={() => openCameraForField(field)}>Take Photo</button>
+      </div>
+      <small className="ba-media-hint">Upload from files or take a camera photo. It is optimized and saved as a media asset.</small>
+      {preview && <img src={preview} alt={`${title} preview`} className={banner ? "ba-preview-banner" : "ba-preview-photo"} />}
+    </label>
+  );
+}
+
+function CameraCaptureModal({
+  field,
+  videoRef,
+  starting,
+  capturing,
+  facing,
+  setFacing,
+  capture,
+  close,
+  entityLabel,
+}: {
+  field: CameraField;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  starting: boolean;
+  capturing: boolean;
+  facing: CameraFacingMode;
+  setFacing: (value: CameraFacingMode) => void;
+  capture: () => void | Promise<void>;
+  close: () => void;
+  entityLabel: string;
+}) {
+  const title = field === "logo" ? `Take ${entityLabel} Logo` : field === "bannerImage" ? `Take ${entityLabel} Banner` : `Take ${entityLabel} Photo`;
+
+  return (
+    <div className="ba-modal-backdrop camera-backdrop" role="dialog" aria-modal="true">
+      <section className="ba-camera-modal">
+        <div className="ba-modal-head">
+          <div>
+            <h2>{title}</h2>
+            <p>Use the live camera preview, then capture. The image will be compressed and saved as a media asset.</p>
+          </div>
+          <button type="button" onClick={close} aria-label="Close camera">✕</button>
+        </div>
+
+        <div className="ba-camera-preview">
+          <video ref={videoRef} autoPlay muted playsInline />
+          {starting && <span className="ba-camera-loading">Opening camera...</span>}
+        </div>
+
+        <div className="ba-camera-actions">
+          <button type="button" className="ba-camera-secondary" onClick={() => setFacing(facing === "environment" ? "user" : "environment")} disabled={starting || capturing}>Switch Camera</button>
+          <button type="button" className="ba-camera-secondary" onClick={close} disabled={capturing}>Cancel</button>
+          <button type="button" className="ba-camera-primary" onClick={capture} disabled={starting || capturing}>{capturing ? "Capturing..." : "Capture Photo"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function groupedCounts(rows: BranchView[], keyFn: (item: BranchView) => string) {
+  const m = new Map<string, number>();
+  rows.forEach((r) => {
+    const k = keyFn(r) || "Unknown";
+    m.set(k, (m.get(k) || 0) + 1);
+  });
+  return Array.from(m.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+}
+
+function AnalysisCard({ title, rows, total }: { title: string; rows: { label: string; value: number }[]; total: number }) {
+  return (
+    <article className="ba-analysis">
+      <span>{title}</span>
+      <strong>{total}</strong>
+      <div className="ba-analysis-list">
+        {rows.map((row) => {
+          const percent = total ? Math.round((row.value / total) * 100) : 0;
+          return (
+            <section key={row.label}>
+              <div><b>{row.label}</b><small>{row.value}</small></div>
+              <div className="ba-progress"><i style={{ width: `${percent}%` }} /></div>
+            </section>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
 
 const css = `
-@keyframes sbranchesSpin { to { transform: rotate(360deg); } }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.sbranches-page {
+.ba-page {
+  --ease: cubic-bezier(.2,.8,.2,1);
   min-height: 100dvh;
   width: 100%;
   max-width: 100%;
   min-width: 0;
   padding: calc(8px * var(--local-density-scale, 1));
-  padding-bottom: max(28px, env(safe-area-inset-bottom));
+  padding-bottom: max(40px, env(safe-area-inset-bottom));
   background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--sbranches-primary) 10%, transparent), transparent 34rem),
+    radial-gradient(circle at top left, color-mix(in srgb, var(--ba-primary) 9%, transparent), transparent 30rem),
     var(--bg, #f7f8fb);
-  color: var(--text, #111111);
+  color: var(--text, #111827);
   font-family: var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   font-size: var(--font-size, 14px);
   overflow-x: hidden;
 }
 
-.sbranches-page *,
-.sbranches-page *::before,
-.sbranches-page *::after {
-  box-sizing: border-box;
+.ba-page *, .ba-page *::before, .ba-page *::after { box-sizing: border-box; min-width: 0; }
+.ba-page button, .ba-page input, .ba-page select, .ba-page textarea { font: inherit; max-width: 100%; }
+.ba-page button { -webkit-tap-highlight-color: transparent; }
+.ba-page input, .ba-page select, .ba-page textarea {
+  width: 100%; min-height: 44px; border: 1px solid var(--input-border, var(--border, rgba(0,0,0,.10)));
+  border-radius: 16px; padding: 0 12px; background: var(--input-bg, var(--surface, #fff));
+  color: var(--input-text, var(--text, #111827)); outline: none; font-weight: 750;
 }
-
-.sbranches-page button,
-.sbranches-page input,
-.sbranches-page select {
-  font: inherit;
-  max-width: 100%;
+.ba-page input:focus, .ba-page select:focus, .ba-page textarea:focus {
+  border-color: color-mix(in srgb, var(--ba-primary) 52%, var(--border, rgba(0,0,0,.10)));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ba-primary) 12%, transparent);
 }
-
-.sbranches-page input,
-.sbranches-page select {
-  width: 100%;
-  min-height: 44px;
-  border: 1px solid var(--input-border, var(--border, rgba(0,0,0,.10)));
-  border-radius: 16px;
-  padding: 0 12px;
-  background: var(--input-bg, var(--surface, #fff));
-  color: var(--input-text, var(--text, #111111));
-  outline: none;
-  font-weight: 750;
+.ba-state, .ba-search-card, .ba-card, .ba-table-card, .ba-analysis, .ba-empty, .ba-sheet, .ba-modal, .student-row {
+  background: var(--card-bg, var(--surface, #fff)); border: 1px solid var(--border, rgba(0,0,0,.10)); box-shadow: 0 12px 28px rgba(15,23,42,.045);
 }
+.ba-state { min-height: min(420px, calc(100dvh - 32px)); width: min(520px, 100%); margin: 0 auto; display: grid; place-items: center; align-content: center; gap: 10px; padding: 22px; border-radius: 28px; text-align: center; }
+.ba-spinner { width: 38px; height: 38px; border-radius: 999px; border: 4px solid color-mix(in srgb, var(--ba-primary) 18%, transparent); border-top-color: var(--ba-primary); animation: spin .8s linear infinite; }
+.ba-state h2 { margin: 0; font-size: 22px; font-weight: 1000; letter-spacing: -.04em; }
+.ba-state p { max-width: 34rem; margin: 0; color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; }
+.ba-toast { position: sticky; top: 8px; z-index: 40; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; padding: 12px 14px; border-radius: 18px; font-size: 13px; font-weight: 850; box-shadow: 0 18px 40px rgba(15,23,42,.12); }
+.ba-toast.success { background: rgba(34,197,94,.14); color: #166534; } .ba-toast.error { background: rgba(239,68,68,.12); color: #991b1b; } .ba-toast.info { background: rgba(59,130,246,.13); color: #1d4ed8; }
+.ba-toast button { border: 0; background: transparent; color: currentColor; font-weight: 1000; cursor: pointer; }
+.ba-icon-button, .ba-filter-button, .ba-add-inline { width: 42px; height: 42px; border: 1px solid var(--border, rgba(0,0,0,.10)); border-radius: 999px; display: grid; place-items: center; background: var(--card-bg, var(--surface,#fff)); color: var(--text,#111827); font-size: 18px; font-weight: 1000; cursor: pointer; box-shadow: 0 10px 22px rgba(15,23,42,.045); }
+.ba-add-inline { flex: 0 0 42px; border-color: var(--ba-primary); background: var(--ba-primary); color: #fff; font-size: 25px; line-height: 1; box-shadow: 0 12px 28px color-mix(in srgb, var(--ba-primary) 22%, transparent); }
+.ba-search-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; margin-top: 2px; padding: 8px; border-radius: 24px; }
+.ba-search { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; padding: 0 11px; border-radius: 18px; background: color-mix(in srgb, var(--muted,#64748b) 7%, transparent); }
+.ba-search span { color: var(--muted,#64748b); font-size: 17px; font-weight: 1000; }
+.ba-search input { min-height: 42px; border: 0; padding: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 14px; }
+.ba-slider-icon { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.ba-filter-button { position: relative; background: color-mix(in srgb, var(--ba-primary) 8%, var(--card-bg,#fff)); color: var(--ba-primary); }
+.ba-filter-button.active { background: var(--ba-primary); color: #fff; border-color: var(--ba-primary); }
+.ba-filter-button b { position: absolute; top: -4px; right: -4px; min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 999px; background: #ef4444; color: #fff; font-size: 10px; border: 2px solid var(--card-bg,#fff); }
+.ba-filter-chips { display: flex; gap: 7px; overflow-x: auto; padding: 8px 1px 0; scrollbar-width: none; -ms-overflow-style: none; }
+.ba-filter-chips::-webkit-scrollbar { display: none; }
+.ba-filter-chips button { flex: 0 0 auto; min-height: 31px; border: 0; border-radius: 999px; padding: 0 10px; background: color-mix(in srgb, var(--ba-primary) 11%, transparent); color: var(--ba-primary); font-size: 11px; font-weight: 950; white-space: nowrap; cursor: pointer; }
+.ba-list { display: grid; gap: 7px; margin-top: 10px; }
+.student-row { width: 100%; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px; border-radius: 22px; text-align: left; cursor: pointer; transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
+.student-row:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--ba-primary) 24%, var(--border, rgba(0,0,0,.10))); box-shadow: 0 16px 34px rgba(15,23,42,.07); }
+.ba-avatar { width: 48px; height: 48px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 18px; color: #fff; font-size: 17px; font-weight: 1000; box-shadow: 0 12px 24px rgba(15,23,42,.12); }
+.student-main, .student-main strong, .student-main small, .student-main em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.student-main strong { color: var(--text,#111827); font-size: 14px; font-weight: 1000; letter-spacing: -.02em; }
+.student-main small { margin-top: 3px; color: var(--muted,#64748b); font-size: 12px; font-weight: 850; font-style: normal; }
+.student-main em { margin-top: 3px; color: color-mix(in srgb, var(--muted,#64748b) 86%, var(--text,#111827)); font-size: 11px; font-weight: 750; font-style: normal; }
+.student-side { display: grid; justify-items: end; gap: 6px; flex: 0 0 auto; }
+.student-side i { color: var(--muted,#64748b); font-style: normal; font-size: 18px; font-weight: 1000; line-height: 1; }
+.ba-chip { max-width: 100%; display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize; }
+.ba-chip.green { background: rgba(34,197,94,.12); color: #16a34a; } .ba-chip.red { background: rgba(239,68,68,.12); color: #dc2626; } .ba-chip.blue { background: rgba(59,130,246,.12); color: #2563eb; } .ba-chip.gray { background: color-mix(in srgb,var(--muted,#64748b) 14%,transparent); color: var(--muted,#64748b); } .ba-chip.orange { background: rgba(245,158,11,.14); color: #b45309; } .ba-chip.purple { background: rgba(147,51,234,.12); color: #7e22ce; }
+.status-dot-mini { width: 10px; height: 10px; display: inline-block; border-radius: 999px; background: var(--muted,#64748b); box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 10%, transparent); }
+.status-dot-mini.green { background: #22c55e; } .status-dot-mini.red { background: #ef4444; } .status-dot-mini.blue { background: #3b82f6; } .status-dot-mini.orange { background: #f59e0b; } .status-dot-mini.gray { background: var(--muted,#64748b); }
+.ba-sheet-backdrop, .ba-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: end center; padding: 10px; background: rgba(15,23,42,.50); backdrop-filter: blur(12px); }
+.ba-sheet { width: min(760px, 100%); max-height: min(88dvh, 760px); overflow-y: auto; padding: 14px; border-radius: 28px 28px 22px 22px; box-shadow: 0 30px 90px rgba(15,23,42,.32); animation: sheetIn .18s var(--ease); }
+.ba-sheet.small { width: min(520px, 100%); }
+@keyframes sheetIn { from { transform: translateY(16px); opacity: .7; } to { transform: translateY(0); opacity: 1; } }
+.ba-sheet-head, .ba-sheet-profile, .ba-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 12px; }
+.ba-sheet-head h2, .ba-sheet-profile h2, .ba-modal-head h2 { margin: 0; color: var(--text,#111827); font-size: 21px; font-weight: 1000; letter-spacing: -.05em; }
+.ba-sheet-head p, .ba-sheet-profile p, .ba-modal-head p { margin: 5px 0 0; color: var(--muted,#64748b); font-size: 12px; line-height: 1.5; font-weight: 750; }
+.ba-sheet-head button, .ba-sheet-profile button, .ba-modal-head button { width: 38px; height: 38px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; background: var(--surface,#fff); color: var(--text,#111827); font-weight: 1000; cursor: pointer; flex: 0 0 auto; }
+.ba-sheet-actions, .ba-modal-actions { position: sticky; bottom: -14px; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding: 12px 0 2px; background: linear-gradient(to top, var(--card-bg,var(--surface,#fff)) 70%, transparent); }
+.ba-sheet-actions button, .ba-modal-actions button { min-height: 42px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; padding: 0 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff)); color: var(--text,#111827); font-size: 12px; font-weight: 950; cursor: pointer; }
+.ba-sheet-actions button.primary, .ba-modal-actions button:last-child { border-color: var(--ba-primary); background: var(--ba-primary); color: #fff; box-shadow: 0 14px 32px color-mix(in srgb, var(--ba-primary) 25%, transparent); }
+.ba-modal-actions button:disabled { opacity: .65; cursor: not-allowed; }
+.ba-menu-list { display: grid; gap: 8px; }
+.ba-menu-list button { width: 100%; display: grid; grid-template-columns: 42px minmax(0,1fr); column-gap: 10px; align-items: center; min-height: 58px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 18px; padding: 9px; background: var(--surface,#fff); color: var(--text,#111827); text-align: left; cursor: pointer; }
+.ba-menu-list button span { grid-row: span 2; width: 42px; height: 42px; display: grid; place-items: center; border-radius: 16px; background: color-mix(in srgb, var(--ba-primary) 10%, transparent); color: var(--ba-primary); font-weight: 1000; }
+.ba-menu-list button b, .ba-menu-list button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ba-menu-list button b { font-size: 13px; font-weight: 1000; } .ba-menu-list button small { margin-top: 2px; color: var(--muted,#64748b); font-size: 11px; font-weight: 750; }
+.ba-menu-list button.active { border-color: color-mix(in srgb, var(--ba-primary) 34%, var(--border,rgba(0,0,0,.10))); background: color-mix(in srgb, var(--ba-primary) 8%, var(--surface,#fff)); }
+.ba-menu-list button.danger span { background: color-mix(in srgb, #dc2626 10%, transparent); color: #dc2626; } .ba-menu-list button.danger b { color: #991b1b; }
+.student-detail-strip { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 7px; margin-bottom: 10px; }
+.student-detail-strip span { display: block; padding: 9px; border-radius: 16px; background: color-mix(in srgb, var(--muted,#64748b) 8%, transparent); color: var(--muted,#64748b); font-size: 11px; font-weight: 850; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.student-detail-strip b { display: block; margin-bottom: 3px; color: var(--text,#111827); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.ba-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; } .ba-form.two { grid-template-columns: minmax(0,1fr); } .ba-form.compact { gap: 9px; }
+.ba-form label { display: grid; gap: 6px; min-width: 0; } .ba-form span { color: var(--muted,#64748b); font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
+.ba-media-hint { color: var(--muted,#64748b); font-size: 11px; font-weight: 750; line-height: 1.4; }
+.ba-form .wide { grid-column: 1 / -1; }
+.ba-form-section { padding: 12px 0; border-top: 1px solid var(--border,rgba(0,0,0,.08)); } .ba-form-section:first-of-type { border-top: 0; padding-top: 0; }
+.ba-form-section h3 { margin: 0 0 10px; color: var(--text,#111827); font-size: 14px; font-weight: 1000; letter-spacing: -.03em; }
+.ba-page textarea { min-height: 92px; padding: 12px; resize: vertical; line-height: 1.55; }
+.ba-media-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.ba-media-button { min-height: 40px; border: 1px solid var(--ba-primary); border-radius: 999px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; background: var(--ba-primary); color: #fff !important; font-size: 12px; font-weight: 950; letter-spacing: 0 !important; text-transform: none !important; cursor: pointer; text-align: center; box-shadow: 0 12px 26px color-mix(in srgb, var(--ba-primary) 18%, transparent); }
+.ba-media-button.secondary { background: var(--surface, #fff); color: var(--ba-primary) !important; box-shadow: none; }
+.ba-media-button input { display: none; }
+.ba-preview-photo { width: 96px; height: 96px; object-fit: cover; border-radius: 22px; border: 1px solid var(--border,rgba(0,0,0,.10)); }
+.ba-preview-banner { width: 100%; height: 130px; object-fit: cover; border-radius: 22px; border: 1px solid var(--border,rgba(0,0,0,.10)); }
+.ba-modal { width: min(980px, 100%); max-height: min(92dvh, 900px); overflow-y: auto; padding: 14px; border-radius: 28px; box-shadow: 0 30px 90px rgba(15,23,42,.35); }
+.ba-analysis-grid { display: grid; grid-template-columns: minmax(0,1fr); gap: 10px; margin-top: 10px; }
+.ba-analysis, .ba-table-card, .ba-empty { padding: 13px; border-radius: 24px; }
+.ba-analysis span { color: var(--muted,#64748b); font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .08em; }
+.ba-analysis strong { display: block; margin-top: 8px; font-size: clamp(22px,7vw,30px); line-height: 1; font-weight: 1000; letter-spacing: -.06em; overflow-wrap: anywhere; }
+.ba-analysis p { margin: 8px 0 0; color: var(--muted,#64748b); font-size: 12px; line-height: 1.5; }
+.ba-analysis-list { display: grid; gap: 10px; margin-top: 12px; }
+.ba-analysis-list section { display: grid; gap: 6px; padding: 10px; border-radius: 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent); }
+.ba-analysis-list section > div:first-child { display: flex; justify-content: space-between; gap: 10px; }
+.ba-analysis-list b, .ba-analysis-list small { font-size: 12px; } .ba-analysis-list small { color: var(--muted,#64748b); font-weight: 850; }
+.ba-progress { height: 8px; border-radius: 999px; background: color-mix(in srgb,var(--muted,#64748b) 18%,transparent); overflow: hidden; } .ba-progress i { display: block; height: 100%; border-radius: inherit; background: var(--ba-primary); }
+.ba-empty { display: grid; place-items: center; align-content: center; gap: 8px; min-height: 220px; text-align: center; border-style: dashed; }
+.ba-empty-icon { width: 56px; height: 56px; display: grid; place-items: center; border-radius: 22px; background: color-mix(in srgb,var(--ba-primary) 12%,var(--surface,#fff)); font-size: 28px; }
+.ba-empty h3 { margin: 0; font-size: 18px; font-weight: 1000; } .ba-empty p { margin: 0; color: var(--muted,#64748b); font-size: 13px; line-height: 1.6; }
+.ba-table-card { margin-top: 10px; } .ba-table-scroll { width: 100%; max-width: 100%; overflow-x: auto; border-radius: 18px; border: 1px solid var(--border,rgba(0,0,0,.08)); }
+.ba-table-scroll table { width: 100%; min-width: 920px; border-collapse: collapse; background: var(--card-bg, var(--surface, var(--bg, transparent))); }
+.ba-table-scroll th, .ba-table-scroll td { padding: 10px; border-bottom: 1px solid var(--border,rgba(0,0,0,.08)); vertical-align: top; text-align: left; font-size: 13px; }
+.ba-table-scroll th { background: var(--table-header-bg, color-mix(in srgb, var(--ba-primary) 6%, var(--card-bg, var(--surface, var(--bg, transparent))))); color: var(--table-header-text, var(--muted, var(--text))); font-size: 11px; font-weight: 1000; text-transform: uppercase; letter-spacing: .07em; }
+.ba-table-scroll td strong, .ba-table-scroll td span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ba-table-scroll td span { margin-top: 3px; color: var(--muted,#64748b); font-size: 11px; }
+.ba-table-actions { display: flex; flex-wrap: nowrap; gap: 7px; width: 100%; max-width: 100%; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; } .ba-table-actions::-webkit-scrollbar { display: none; }
+.ba-table-actions button { flex: 0 0 auto; min-height: 34px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; padding: 0 10px; background: var(--surface,#fff); color: var(--text,#111827); font-size: 11px; font-weight: 950; cursor: pointer; white-space: nowrap; }
+.ba-table-actions button:first-child { background: var(--ba-primary); color: #fff; border-color: var(--ba-primary); }
+.ba-delete, .ba-table-actions button.ba-delete { color: #991b1b; background: color-mix(in srgb,#dc2626 7%,var(--surface,#fff)); border-color: color-mix(in srgb,#dc2626 24%,var(--border,rgba(0,0,0,.10))); }
+.ba-empty-table { padding: 22px; text-align: center; color: var(--muted,#64748b); font-weight: 850; }
+.camera-backdrop { z-index: 100; place-items: center; }
+.ba-camera-modal { width: min(720px, 100%); max-height: min(92dvh, 880px); overflow-y: auto; padding: 14px; border-radius: 28px; background: var(--card-bg, var(--surface, #fff)); border: 1px solid var(--border, rgba(0,0,0,.10)); box-shadow: 0 30px 90px rgba(15,23,42,.35); }
+.ba-camera-preview { position: relative; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 24px; background: #020617; border: 1px solid var(--border, rgba(0,0,0,.10)); }
+.ba-camera-preview video { width: 100%; height: 100%; display: block; object-fit: cover; background: #020617; }
+.ba-camera-loading { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(2,6,23,.72); color: #fff; font-size: 13px; font-weight: 950; }
+.ba-camera-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.ba-camera-actions button { min-height: 42px; border-radius: 999px; padding: 0 14px; font-size: 12px; font-weight: 950; cursor: pointer; }
+.ba-camera-secondary { border: 1px solid var(--border, rgba(0,0,0,.10)); background: color-mix(in srgb, var(--muted, #64748b) 8%, var(--surface, #fff)); color: var(--text, #111827); }
+.ba-camera-primary { border: 1px solid var(--ba-primary); background: var(--ba-primary); color: #fff; box-shadow: 0 14px 32px color-mix(in srgb, var(--ba-primary) 25%, transparent); }
+.ba-camera-actions button:disabled { opacity: .62; cursor: not-allowed; }
+@media (min-width: 680px) { .ba-page { padding: calc(12px * var(--local-density-scale,1)); padding-bottom: 44px; } .ba-search-card { grid-template-columns: minmax(0,1fr) 48px 48px 48px; } .ba-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .student-row { border-radius: 24px; padding: 12px; } .ba-analysis-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .ba-form { grid-template-columns: repeat(2, minmax(0,1fr)); } .ba-modal-backdrop, .ba-sheet-backdrop { place-items: center; padding: 18px; } .ba-sheet { border-radius: 28px; padding: 18px; } .ba-modal { padding: 18px; } }
+@media (min-width: 1040px) { .ba-page { padding: calc(16px * var(--local-density-scale,1)); padding-bottom: 48px; } .ba-search-card, .ba-list, .ba-analysis-grid, .ba-table-card, .ba-filter-chips { max-width: 1180px; margin-left: auto; margin-right: auto; } .ba-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } .ba-analysis-grid { grid-template-columns: repeat(4, minmax(0,1fr)); } .ba-current-filter { grid-column: span 2; } .ba-form { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+@media (max-width: 520px) { .ba-page { padding: calc(7px * var(--local-density-scale,1)); padding-bottom: max(38px, env(safe-area-inset-bottom)); } .ba-icon-button, .ba-filter-button, .ba-add-inline { width: 40px; height: 40px; } .student-detail-strip { grid-template-columns: minmax(0,1fr); } .ba-sheet, .ba-modal { border-radius: 24px 24px 18px 18px; padding: 12px; } .ba-sheet-actions, .ba-modal-actions { display: grid; grid-template-columns: minmax(0,1fr); } .ba-sheet-actions button, .ba-modal-actions button { width: 100%; } .ba-media-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } .ba-media-button, .ba-camera-actions button { width: 100%; } .ba-camera-actions { display: grid; grid-template-columns: minmax(0, 1fr); } .ba-camera-modal { border-radius: 22px; padding: 11px; } }
 
-.sbranches-page input:focus,
-.sbranches-page select:focus {
-  border-color: var(--sbranches-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sbranches-primary) 12%, transparent);
-}
-
-.sbranches-page button:disabled {
-  opacity: .58;
-  cursor: not-allowed;
-}
-
-.sbranches-state-card {
-  min-height: min(420px, calc(100dvh - 32px));
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 10px;
-  width: min(460px, 100%);
-  margin: 0 auto;
-  padding: 22px;
-  border-radius: 28px;
-  background: var(--card-bg, var(--surface, #fff));
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  box-shadow: var(--shell-shadow, 0 24px 60px rgba(15,23,42,.08));
-  text-align: center;
-}
-
-.sbranches-state-card h2 {
-  margin: 0;
-  color: var(--text, #111111);
-  font-size: clamp(18px, 5vw, 24px);
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.sbranches-state-card p {
-  max-width: 34rem;
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.sbranches-spinner {
-  width: 38px;
-  height: 38px;
-  border-radius: 999px;
-  border: 4px solid color-mix(in srgb, var(--sbranches-primary) 18%, transparent);
-  border-top-color: var(--sbranches-primary);
-  animation: sbranchesSpin .8s linear infinite;
-}
-
-.sbranches-hero {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--sbranches-primary) 16%, transparent), transparent 20rem),
-    linear-gradient(135deg, var(--card-bg, var(--surface, #fff)), color-mix(in srgb, var(--sbranches-primary) 7%, var(--card-bg, #fff)) 72%);
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  box-shadow: 0 18px 46px rgba(15,23,42,.07);
-  overflow: hidden;
-}
-
-.sbranches-hero-left {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1 1 auto;
-}
-
-.sbranches-hero-icon {
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 18px;
-  background: var(--sbranches-primary);
-  color: #fff;
-  box-shadow: 0 12px 26px color-mix(in srgb, var(--sbranches-primary) 28%, transparent);
-  font-size: 22px;
-}
-
-.sbranches-title-wrap {
-  min-width: 0;
-}
-
-.sbranches-title-wrap p,
-.sbranches-title-wrap h2,
-.sbranches-title-wrap span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sbranches-title-wrap p {
-  margin: 0 0 2px;
-  color: var(--sbranches-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.sbranches-title-wrap h2 {
-  margin: 0;
-  color: var(--text, #111111);
-  font-size: clamp(20px, 5vw, 30px);
-  font-weight: 1000;
-  letter-spacing: -.06em;
-  line-height: 1;
-}
-
-.sbranches-title-wrap span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.sbranches-hero-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.sbranches-ghost-btn,
-.sbranches-primary-btn,
-.sbranches-action-row button,
-.sbranches-table-actions button,
-.sbranches-drawer-actions button,
-.sbranches-filter-card button {
-  min-height: 42px;
-  border-radius: 999px;
-  padding: 0 14px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.sbranches-ghost-btn,
-.sbranches-action-row button,
-.sbranches-table-actions button,
-.sbranches-filter-card button {
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  background: var(--surface, #fff);
-  color: var(--text, #111111);
-}
-
-.sbranches-primary-btn {
-  border: 0;
-  background: var(--sbranches-primary);
-  color: #fff;
-  box-shadow: 0 14px 32px color-mix(in srgb, var(--sbranches-primary) 25%, transparent);
-}
-
-.sbranches-context-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.sbranches-context-grid article {
-  min-width: 0;
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 12px;
-  border-radius: 22px;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--sbranches-primary) 10%, var(--card-bg, var(--surface, #fff))), var(--card-bg, var(--surface, #fff)) 70%);
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  box-shadow: 0 12px 28px rgba(15,23,42,.04);
-}
-
-.sbranches-context-icon {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 16px;
-  background: var(--sbranches-primary);
-  color: #fff;
-  font-size: 20px;
-}
-
-.sbranches-context-grid article > div:last-child {
-  min-width: 0;
-}
-
-.sbranches-context-grid span {
-  display: block;
-  color: var(--sbranches-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.sbranches-context-grid strong {
-  display: block;
-  margin-top: 3px;
-  color: var(--text, #111111);
-  font-size: 16px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.sbranches-context-grid p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.sbranches-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.sbranches-summary-card,
-.sbranches-toolbar,
-.sbranches-filter-card,
-.sbranches-table-card,
-.sbranches-card,
-.sbranches-breakdown-card,
-.sbranches-empty-card,
-.sbranches-form-card {
-  background: var(--card-bg, var(--surface, #fff));
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  box-shadow: 0 12px 28px rgba(15,23,42,.045);
-}
-
-.sbranches-summary-card {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 22px;
-  overflow: hidden;
-}
-
-.sbranches-summary-card.positive {
-  background: linear-gradient(135deg, rgba(34,197,94,.10), var(--card-bg, var(--surface, #fff)));
-}
-
-.sbranches-summary-card.warning {
-  background: linear-gradient(135deg, rgba(245,158,11,.10), var(--card-bg, var(--surface, #fff)));
-}
-
-.sbranches-summary-icon {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--sbranches-primary) 12%, var(--surface, #fff));
-}
-
-.sbranches-summary-card div:last-child {
-  min-width: 0;
-}
-
-.sbranches-summary-card strong,
-.sbranches-summary-card span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sbranches-summary-card strong {
-  color: var(--text, #111111);
-  font-size: 19px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.sbranches-summary-card span {
-  margin-top: 2px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.sbranches-toolbar,
-.sbranches-filter-card,
-.sbranches-table-card {
-  margin-top: 10px;
-  padding: 10px;
-  border-radius: 24px;
-}
-
-.sbranches-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.sbranches-view-tabs {
-  display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  width: min(390px, 100%);
-  padding: 4px;
-  border-radius: 999px;
-  background: var(--shell-section-bg, color-mix(in srgb, var(--sbranches-primary) 7%, var(--surface, #fff)));
-  border: 1px solid var(--border, rgba(0,0,0,.08));
-}
-
-.sbranches-view-tabs button {
-  min-width: 0;
-  min-height: 35px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 9px;
-  background: transparent;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.sbranches-view-tabs button.active {
-  background: var(--sbranches-primary);
-  color: #fff;
-}
-
-.sbranches-filter-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-}
-
-.sbranches-section {
-  margin-top: 16px;
-}
-
-.sbranches-section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.sbranches-section-head p {
-  margin: 0;
-  color: var(--sbranches-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.sbranches-section-head h3 {
-  margin: 2px 0 0;
-  color: var(--text, #111111);
-  font-size: 19px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.sbranches-list,
-.sbranches-breakdown-grid {
+.branches-map-shell {
   display: grid;
   gap: 10px;
 }
 
-.sbranches-card,
-.sbranches-breakdown-card,
-.sbranches-empty-card,
-.sbranches-form-card {
-  min-width: 0;
-  border-radius: 24px;
-  padding: 13px;
-  overflow: hidden;
-}
 
-.sbranches-card {
-  background:
-    linear-gradient(135deg, var(--card-bg, var(--surface, #fff)), color-mix(in srgb, var(--sbranches-primary) 4%, var(--card-bg, #fff)));
-}
-
-.sbranches-card-top {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.sbranches-avatar {
-  width: 56px;
-  height: 56px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 19px;
-  background: var(--sbranches-primary);
-  color: #fff;
-  font-size: 20px;
-  font-weight: 1000;
-  box-shadow: 0 12px 24px rgba(15,23,42,.12);
-  overflow: hidden;
-}
-
-.sbranches-card-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.sbranches-card-main h3 {
-  margin: 0;
-  color: var(--text, #111111);
-  font-size: 18px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.sbranches-card-main p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-  line-height: 1.4;
-}
-
-.sbranches-chip-row,
-.sbranches-action-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.sbranches-chip {
-  max-width: 100%;
+.branches-map-legend span {
   display: inline-flex;
   align-items: center;
-  min-height: 25px;
-  padding: 4px 9px;
+  gap: 5px;
+  padding: 5px 8px;
   border-radius: 999px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
   font-size: 11px;
-  font-weight: 950;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-transform: capitalize;
-}
-
-.sbranches-chip.green { background: rgba(34,197,94,.14); color: #22c55e; }
-.sbranches-chip.red { background: rgba(239,68,68,.14); color: #ef4444; }
-.sbranches-chip.blue { background: rgba(59,130,246,.15); color: #60a5fa; }
-.sbranches-chip.gray { background: color-mix(in srgb, var(--muted, #64748b) 14%, transparent); color: var(--muted, #64748b); }
-.sbranches-chip.orange { background: rgba(245,158,11,.16); color: #f59e0b; }
-.sbranches-chip.purple { background: rgba(147,51,234,.15); color: #a855f7; }
-
-.sbranches-mini-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px;
-  margin-top: 10px;
-}
-
-.sbranches-mini-stat {
-  min-width: 0;
-  padding: 9px;
-  border-radius: 17px;
-  background: color-mix(in srgb, var(--muted, #64748b) 9%, transparent);
-  border: 1px solid var(--border, rgba(0,0,0,.08));
-  overflow: hidden;
-}
-
-.sbranches-mini-stat strong,
-.sbranches-mini-stat span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sbranches-mini-stat strong {
-  color: var(--text, #111111);
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.sbranches-mini-stat span {
-  margin-top: 2px;
-  color: var(--muted, #64748b);
-  font-size: 10px;
   font-weight: 850;
 }
 
-.sbranches-detail-box {
-  display: grid;
-  gap: 3px;
-  margin-top: 10px;
-  padding: 10px;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--muted, #64748b) 8%, transparent);
-  border: 1px solid var(--border, rgba(0,0,0,.08));
-}
+.branches-map-legend .branch { color: #7c3aed; }
+.branches-map-legend .student { color: #2563eb; }
+.branches-map-legend .teacher { color: #16a34a; }
+.branches-map-legend .parent { color: #ea580c; }
 
-.sbranches-detail-box strong,
-.sbranches-detail-box span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.sbranches-detail-box strong {
-  color: var(--text, #111111);
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.sbranches-detail-box span {
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.sbranches-action-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.sbranches-action-row button {
-  width: 100%;
-}
-
-.sbranches-breakdown-top {
+.branches-map-toolbar {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.sbranches-breakdown-card strong {
-  min-width: 0;
-  display: block;
-  color: var(--text, #111111);
-  font-size: 16px;
-  font-weight: 1000;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sbranches-bar-track {
-  height: 8px;
-  margin-top: 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted, #64748b) 14%, transparent);
-  overflow: hidden;
-}
-
-.sbranches-bar-track div {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--sbranches-primary);
-}
-
-.sbranches-table-scroll {
-  width: 100%;
-  max-width: 100%;
-  overflow-x: auto;
-  border-radius: 18px;
-  border: 1px solid var(--border, rgba(0,0,0,.08));
-}
-
-.sbranches-table-scroll table {
-  width: 100%;
-  min-width: 1100px;
-  border-collapse: collapse;
-  background: var(--card-bg, var(--surface, #fff));
-}
-
-.sbranches-table-scroll th,
-.sbranches-table-scroll td {
-  padding: 10px;
-  border-bottom: 1px solid var(--border, rgba(0,0,0,.08));
-  text-align: left;
-  vertical-align: top;
-  color: var(--text, #111111);
-  font-size: 13px;
-}
-
-.sbranches-table-scroll th {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 1000;
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  background: color-mix(in srgb, var(--sbranches-primary) 6%, var(--card-bg, #fff));
-}
-
-.sbranches-table-scroll td strong,
-.sbranches-table-scroll td span {
-  display: block;
-}
-
-.sbranches-table-scroll td span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-}
-
-.sbranches-table-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.sbranches-table-actions button {
-  min-height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
-}
-
-.sbranches-empty-card {
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 8px;
-  min-height: 190px;
-  text-align: center;
-  border-style: dashed;
-}
-
-.sbranches-empty-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--sbranches-primary) 12%, var(--surface, #fff));
-  font-size: 28px;
-}
-
-.sbranches-empty-card h3 {
-  margin: 0;
-  color: var(--text, #111111);
-  font-size: 18px;
-  font-weight: 1000;
-}
-
-.sbranches-empty-card p {
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.sbranches-drawer-layer {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-}
-
-.sbranches-drawer-overlay {
-  position: absolute;
-  inset: 0;
-  border: 0;
-  background: rgba(15,23,42,.52);
-}
-
-.sbranches-drawer {
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: min(94vw, 660px);
-  max-width: 100vw;
-  overflow-y: auto;
-  overflow-x: hidden;
-  background: var(--bg, #f7f8fb);
-  color: var(--text, #111111);
-  padding: 14px;
-  box-shadow: var(--shell-shadow, -24px 0 70px rgba(15,23,42,.22));
-}
-
-.sbranches-drawer-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 0 12px;
-  background: var(--bg, #f7f8fb);
-}
-
-.sbranches-drawer-head div {
-  min-width: 0;
-}
-
-.sbranches-drawer-head p {
-  margin: 0;
-  color: var(--sbranches-primary);
-  font-size: 11px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.sbranches-drawer-head h2,
-.sbranches-drawer-head span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sbranches-drawer-head h2 {
-  margin: 2px 0 0;
-  color: var(--text, #111111);
-  font-size: 22px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.sbranches-drawer-head span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.sbranches-drawer-head button {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  border-radius: 15px;
-  background: var(--surface, #fff);
-  color: var(--text, #111111);
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.sbranches-message {
-  margin-bottom: 10px;
-  padding: 12px;
-  border-radius: 18px;
-  background: rgba(245,158,11,.14);
-  color: #f59e0b;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.sbranches-form-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 9px;
-}
-
-.sbranches-form-grid label,
-.sbranches-form-card label {
-  min-width: 0;
-  display: grid;
-  gap: 6px;
-}
-
-.sbranches-form-grid label span,
-.sbranches-form-card label > span {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 950;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-
-.sbranches-form-grid .wide {
-  grid-column: 1 / -1;
-}
-
-.sbranches-switch-row {
-  display: flex !important;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
+  margin-bottom: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
+.branches-map-toolbar::-webkit-scrollbar { display: none; }
 
-.sbranches-switch-row div {
-  min-width: 0;
-}
-
-.sbranches-switch-row strong {
-  display: block;
-  color: var(--text, #111111);
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.sbranches-switch-row span {
-  display: block;
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.45;
-  font-weight: 750;
-}
-
-.sbranches-switch {
-  width: 58px;
-  height: 34px;
+.branches-map-toggle {
+  --layer-color: #64748b;
   flex: 0 0 auto;
-  border: 0;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--layer-color) 24%, var(--border, rgba(0,0,0,.10)));
   border-radius: 999px;
-  padding: 4px;
-  background: color-mix(in srgb, var(--muted, #64748b) 25%, transparent);
+  padding: 5px 9px;
+  background: var(--card-bg, var(--surface, #fff));
+  color: var(--muted-text, var(--muted-foreground, #64748b));
   cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  transition: border-color .16s ease, background .16s ease, color .16s ease, opacity .16s ease;
 }
-
-.sbranches-switch span {
-  width: 26px;
-  height: 26px;
-  display: block;
+.branches-map-toggle i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
   border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 4px 12px rgba(15,23,42,.16);
-  transition: transform .18s ease;
+  background: var(--layer-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--layer-color) 12%, transparent);
 }
-
-.sbranches-switch.on {
-  background: var(--sbranches-primary);
+.branches-map-toggle.active {
+  border-color: color-mix(in srgb, var(--layer-color) 45%, var(--border, rgba(0,0,0,.10)));
+  background: color-mix(in srgb, var(--layer-color) 9%, var(--card-bg, var(--surface, #fff)));
+  color: var(--text, #111827);
 }
-
-.sbranches-switch.on span {
-  transform: translateX(24px);
+.branches-map-toggle:not(.active) {
+  opacity: .52;
 }
+.branches-map-toggle.branch { --layer-color: #7c3aed; }
+.branches-map-toggle.student { --layer-color: #2563eb; }
+.branches-map-toggle.teacher { --layer-color: #16a34a; }
+.branches-map-toggle.parent { --layer-color: #ea580c; }
 
-.sbranches-drawer-actions {
+.branches-map-empty {
+  min-height: 280px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted, #64748b);
 }
 
-@media (min-width: 680px) {
-  .sbranches-page {
-    padding: calc(12px * var(--local-density-scale, 1));
-  }
-
-  .sbranches-summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .sbranches-filter-card {
-    grid-template-columns: minmax(0, 1fr) 200px 160px;
-  }
-
-  .sbranches-context-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .sbranches-form-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.branches-map-empty > span {
+  font-size: 38px;
+  color: var(--ba-primary);
 }
 
-@media (min-width: 1040px) {
-  .sbranches-page {
-    padding: calc(16px * var(--local-density-scale, 1));
-  }
-
-  .sbranches-summary-grid {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-
-  .sbranches-list,
-  .sbranches-breakdown-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.branches-map-empty strong {
+  color: var(--text, #111827);
+  font-size: 16px;
 }
 
-@media (max-width: 520px) {
-  .sbranches-page {
-    padding: calc(6px * var(--local-density-scale, 1));
-  }
+.branches-map-empty small {
+  max-width: 390px;
+  line-height: 1.5;
+}
 
-  .sbranches-hero {
-    flex-direction: column;
-    border-radius: 22px;
-    padding: 10px;
-  }
-
-  .sbranches-hero-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .sbranches-ghost-btn,
-  .sbranches-primary-btn {
-    width: 100%;
-  }
-
-  .sbranches-summary-grid {
-    gap: 6px;
-  }
-
-  .sbranches-summary-card {
-    padding: 10px;
-    border-radius: 19px;
-  }
-
-  .sbranches-summary-card strong {
-    font-size: 16px;
-  }
-
-  .sbranches-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-    border-radius: 20px;
-  }
-
-  .sbranches-view-tabs {
-    width: 100%;
-  }
-
-  .sbranches-card,
-  .sbranches-empty-card,
-  .sbranches-breakdown-card,
-  .sbranches-form-card {
-    border-radius: 20px;
-    padding: 11px;
-  }
-
-  .sbranches-avatar {
-    width: 52px;
-    height: 52px;
-    flex-basis: 52px;
-  }
-
-  .sbranches-mini-grid {
-    grid-template-columns: repeat(1, minmax(0, 1fr));
-  }
-
-  .sbranches-action-row,
-  .sbranches-drawer-actions {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .sbranches-drawer {
-    width: min(96vw, 660px);
-    padding: 12px;
+@media (max-width: 680px) {
+  .branches-layer-controls {
+    grid-template-columns: 1fr;
   }
 }
 `;

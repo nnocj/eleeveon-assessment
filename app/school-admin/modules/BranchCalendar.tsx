@@ -133,12 +133,12 @@ async function safeArray<T = AnyRow>(tableName: string): Promise<T[]> {
   return table?.toArray ? table.toArray() : [];
 }
 
-function isSchoolRow(row: AnyRow, accountId?: string | null, schoolId?: number | null) {
+function isSchoolRow(row: AnyRow, accountId?: string | null, schoolId?: string | number | null) {
   return (
     row &&
     row.isDeleted !== true &&
     (!row.accountId || row.accountId === accountId) &&
-    Number(row.schoolId) === Number(schoolId)
+    String(row.schoolId) === String(schoolId)
   );
 }
 
@@ -183,7 +183,7 @@ function rowId(row: AnyRow) {
 }
 
 function branchName(branches: AnyRow[], branchId: any) {
-  const branch = branches.find((item: AnyRow) => Number(item.id || item.localId) === Number(branchId));
+  const branch = branches.find((item: AnyRow) => String(item.id || item.localId) === String(branchId));
   return branch?.name || branch?.branchName || "Branch";
 }
 
@@ -365,12 +365,12 @@ export default function BranchCalendar() {
       const allEvents: AnyRow[] = [];
 
       for (const branch of branchRows) {
-        const id = Number(branch.id || branch.localId || 0);
+        const id = String(branch.id || branch.localId || 0);
         if (!id) continue;
 
         const rows = (await listCalendarEvents({
           accountId,
-          schoolId,
+          schoolId: String(schoolId),
           branchId: id,
         })) as AnyRow[];
 

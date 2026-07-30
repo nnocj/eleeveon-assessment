@@ -8,7 +8,7 @@
  * Teacher-scoped module for Eleeveon Schools.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+/*import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { useAccount } from "../../context/account-context";
@@ -466,7 +466,7 @@ export default function ClassTimetable() {
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [accountId, schoolId, branchId]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ /*}, [accountId, schoolId, branchId]);
 
   const teacherClassIds = useMemo(() => {
     return Array.from(new Set(sessions.map((session) => Number(session.classId || 0)).filter(Boolean)));
@@ -560,3 +560,4 @@ export default function ClassTimetable() {
     </main>
   );
 }
+*/

@@ -131,7 +131,7 @@ function readStoredActiveMembership() {
 
 function firstPermanentId(...values: unknown[]): string {
   for (const value of values) {
-    const parsed = idOf(value);
+    const parsed = cleanId(value);
     if (parsed) return parsed;
   }
 
@@ -198,10 +198,8 @@ type FormState = {
   level: string;
   photo: string;
   photoMediaId?: string;
-  newPhotoMediaId?: string;
   bannerImage: string;
   bannerImageMediaId?: string;
-  newBannerImageMediaId?: string;
   capacity: string;
   active: boolean;
 };
@@ -231,10 +229,8 @@ const emptyForm: FormState = {
   level: "",
   photo: "",
   photoMediaId: undefined,
-  newPhotoMediaId: undefined,
   bannerImage: "",
   bannerImageMediaId: undefined,
-  newBannerImageMediaId: undefined,
   capacity: "",
   active: true,
 };
@@ -242,6 +238,29 @@ const emptyForm: FormState = {
 const idOf = (value: any): string => {
   if (value === undefined || value === null) return "";
   return String(value).trim();
+};
+
+const cleanId = (value: unknown): string => {
+  const normalized = idOf(value);
+  return normalized && normalized !== "0" ? normalized : "";
+};
+
+const savedEntityId = (result: unknown, fallback?: unknown): string => {
+  if (typeof result === "string" || typeof result === "number") {
+    return cleanId(result);
+  }
+
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    return firstPermanentId(
+      record.id,
+      record.localId,
+      record.classId,
+      fallback,
+    );
+  }
+
+  return cleanId(fallback);
 };
 
 const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
@@ -421,6 +440,9 @@ export default function ClassesPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm);
   const mediaSessionKeyRef = useRef(createClassMediaSessionKey());
+  const uploadedMediaAssetIds = useRef<Partial<Record<CameraField, string>>>(
+    {},
+  );
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -947,7 +969,6 @@ export default function ClassesPage() {
     }
 
     try {
-      const ownerTempKey = form.id ? undefined : mediaSessionKeyRef.current;
       const isPhoto = field === "photo";
 
       const result = await saveImageAsset(file, {
@@ -955,17 +976,28 @@ export default function ClassesPage() {
         schoolId: schoolId,
         branchId: branchId,
         ownerTable: CLASS_MEDIA_OWNER_TABLE,
-        ownerId: form.id || undefined,
-        ownerTempKey,
+        ownerId: undefined,
+        ownerTempKey: mediaSessionKeyRef.current,
         fieldKey: isPhoto ? MediaFieldKeys.PHOTO : "bannerImage",
         variant: isPhoto ? "avatar" : "cover",
         replaceExisting: true,
       });
 
+      const uploadedAssetId = cleanId(result.assetId);
+      if (!uploadedAssetId) {
+        throw new Error(
+          "The image was processed but no media asset ID was created.",
+        );
+      }
+
+      uploadedMediaAssetIds.current = {
+        ...uploadedMediaAssetIds.current,
+        [field]: uploadedAssetId,
+      };
+
       updateForm({
         [field]: result.previewUrl,
-        [isPhoto ? "photoMediaId" : "bannerImageMediaId"]: result.assetId,
-        [isPhoto ? "newPhotoMediaId" : "newBannerImageMediaId"]: result.assetId,
+        [isPhoto ? "photoMediaId" : "bannerImageMediaId"]: uploadedAssetId,
       } as Partial<FormState>);
 
       showToast(
@@ -989,6 +1021,7 @@ export default function ClassesPage() {
   const openCreate = () => {
     if (!requireTenant()) return;
     mediaSessionKeyRef.current = createClassMediaSessionKey();
+    uploadedMediaAssetIds.current = {};
     setForm({
       ...emptyForm,
       organizationId:
@@ -1000,6 +1033,7 @@ export default function ClassesPage() {
   const openEdit = (row: Class) => {
     const item = row as any;
     mediaSessionKeyRef.current = createClassMediaSessionKey();
+    uploadedMediaAssetIds.current = {};
     setSelectedItem(null);
     setForm({
       id: idOf(item.id),
@@ -1011,19 +1045,17 @@ export default function ClassesPage() {
       code: item.code || "",
       level: item.level || "",
       photo:
+        resolvedMediaById[idOf(item.id)]?.photo ||
         mediaPreviewUrls[mediaKey(idOf(item.id), "photo")] ||
-        safeRecordMediaValue(item.photo) ||
         "",
       photoMediaId: item.photoMediaId ? String(item.photoMediaId) : undefined,
-      newPhotoMediaId: undefined,
       bannerImage:
+        resolvedMediaById[idOf(item.id)]?.bannerImage ||
         mediaPreviewUrls[mediaKey(idOf(item.id), "bannerImage")] ||
-        safeRecordMediaValue(item.bannerImage) ||
         "",
       bannerImageMediaId: item.bannerImageMediaId
         ? String(item.bannerImageMediaId)
         : undefined,
-      newBannerImageMediaId: undefined,
       capacity: item.capacity == null ? "" : String(item.capacity),
       active: isActiveRow(item),
     });
@@ -1087,10 +1119,11 @@ export default function ClassesPage() {
         name: form.name.trim(),
         code: form.code.trim() || undefined,
         level: form.level.trim() || undefined,
-        photo: safeRecordMediaValue(form.photo),
-        photoMediaId: form.photoMediaId || undefined,
-        bannerImage: safeRecordMediaValue(form.bannerImage),
-        bannerImageMediaId: form.bannerImageMediaId || undefined,
+        photo: safeRecordMediaValue(existing?.photo),
+        photoMediaId: form.photoMediaId || existing?.photoMediaId || undefined,
+        bannerImage: safeRecordMediaValue(existing?.bannerImage),
+        bannerImageMediaId:
+          form.bannerImageMediaId || existing?.bannerImageMediaId || undefined,
         capacity: form.capacity === "" ? undefined : Number(form.capacity),
         active: form.active,
         status: form.active ? "active" : "inactive",
@@ -1102,24 +1135,53 @@ export default function ClassesPage() {
           ? await updateLocal("classes", String(form.id), payload)
           : await createLocal("classes", payload as unknown as Class);
 
-      const savedClassId = idOf(
-        typeof savedClass === "number"
-          ? savedClass
-          : (savedClass as any)?.id || form.id || 0,
-      );
+      const savedClassId = savedEntityId(savedClass, form.id);
 
-      if (savedClassId) {
-        await commitMediaAssetsToOwner({
-          accountId,
-          ownerTable: CLASS_MEDIA_OWNER_TABLE,
-          ownerId: savedClassId,
+      if (!savedClassId) {
+        throw new Error(
+          "The class record was saved, but its permanent ID could not be resolved for image attachment.",
+        );
+      }
 
-          ownerTempKey: mediaSessionKeyRef.current,
-          assets: [
-            { assetId: form.newPhotoMediaId, fieldKey: MediaFieldKeys.PHOTO },
-            { assetId: form.newBannerImageMediaId, fieldKey: "bannerImage" },
-          ],
-        });
+      const stagedPhotoId = cleanId(uploadedMediaAssetIds.current.photo);
+      const stagedBannerId = cleanId(uploadedMediaAssetIds.current.bannerImage);
+
+      const committedMedia = await commitMediaAssetsToOwner({
+        accountId,
+        ownerTable: CLASS_MEDIA_OWNER_TABLE,
+        ownerId: savedClassId,
+        ownerTempKey: mediaSessionKeyRef.current,
+        assets: [
+          {
+            assetId: stagedPhotoId || undefined,
+            fieldKey: MediaFieldKeys.PHOTO,
+          },
+          { assetId: stagedBannerId || undefined, fieldKey: "bannerImage" },
+        ],
+      });
+
+      const committedPhotoId = committedMedia.find(
+        (item) => item.fieldKey === MediaFieldKeys.PHOTO,
+      )?.assetId;
+      const committedBannerId = committedMedia.find(
+        (item) => item.fieldKey === "bannerImage",
+      )?.assetId;
+
+      if (committedPhotoId || committedBannerId) {
+        await updateLocal("classes", savedClassId, {
+          photoMediaId:
+            committedPhotoId ||
+            form.photoMediaId ||
+            existing?.photoMediaId ||
+            undefined,
+          bannerImageMediaId:
+            committedBannerId ||
+            form.bannerImageMediaId ||
+            existing?.bannerImageMediaId ||
+            undefined,
+          photo: safeRecordMediaValue(existing?.photo),
+          bannerImage: safeRecordMediaValue(existing?.bannerImage),
+        } as Partial<Class>);
       }
 
       if (savedClassId) {
@@ -1166,6 +1228,7 @@ export default function ClassesPage() {
         }
       }
 
+      uploadedMediaAssetIds.current = {};
       mediaSessionKeyRef.current = createClassMediaSessionKey();
       setModalOpen(false);
       showToast("success", "Class saved.");

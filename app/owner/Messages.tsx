@@ -51,14 +51,14 @@ type Tone = "green" | "red" | "blue" | "gray" | "orange" | "purple";
 
 type Contact = {
   key: string;
-  id: string | number;
+  id: string;
   name: string;
   role: string;
   roleGroup: "school_admin" | "branch_admin" | "accountant";
   email?: string;
   phone?: string;
-  schoolId?: number;
-  branchId?: number;
+  schoolId?: string;
+  branchId?: string;
   schoolName?: string;
   branchName?: string;
 };
@@ -97,12 +97,12 @@ function n(value: any) {
 }
 
 function idOf(row?: AnyRow) {
-  return row?.id ?? row?.localId ?? row?.cloudId;
+  return cleanId(row?.id ?? row?.localId ?? row?.cloudId);
 }
 
-function cleanId(value: any) {
-  const parsed = Number(value || 0);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+function cleanId(value: unknown) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
 }
 
 function text(value: any, fallback = "") {
@@ -448,9 +448,9 @@ export default function OwnerMessagesPage() {
       );
 
       const ownedSchools = (schoolRows as AnyRow[]).filter((row) => sameAccount(row, accountId));
-      const schoolIds = new Set(ownedSchools.map((row) => Number(idOf(row))).filter(Boolean));
+      const schoolIds = new Set(ownedSchools.map((row) => idOf(row)).filter(Boolean));
       const ownedBranches = (branchRows as AnyRow[]).filter(
-        (row) => sameAccount(row, accountId) && (!schoolIds.size || schoolIds.has(Number(row.schoolId)))
+        (row) => sameAccount(row, accountId) && (!schoolIds.size || schoolIds.has(cleanId(row.schoolId)))
       );
 
       setOwner(ctx.owner);
@@ -479,8 +479,8 @@ export default function OwnerMessagesPage() {
   }, [accountId, accountLoading, settingsLoading]);
 
   const contacts = useMemo<Contact[]>(() => {
-    const schoolMap = new Map(schools.map((school) => [Number(idOf(school)), rowName(school)]));
-    const branchMap = new Map(branches.map((branch) => [Number(idOf(branch)), rowName(branch)]));
+    const schoolMap = new Map(schools.map((school) => [idOf(school), rowName(school)]));
+    const branchMap = new Map(branches.map((branch) => [idOf(branch), rowName(branch)]));
     const rows = memberships
       .filter((membership) => OWNER_CONTACT_ROLES.includes(String(membership.role || "").toLowerCase()))
       .map((membership) => {
@@ -492,7 +492,7 @@ export default function OwnerMessagesPage() {
           nestedUser ||
           undefined;
 
-        const id = userIdOf(user) || membershipUserId(membership) || membershipEmail;
+        const id = cleanId(userIdOf(user) || membershipUserId(membership) || membershipEmail);
         const schoolId = schoolIdOf(membership);
         const branchId = branchIdOf(membership);
 
@@ -565,7 +565,7 @@ export default function OwnerMessagesPage() {
   const threadMessages = useMemo(() => {
     if (!activeThread?.id) return [];
     return messages
-      .filter((message) => Number(message.threadId) === Number(activeThread.id))
+      .filter((message) => cleanId(message.threadId) === cleanId(activeThread.id))
       .sort((a, b) => n(a.createdAt || a.sentAt) - n(b.createdAt || b.sentAt));
   }, [activeThread, messages]);
 
@@ -607,8 +607,8 @@ export default function OwnerMessagesPage() {
     try {
       const createdThread = (await createLocal("messageThreads" as any, {
         accountId: String(accountId),
-        schoolId: Number(recipient.schoolId || 0),
-        branchId: Number(recipient.branchId || 0),
+        schoolId: recipient.schoolId || null,
+        branchId: recipient.branchId || null,
         subject: form.subject.trim(),
         participantUserIds: [String(userIdOf(owner || {})), String(recipient.id)].filter(Boolean),
         participantRoles: ["owner", recipient.roleGroup],
@@ -667,8 +667,8 @@ export default function OwnerMessagesPage() {
     try {
       await createLocal("messages" as any, {
         accountId: String(accountId),
-        schoolId: Number(activeThread.schoolId || 0),
-        branchId: Number(activeThread.branchId || 0),
+        schoolId: cleanId(activeThread.schoolId) || null,
+        branchId: cleanId(activeThread.branchId) || null,
         threadId,
         senderRole: "owner",
         ownerUserId: userIdOf(owner || {}),
@@ -733,7 +733,7 @@ export default function OwnerMessagesPage() {
 
     try {
       await softDeleteLocal("messageThreads" as any, id);
-      for (const message of messages.filter((item) => Number(item.threadId) === Number(id))) {
+      for (const message of messages.filter((item) => cleanId(item.threadId) === id)) {
         const messageId = cleanId(message.id || message.localId);
         if (messageId) await softDeleteLocal("messages" as any, messageId);
       }

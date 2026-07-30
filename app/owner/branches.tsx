@@ -28,6 +28,14 @@
  * - Resolves account/workspace from eleeveon_open_workspace first.
  * - Falls back to active membership, AccountContext, settings, then storage.
  * - Prevents stale owner branch data after role/workspace switching.
+ *
+ * Branch proximity map:
+ * - adds branch buildings as map anchors with a dedicated branch/school icon.
+ * - optionally overlays students, teachers and parents from the selected owner account.
+ * - keeps each people category in its own map layer for distinct colors and icons.
+ * - uses profile-photo markers when a person has an available photo.
+ * - lets owners compare where people live/work relative to branch buildings.
+ * - supports creating and moving branch locations through the shared SchoolMap workflow.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -36,7 +44,7 @@ import { useRouter } from "next/navigation";
 import { useAccount } from "../context/account-context";
 import { useSettings } from "../context/settings-context";
 import { useActiveMembership } from "../context/active-membership-context";
-import { db, type School, type Branch } from "../lib/db/db";
+import { db, type School, type Branch, type Student, type Teacher, type Parent } from "../lib/db/db";
 import { createLocal, updateLocal, softDeleteLocal, listActiveLocal } from "../lib/sync/syncUtils";
 import {
   MediaOwners,
@@ -55,11 +63,22 @@ import {
   stopCameraStream,
   type CameraFacingMode,
 } from "../lib/media/mediaAssetUtils";
+import {
+  SchoolMap,
+  type MapLocationUpdateRequest,
+} from "../components/maps";
+import { genericEntityToMarker, type MapMarker } from "../lib/maps";
 
-type ViewMode = "cards" | "table" | "summary";
+type ViewMode = "cards" | "table" | "map" | "summary";
 type ToastTone = "success" | "error" | "info";
 type BranchFilter = "all" | "active" | "inactive" | "no_contact" | "no_school";
 type CameraField = "logo" | "photo" | "bannerImage";
+type PeopleLayer = "students" | "teachers" | "parents";
+
+type BranchCreateDefaults = {
+  latitude?: number;
+  longitude?: number;
+};
 
 type TenantRow = {
   id?: number | string;
@@ -82,6 +101,17 @@ type FormState = {
   email: string;
   address: string;
   city: string;
+  latitude: string;
+  longitude: string;
+  accuracyMeters: string;
+  locationLabel: string;
+  formattedAddress: string;
+  locationType: "school" | "campus" | "office" | "other";
+  locationSource: "manual" | "device_gps" | "geocoded" | "imported";
+  locationPrecision: "exact" | "approximate" | "area_only";
+  locationCapturedAt?: number;
+  mapVisible: boolean;
+  locationRestricted: boolean;
   logo: string;
   logoMediaId?: string;
   photo: string;
@@ -147,6 +177,17 @@ const emptyForm: FormState = {
   email: "",
   address: "",
   city: "",
+  latitude: "",
+  longitude: "",
+  accuracyMeters: "",
+  locationLabel: "",
+  formattedAddress: "",
+  locationType: "school",
+  locationSource: "manual",
+  locationPrecision: "exact",
+  locationCapturedAt: undefined,
+  mapVisible: true,
+  locationRestricted: false,
   logo: "",
   logoMediaId: undefined,
   photo: "",
@@ -272,11 +313,20 @@ export default function OwnerBranchesPage() {
   const [saving, setSaving] = useState(false);
   const [rows, setRows] = useState<Branch[]>([]);
   const [schools, setSchools] = useState<School[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [parents, setParents] = useState<Parent[]>([]);
   const [mediaPreviewUrls, setMediaPreviewUrls] = useState<Record<string, string>>({});
 
   const [viewMode, setViewMode] = useState<ViewMode>("cards");
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState<BranchFilter>("all");
+  const [branchLayerVisible, setBranchLayerVisible] = useState(true);
+  const [visiblePeopleLayers, setVisiblePeopleLayers] = useState<Record<PeopleLayer, boolean>>({
+    students: true,
+    teachers: true,
+    parents: true,
+  });
 
   const [filterOpen, setFilterOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -367,6 +417,9 @@ export default function OwnerBranchesPage() {
     Object.values(mediaPreviewUrls).forEach(revokeMediaObjectUrl);
     setRows([]);
     setSchools([]);
+    setStudents([]);
+    setTeachers([]);
+    setParents([]);
     setMediaPreviewUrls({});
   };
 
@@ -440,9 +493,12 @@ export default function OwnerBranchesPage() {
 
     try {
       setLoading(true);
-      const [branchRows, schoolRows] = await Promise.all([
+      const [branchRows, schoolRows, studentRows, teacherRows, parentRows] = await Promise.all([
         tableSafe("branches")?.toArray?.() || [],
         tableSafe("schools")?.toArray?.() || [],
+        tableSafe("students")?.toArray?.() || [],
+        tableSafe("teachers")?.toArray?.() || [],
+        tableSafe("parents")?.toArray?.() || [],
       ]);
 
       const scopedSchools = (schoolRows as School[])
@@ -457,6 +513,30 @@ export default function OwnerBranchesPage() {
 
       setSchools(scopedSchools);
       setRows(scopedBranches);
+      setStudents(
+        (studentRows as Student[]).filter(
+          (row: any) =>
+            sameAccount(row as TenantRow) &&
+            row.active !== false &&
+            !["withdrawn", "deleted", "archived", "inactive"].includes(safeLower(row.status)),
+        ),
+      );
+      setTeachers(
+        (teacherRows as Teacher[]).filter(
+          (row: any) =>
+            sameAccount(row as TenantRow) &&
+            row.active !== false &&
+            !["deleted", "archived", "inactive"].includes(safeLower(row.status)),
+        ),
+      );
+      setParents(
+        (parentRows as Parent[]).filter(
+          (row: any) =>
+            sameAccount(row as TenantRow) &&
+            row.active !== false &&
+            !["deleted", "archived", "inactive"].includes(safeLower(row.status)),
+        ),
+      );
       await resolveBranchMediaUrls(scopedBranches);
     } catch (error) {
       console.error(error);
@@ -564,6 +644,103 @@ export default function OwnerBranchesPage() {
       .sort((a, b) => branchName(a.row).localeCompare(branchName(b.row)));
   }, [filterStatus, search, viewRows]);
 
+  const branchMarkers = useMemo<MapMarker[]>(() => {
+    if (!branchLayerVisible) return [];
+
+    return filteredRows.reduce<MapMarker[]>((markers, item) => {
+      const row: any = item.row;
+      const marker = genericEntityToMarker(
+        {
+          ...row,
+          id: item.id,
+          photo: item.logoUrl || item.photoUrl || row.logo || row.photo,
+        },
+        {
+          entityType: "branch",
+          layerId: "branches",
+          icon: "school",
+          imageUrl: item.logoUrl || item.photoUrl,
+          subtitle: [item.schoolName, row.city, row.address].filter(Boolean).join(" · "),
+          privacy: { allowRestricted: true, requireConsent: false },
+        },
+      );
+
+      if (!marker) return markers;
+
+      markers.push({
+        ...marker,
+        description: row.phone || row.email || "School branch building",
+        metadata: {
+          ...(marker.metadata || {}),
+          branchId: item.id,
+          markerRole: "branch-building",
+          markerColor: "#7c3aed",
+          schoolName: item.schoolName,
+        },
+      });
+      return markers;
+    }, []);
+  }, [branchLayerVisible, filteredRows]);
+
+  const peopleMarkers = useMemo<MapMarker[]>(() => {
+    const markers: MapMarker[] = [];
+
+    const appendPeople = (
+      sourceRows: any[],
+      entityType: "student" | "teacher" | "parent",
+      layerId: PeopleLayer,
+      icon: "student" | "teacher" | "parent",
+      markerColor: string,
+    ) => {
+      if (!visiblePeopleLayers[layerId]) return;
+
+      sourceRows.forEach((row: any) => {
+        if (row.mapVisible === false) return;
+
+        const marker = genericEntityToMarker(row, {
+          entityType,
+          layerId,
+          icon,
+          imageUrl: safeRecordMediaValue(row.photo),
+          subtitle: [
+            row.locationLabel || row.formattedAddress || row.address,
+            branchName(rows.find((branch: any) => sameId(branch.id, row.branchId))),
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        });
+
+        if (!marker) return;
+
+        markers.push({
+          ...marker,
+          metadata: {
+            ...(marker.metadata || {}),
+            [`${entityType}Id`]: idOf(row.id),
+            branchId: idOf(row.branchId),
+            markerRole: entityType,
+            markerColor,
+          },
+        });
+      });
+    };
+
+    appendPeople(students as any[], "student", "students", "student", "#2563eb");
+    appendPeople(teachers as any[], "teacher", "teachers", "teacher", "#16a34a");
+    appendPeople(parents as any[], "parent", "parents", "parent", "#ea580c");
+
+    return markers;
+  }, [parents, rows, students, teachers, visiblePeopleLayers]);
+
+  const mapMarkers = useMemo(
+    () => [...branchMarkers, ...peopleMarkers],
+    [branchMarkers, peopleMarkers],
+  );
+
   const summary = useMemo(
     () => ({
       total: rows.length,
@@ -615,12 +792,71 @@ export default function OwnerBranchesPage() {
     }
   };
 
-  const openCreate = () => {
+  const openCreate = (defaults?: BranchCreateDefaults) => {
     if (!requireAccount()) return;
     mediaSessionKeyRef.current = createBranchMediaSessionKey();
     setSelectedItem(null);
-    setForm({ ...emptyForm, schoolId: idOf((schools[0] as any)?.id), active: filterStatus === "inactive" ? false : true });
+
+    const hasCoordinate =
+      Number.isFinite(defaults?.latitude) &&
+      Number.isFinite(defaults?.longitude);
+
+    setForm({
+      ...emptyForm,
+      schoolId: idOf((schools[0] as any)?.id),
+      active: filterStatus === "inactive" ? false : true,
+      latitude: hasCoordinate ? String(defaults?.latitude) : "",
+      longitude: hasCoordinate ? String(defaults?.longitude) : "",
+      locationSource: "manual",
+      locationCapturedAt: hasCoordinate ? Date.now() : undefined,
+      mapVisible: true,
+    });
     setModalOpen(true);
+  };
+
+  const handleMapLocationUpdate = async (request: MapLocationUpdateRequest) => {
+    if (!authenticated || !selectedAccountId) {
+      throw new Error("Sign in before updating map locations.");
+    }
+
+    const entityType = String(request.marker.entityType || "");
+    const metadata = request.marker.metadata || {};
+    const tableName =
+      entityType === "branch"
+        ? "branches"
+        : entityType === "student"
+          ? "students"
+          : entityType === "teacher"
+            ? "teachers"
+            : entityType === "parent"
+              ? "parents"
+              : "";
+
+    const entityId = idOf(
+      entityType === "branch"
+        ? metadata.branchId || request.marker.id
+        : entityType === "student"
+          ? metadata.studentId || request.marker.id
+          : entityType === "teacher"
+            ? metadata.teacherId || request.marker.id
+            : metadata.parentId || request.marker.id,
+    );
+
+    if (!tableName || !entityId) {
+      throw new Error("The selected map item could not be identified.");
+    }
+
+    await updateLocal(tableName as any, entityId, {
+      latitude: request.coordinate.latitude,
+      longitude: request.coordinate.longitude,
+      locationSource: "manual",
+      locationCapturedAt: Date.now(),
+      mapVisible: true,
+      isDeleted: false,
+    } as any);
+
+    showToast("success", `${entityType === "branch" ? "Branch" : entityType.charAt(0).toUpperCase() + entityType.slice(1)} location updated.`);
+    await load();
   };
 
   const openEdit = (row: Branch) => {
@@ -637,6 +873,17 @@ export default function OwnerBranchesPage() {
       email: s.email || "",
       address: s.address || "",
       city: s.city || "",
+      latitude: s.latitude == null ? "" : String(s.latitude),
+      longitude: s.longitude == null ? "" : String(s.longitude),
+      accuracyMeters: s.accuracyMeters == null ? "" : String(s.accuracyMeters),
+      locationLabel: s.locationLabel || "",
+      formattedAddress: s.formattedAddress || "",
+      locationType: s.locationType || "school",
+      locationSource: s.locationSource || "manual",
+      locationPrecision: s.locationPrecision || "exact",
+      locationCapturedAt: s.locationCapturedAt || undefined,
+      mapVisible: s.mapVisible !== false,
+      locationRestricted: Boolean(s.locationRestricted),
       logo: mediaPreviewUrls[mediaKey(id, "logo")] || safeRecordMediaValue(s.logo) || "",
       logoMediaId: s.logoMediaId ? String(s.logoMediaId) : undefined,
       photo: mediaPreviewUrls[mediaKey(id, "photo")] || safeRecordMediaValue(s.photo) || "",
@@ -655,6 +902,21 @@ export default function OwnerBranchesPage() {
     if (!form.schoolId) return "Select the school this branch belongs to.";
     if (!schools.some((school: any) => sameId(school.id, form.schoolId))) return "Selected school does not belong to this owner account.";
     if (!form.name.trim()) return "Enter branch name.";
+
+    const hasLatitude = form.latitude.trim() !== "";
+    const hasLongitude = form.longitude.trim() !== "";
+
+    if (hasLatitude !== hasLongitude)
+      return "Enter both latitude and longitude, or leave both empty.";
+
+    if (hasLatitude && hasLongitude) {
+      const latitude = Number(form.latitude);
+      const longitude = Number(form.longitude);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)
+        return "Latitude must be between -90 and 90.";
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)
+        return "Longitude must be between -180 and 180.";
+    }
 
     const duplicate = rows.find((row: any) => {
       if (form.id && sameId(row.id, form.id)) return false;
@@ -693,6 +955,21 @@ export default function OwnerBranchesPage() {
         email: form.email.trim() || undefined,
         address: form.address.trim() || undefined,
         city: form.city.trim() || undefined,
+        latitude: form.latitude.trim() === "" ? undefined : Number(form.latitude),
+        longitude: form.longitude.trim() === "" ? undefined : Number(form.longitude),
+        accuracyMeters:
+          form.accuracyMeters.trim() === "" ? undefined : Number(form.accuracyMeters),
+        locationLabel: form.locationLabel.trim() || undefined,
+        formattedAddress: form.formattedAddress.trim() || undefined,
+        locationType: form.locationType,
+        locationSource: form.locationSource,
+        locationPrecision: form.locationPrecision,
+        locationCapturedAt:
+          form.latitude.trim() && form.longitude.trim()
+            ? form.locationCapturedAt || Date.now()
+            : undefined,
+        mapVisible: form.mapVisible,
+        locationRestricted: form.locationRestricted,
         logo: safeRecordMediaValue(form.logo),
         logoMediaId: form.logoMediaId || undefined,
         photo: safeRecordMediaValue(form.photo),
@@ -818,7 +1095,7 @@ export default function OwnerBranchesPage() {
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search branches..." aria-label="Search branches" />
         </label>
 
-        <button type="button" className="ba-add-inline" onClick={openCreate} aria-label="Add branch">+</button>
+        <button type="button" className="ba-add-inline" onClick={() => openCreate()} aria-label="Add branch">+</button>
 
         <button
           type="button"
@@ -850,6 +1127,62 @@ export default function OwnerBranchesPage() {
             <strong>{summary.showing}</strong>
             <p>{summary.schools} active school(s) available for {summary.total} owner branch record(s).</p>
           </article>
+        </section>
+      )}
+
+      {viewMode === "map" && (
+        <section className="branches-map-shell">
+          <div className="branches-map-toolbar" aria-label="Map layers">
+            <CompactMapLayerToggle
+              label="Branch"
+              tone="branch"
+              checked={branchLayerVisible}
+              onChange={setBranchLayerVisible}
+            />
+            <CompactMapLayerToggle
+              label="Student"
+              tone="student"
+              checked={visiblePeopleLayers.students}
+              onChange={(checked) =>
+                setVisiblePeopleLayers((current) => ({ ...current, students: checked }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Teacher"
+              tone="teacher"
+              checked={visiblePeopleLayers.teachers}
+              onChange={(checked) =>
+                setVisiblePeopleLayers((current) => ({ ...current, teachers: checked }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Parent"
+              tone="parent"
+              checked={visiblePeopleLayers.parents}
+              onChange={(checked) =>
+                setVisiblePeopleLayers((current) => ({ ...current, parents: checked }))
+              }
+            />
+          </div>
+
+          <SchoolMap
+            markers={mapMarkers}
+            height="min(72vh, 760px)"
+            searchable={false}
+            filterable={false}
+            showLegend={false}
+            cluster
+            fitMarkers
+            allowLocationEditing
+            onLocationUpdate={handleMapLocationUpdate}
+            emptyView={
+              <div className="branches-map-empty">
+                <span aria-hidden="true">⌖</span>
+                <strong>No mapped branches or people</strong>
+                <small>Save branch coordinates in the branch form, or save coordinates on student, teacher and parent records.</small>
+              </div>
+            }
+          />
         </section>
       )}
 
@@ -945,6 +1278,31 @@ function BranchListItem({ item, primary, onOpen }: { item: BranchView; primary: 
         <span className={`status-dot-mini ${statusTone(row.active)}`} title={statusLabel(row.active)} aria-label={statusLabel(row.active)} />
         <i>⋯</i>
       </span>
+    </button>
+  );
+}
+
+function CompactMapLayerToggle({
+  label,
+  tone,
+  checked,
+  onChange,
+}: {
+  label: string;
+  tone: "branch" | "student" | "teacher" | "parent";
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`branches-map-toggle ${tone} ${checked ? "active" : ""}`}
+      aria-pressed={checked}
+      aria-label={`${checked ? "Hide" : "Show"} ${label.toLowerCase()} locations`}
+      onClick={() => onChange(!checked)}
+    >
+      <i aria-hidden="true" />
+      <span>{label}</span>
     </button>
   );
 }
@@ -1056,6 +1414,11 @@ function MoreSheet({
             <span>☷</span>
             <b>Table view</b>
             <small>Dense laptop-friendly owner records</small>
+          </button>
+          <button type="button" className={viewMode === "map" ? "active" : ""} onClick={() => setViewMode("map")}>
+            <span>⌖</span>
+            <b>Proximity map</b>
+            <small>Branches, students, teachers and parents</small>
           </button>
           <button type="button" className={viewMode === "summary" ? "active" : ""} onClick={() => setViewMode("summary")}>
             <span>◔</span>
@@ -1247,6 +1610,36 @@ function BranchModal({
                 <option value="inactive">Inactive</option>
               </select>
             </label>
+          </div>
+        </section>
+
+        <section className="ba-form-section">
+          <h3>Branch Location</h3>
+          <div className="ba-form">
+            <label><span>Location Label</span><input value={form.locationLabel} onChange={(e) => updateForm({ locationLabel: e.target.value })} placeholder="Main campus building" /></label>
+            <label>
+              <span>Location Type</span>
+              <select value={form.locationType} onChange={(e) => updateForm({ locationType: e.target.value as FormState["locationType"] })}>
+                <option value="school">School building</option>
+                <option value="campus">Campus</option>
+                <option value="office">Office</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label><span>Latitude</span><input inputMode="decimal" value={form.latitude} onChange={(e) => updateForm({ latitude: e.target.value })} placeholder="5.6037" /></label>
+            <label><span>Longitude</span><input inputMode="decimal" value={form.longitude} onChange={(e) => updateForm({ longitude: e.target.value })} placeholder="-0.1870" /></label>
+            <label><span>Accuracy (metres)</span><input inputMode="decimal" value={form.accuracyMeters} onChange={(e) => updateForm({ accuracyMeters: e.target.value })} placeholder="Optional" /></label>
+            <label>
+              <span>Precision</span>
+              <select value={form.locationPrecision} onChange={(e) => updateForm({ locationPrecision: e.target.value as FormState["locationPrecision"] })}>
+                <option value="exact">Exact</option>
+                <option value="approximate">Approximate</option>
+                <option value="area_only">Area only</option>
+              </select>
+            </label>
+            <label className="wide"><span>Formatted Address</span><textarea value={form.formattedAddress} onChange={(e) => updateForm({ formattedAddress: e.target.value })} placeholder="Map or standardized address" /></label>
+            <label className="ba-check"><input type="checkbox" checked={form.mapVisible} onChange={(e) => updateForm({ mapVisible: e.target.checked })} /><span>Show branch building on maps</span></label>
+            <label className="ba-check"><input type="checkbox" checked={form.locationRestricted} onChange={(e) => updateForm({ locationRestricted: e.target.checked })} /><span>Restrict exact branch location</span></label>
           </div>
         </section>
 
@@ -1518,4 +1911,110 @@ const css = `
 @media (min-width: 680px) { .ba-page { padding: calc(12px * var(--local-density-scale,1)); padding-bottom: 44px; } .ba-search-card { grid-template-columns: minmax(0,1fr) 48px 48px 48px; } .ba-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .student-row { border-radius: 24px; padding: 12px; } .ba-analysis-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .ba-form { grid-template-columns: repeat(2, minmax(0,1fr)); } .ba-modal-backdrop, .ba-sheet-backdrop { place-items: center; padding: 18px; } .ba-sheet { border-radius: 28px; padding: 18px; } .ba-modal { padding: 18px; } }
 @media (min-width: 1040px) { .ba-page { padding: calc(16px * var(--local-density-scale,1)); padding-bottom: 48px; } .ba-search-card, .ba-list, .ba-analysis-grid, .ba-table-card, .ba-filter-chips { max-width: 1180px; margin-left: auto; margin-right: auto; } .ba-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } .ba-analysis-grid { grid-template-columns: repeat(4, minmax(0,1fr)); } .ba-current-filter { grid-column: span 2; } .ba-form { grid-template-columns: repeat(3, minmax(0,1fr)); } }
 @media (max-width: 520px) { .ba-page { padding: calc(7px * var(--local-density-scale,1)); padding-bottom: max(38px, env(safe-area-inset-bottom)); } .ba-icon-button, .ba-filter-button, .ba-add-inline { width: 40px; height: 40px; } .student-detail-strip { grid-template-columns: minmax(0,1fr); } .ba-sheet, .ba-modal { border-radius: 24px 24px 18px 18px; padding: 12px; } .ba-sheet-actions, .ba-modal-actions { display: grid; grid-template-columns: minmax(0,1fr); } .ba-sheet-actions button, .ba-modal-actions button { width: 100%; } .ba-media-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } .ba-media-button, .ba-camera-actions button { width: 100%; } .ba-camera-actions { display: grid; grid-template-columns: minmax(0, 1fr); } .ba-camera-modal { border-radius: 22px; padding: 11px; } }
+
+.branches-map-shell {
+  display: grid;
+  gap: 10px;
+}
+
+
+.branches-map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.branches-map-legend .branch { color: #7c3aed; }
+.branches-map-legend .student { color: #2563eb; }
+.branches-map-legend .teacher { color: #16a34a; }
+.branches-map-legend .parent { color: #ea580c; }
+
+
+.branches-map-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.branches-map-toolbar::-webkit-scrollbar { display: none; }
+
+.branches-map-toggle {
+  --layer-color: #64748b;
+  flex: 0 0 auto;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--layer-color) 24%, var(--border, rgba(0,0,0,.10)));
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--card-bg, var(--surface, #fff));
+  color: var(--muted-text, var(--muted-foreground, #64748b));
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  transition: border-color .16s ease, background .16s ease, color .16s ease, opacity .16s ease;
+}
+.branches-map-toggle i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--layer-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--layer-color) 12%, transparent);
+}
+.branches-map-toggle.active {
+  border-color: color-mix(in srgb, var(--layer-color) 45%, var(--border, rgba(0,0,0,.10)));
+  background: color-mix(in srgb, var(--layer-color) 9%, var(--card-bg, var(--surface, #fff)));
+  color: var(--text, #111827);
+}
+.branches-map-toggle:not(.active) {
+  opacity: .52;
+}
+.branches-map-toggle.branch { --layer-color: #7c3aed; }
+.branches-map-toggle.student { --layer-color: #2563eb; }
+.branches-map-toggle.teacher { --layer-color: #16a34a; }
+.branches-map-toggle.parent { --layer-color: #ea580c; }
+
+.branches-map-empty {
+  min-height: 280px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted, #64748b);
+}
+
+.branches-map-empty > span {
+  font-size: 38px;
+  color: var(--ba-primary);
+}
+
+.branches-map-empty strong {
+  color: var(--text, #111827);
+  font-size: 16px;
+}
+
+.branches-map-empty small {
+  max-width: 390px;
+  line-height: 1.5;
+}
+
+@media (max-width: 680px) {
+  .branches-layer-controls {
+    grid-template-columns: 1fr;
+  }
+}
 `;

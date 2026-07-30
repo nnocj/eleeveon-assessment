@@ -37,6 +37,7 @@ import type {
   GradeRule,
   Student,
   StudentEnrollment,
+  StudentAttendanceSummary,
 } from "../../../../lib/db/db";
 
 import type {
@@ -706,6 +707,30 @@ export function resolveGrade(
   };
 }
 
+
+export function getManualStudentAttendanceSummary(
+  dataset: ReportEngineDataset,
+  studentId: string,
+  filters: ReportFiltersState,
+): AttendanceSummary | undefined {
+  const row = (dataset.studentAttendanceSummaries || []).find((item: any) => {
+    if (item.isDeleted) return false;
+    if (String(item.studentId) !== String(studentId)) return false;
+    if (filters.classId && String(item.classId) !== String(filters.classId)) return false;
+    if (filters.academicStructureId && String(item.academicStructureId) !== String(filters.academicStructureId)) return false;
+    if (filters.academicPeriodId && String(item.academicPeriodId) !== String(filters.academicPeriodId)) return false;
+    return true;
+  });
+  if (!row) return undefined;
+  return {
+    totalDays: safeNumber(row.daysOpened),
+    presentDays: safeNumber(row.daysPresent),
+    absentDays: safeNumber(row.daysAbsent),
+    lateDays: safeNumber(row.timesLate),
+    attendancePercent: safeNumber(row.attendancePercent),
+  };
+}
+
 // ======================================================
 // ATTENDANCE
 // ======================================================
@@ -740,22 +765,15 @@ export function getStudentAttendance(
   studentId: string,
   filters: ReportFiltersState,
 ): AttendanceSummary {
+  const manual = getManualStudentAttendanceSummary(dataset, studentId, filters);
+  if (manual) return manual;
+
   const rows = dataset.attendance.filter((item) => {
     if (item.isDeleted) return false;
     if (item.studentId !== studentId) return false;
     if (filters.classId && item.classId !== filters.classId) return false;
-    if (
-      filters.academicStructureId &&
-      item.academicStructureId !== filters.academicStructureId
-    ) {
-      return false;
-    }
-    if (
-      filters.academicPeriodId &&
-      item.academicPeriodId !== filters.academicPeriodId
-    ) {
-      return false;
-    }
+    if (filters.academicStructureId && item.academicStructureId !== filters.academicStructureId) return false;
+    if (filters.academicPeriodId && item.academicPeriodId !== filters.academicPeriodId) return false;
     return true;
   });
 

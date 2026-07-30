@@ -24,12 +24,12 @@ import RolePortalShell, {
 import { TEACHER_ROLES } from "../lib/auth/roleRedirect";
 
 import Teacherdashboard from "./modules/Teacherdashboard";
-import Teacherclasses from "./modules/Teacherclasses";
+//import Teacherclasses from "./modules/Teacherclasses";
 import Teachersubjects from "./modules/Teachersubjects";
-import Attendance from "./modules/Attendance";
+/*import Attendance from "./modules/Attendance";
 import Assessmententry from "./modules/Assessmententry";
 import Assignments from "./modules/Assignments";
-import Courseoutline from "./modules/Courseoutline";
+import Courseoutline from "./modules/Courseoutline";*/
 
 import Teacherstudents from "./modules/Teacherstudents";
 import Studentprogress from "./modules/Studentprogress";
@@ -41,9 +41,9 @@ import Lessonnotes from "./modules/Lessonnotes";
 import Announcements from "./modules/Announcements";
 import Messages from "./modules/Messages";
 
-import Calendar from "./modules/Calendar";
+/*import Calendar from "./modules/Calendar";
 import ClassTimetable from "./modules/ClassTimetable";
-import MyTimetable from "./modules/MyTimetable";
+import MyTimetable from "./modules/MyTimetable";*/
 
 import Teachersalary from "./modules/Teachersalary";
 import Teacherpaymenthistory from "./modules/Teacherpaymenthistory";
@@ -51,7 +51,7 @@ import Teacherpaymenthistory from "./modules/Teacherpaymenthistory";
 import Teacherprofile from "./modules/Teacherprofile";
 import Teachersettings from "./modules/Teachersettings";
 
-import ReportRemarks from "./modules/ReportRemarks";
+//import ReportRemarks from "./modules/ReportRemarks";
 
 type RouteProps = {
   navigate: (key: string) => void;
@@ -142,16 +142,16 @@ function TeacherDashboardRoute(props: RouteProps) {
 
 const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   teacherDashboard: TeacherDashboardRoute,
-  teacherClasses: Teacherclasses,
+  //teacherClasses: Teacherclasses,
   teacherSubjects: Teachersubjects,
-  attendance: Attendance,
+  /*attendance: Attendance,
   assessmentEntry: Assessmententry,
   assignments: Assignments,
-  courseOutline: Courseoutline,
+  courseOutline: Courseoutline,*/
 
   teacherStudents: Teacherstudents,
   studentProgress: Studentprogress,
-  reportRemarks: ReportRemarks,
+  /*reportRemarks: ReportRemarks,*/
 
   teacherReports: Teacherreports,
   teacherBroadsheets: Teacherbroadsheets,
@@ -160,9 +160,9 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   announcements: Announcements,
   messages: Messages,
 
-  calendar: Calendar,
+  /*calendar: Calendar,
   classTimetable: ClassTimetable,
-  teacherTimetable: MyTimetable,
+  teacherTimetable: MyTimetable,*/
 
   teacherSalary: Teachersalary,
   teacherPaymentHistory: Teacherpaymenthistory,

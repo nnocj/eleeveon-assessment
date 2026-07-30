@@ -286,6 +286,32 @@ const idOf = (value: any): string => {
   return String(value).trim();
 };
 
+const cleanId = (value: unknown): string => {
+  const parsed = idOf(value);
+  return parsed && parsed !== "0" && parsed !== "undefined" && parsed !== "null"
+    ? parsed
+    : "";
+};
+
+const savedEntityId = (result: unknown, fallback?: unknown): string => {
+  if (typeof result === "string" || typeof result === "number") {
+    return cleanId(result);
+  }
+
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    return cleanId(
+      record.id ||
+        record.localId ||
+        record.cloudId ||
+        record.entityId ||
+        record.recordId,
+    );
+  }
+
+  return cleanId(fallback);
+};
+
 const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
 const safeLower = (value: any) =>
   String(value || "")
@@ -524,6 +550,9 @@ export default function ClassSubjectsPage() {
 
   const mediaSessionKeyRef = useRef(
     createMediaSessionKey(CLASS_SUBJECT_MEDIA_OWNER_TABLE),
+  );
+  const uploadedMediaAssetIds = useRef<Partial<Record<CameraField, string>>>(
+    {},
   );
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -803,11 +832,11 @@ export default function ClassSubjectsPage() {
 
   useEffect(() => {
     return () => {
-      Object.values(mediaPreviewUrls).forEach(revokeMediaObjectUrl);
       stopCurrentCamera();
     };
+    // Camera shutdown only. Media URLs are managed by the media resolver.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mediaPreviewUrls]);
+  }, []);
 
   useEffect(() => {
     if (!cameraOpen) return;
@@ -968,6 +997,7 @@ export default function ClassSubjectsPage() {
       entryCounts,
       mediaPreviewUrls,
       periodMap,
+      resolvedMediaById,
       rows,
       structureMap,
       subjectMap,
@@ -1175,30 +1205,44 @@ export default function ClassSubjectsPage() {
     }
 
     try {
-      const ownerTempKey = form.id ? undefined : mediaSessionKeyRef.current;
+      const isPhoto = field === "photo";
+
+      // Stage both create and edit uploads. Existing owner media is untouched
+      // until the class subject itself saves successfully.
       const result = await saveImageAsset(file, {
         accountId,
-        schoolId: schoolId,
-        branchId: branchId,
+        schoolId,
+        branchId,
         ownerTable: CLASS_SUBJECT_MEDIA_OWNER_TABLE,
-        ownerId: form.id || undefined,
-        ownerTempKey,
-        fieldKey:
-          field === "photo"
-            ? MediaFieldKeys.PHOTO
-            : CLASS_SUBJECT_BANNER_FIELD_KEY,
-        variant: field === "photo" ? "avatar" : "cover",
+        ownerId: undefined,
+        ownerTempKey: mediaSessionKeyRef.current,
+        fieldKey: isPhoto
+          ? MediaFieldKeys.PHOTO
+          : CLASS_SUBJECT_BANNER_FIELD_KEY,
+        variant: isPhoto ? "avatar" : "cover",
         replaceExisting: true,
       });
 
+      const uploadedAssetId = cleanId(result.assetId);
+      if (!uploadedAssetId) {
+        throw new Error(
+          "The image was processed but no media asset ID was created.",
+        );
+      }
+
+      uploadedMediaAssetIds.current = {
+        ...uploadedMediaAssetIds.current,
+        [field]: uploadedAssetId,
+      };
+
       updateForm({
         [field]: result.previewUrl,
-        [`${field}MediaId`]: result.assetId,
+        [isPhoto ? "photoMediaId" : "bannerImageMediaId"]: uploadedAssetId,
       } as Partial<FormState>);
 
       showToast(
         "success",
-        field === "photo"
+        isPhoto
           ? "Class subject photo optimized."
           : "Class subject banner optimized.",
       );
@@ -1275,6 +1319,7 @@ export default function ClassSubjectsPage() {
     mediaSessionKeyRef.current = createMediaSessionKey(
       CLASS_SUBJECT_MEDIA_OWNER_TABLE,
     );
+    uploadedMediaAssetIds.current = {};
     setSelectedItem(null);
     setForm({
       ...makeEmptyForm(settings),
@@ -1287,8 +1332,8 @@ export default function ClassSubjectsPage() {
     const item: any = row;
     mediaSessionKeyRef.current = createMediaSessionKey(
       CLASS_SUBJECT_MEDIA_OWNER_TABLE,
-      idOf(item.id) || "existing",
     );
+    uploadedMediaAssetIds.current = {};
     setSelectedItem(null);
     setForm({
       id: idOf(item.id),
@@ -1312,13 +1357,13 @@ export default function ClassSubjectsPage() {
       compulsory: item.compulsory ?? true,
       elective: item.elective ?? false,
       photo:
+        resolvedMediaById[idOf(item.id)]?.photo ||
         mediaPreviewUrls[mediaKey(idOf(item.id), "photo")] ||
-        safeRecordMediaValue(item.photo) ||
         "",
       photoMediaId: item.photoMediaId ? String(item.photoMediaId) : undefined,
       bannerImage:
+        resolvedMediaById[idOf(item.id)]?.bannerImage ||
         mediaPreviewUrls[mediaKey(idOf(item.id), "bannerImage")] ||
-        safeRecordMediaValue(item.bannerImage) ||
         "",
       bannerImageMediaId: item.bannerImageMediaId
         ? String(item.bannerImageMediaId)
@@ -1369,13 +1414,17 @@ export default function ClassSubjectsPage() {
 
     try {
       setSaving(true);
+
       const existing = form.id
         ? rows.find((row: any) => sameId(row.id, form.id))
         : undefined;
+
+      // Keep the currently committed media references in the record. Newly
+      // selected files remain staged and are attached only after this write.
       const payload: Partial<ClassSubject> = {
         accountId,
-        schoolId: schoolId,
-        branchId: branchId,
+        schoolId,
+        branchId,
         classId: idOf(form.classId) || undefined,
         subjectId: idOf(form.subjectId) || undefined,
         curriculumSubjectId: String(form.curriculumSubjectId),
@@ -1392,10 +1441,11 @@ export default function ClassSubjectsPage() {
         type: form.type,
         compulsory: !!form.compulsory,
         elective: !!form.elective,
-        photo: safeRecordMediaValue(form.photo),
-        photoMediaId: form.photoMediaId || undefined,
-        bannerImage: safeRecordMediaValue(form.bannerImage),
-        bannerImageMediaId: form.bannerImageMediaId || undefined,
+        photo: safeRecordMediaValue((existing as any)?.photo),
+        photoMediaId: (existing as any)?.photoMediaId || undefined,
+        bannerImage: safeRecordMediaValue((existing as any)?.bannerImage),
+        bannerImageMediaId:
+          (existing as any)?.bannerImageMediaId || undefined,
         active: form.active !== false,
         locked: !!form.locked,
         isDeleted: false,
@@ -1409,38 +1459,71 @@ export default function ClassSubjectsPage() {
               payload as unknown as ClassSubject,
             );
 
-      const savedClassSubjectId = idOf(
-        typeof savedClassSubject === "number"
-          ? savedClassSubject
-          : (savedClassSubject as any)?.id || form.id || 0,
-      );
+      const savedClassSubjectId = savedEntityId(savedClassSubject, form.id);
 
-      if (savedClassSubjectId) {
-        await commitMediaAssetsToOwner({
-          accountId,
-          ownerTable: CLASS_SUBJECT_MEDIA_OWNER_TABLE,
-          ownerId: savedClassSubjectId,
-
-          ownerTempKey: mediaSessionKeyRef.current,
-          assets: [
-            { assetId: form.photoMediaId, fieldKey: MediaFieldKeys.PHOTO },
-            {
-              assetId: form.bannerImageMediaId,
-              fieldKey: CLASS_SUBJECT_BANNER_FIELD_KEY,
-            },
-          ],
-        });
+      if (!savedClassSubjectId) {
+        throw new Error(
+          "The class subject was saved, but its permanent ID could not be resolved for image attachment.",
+        );
       }
 
+      const stagedPhotoId = cleanId(uploadedMediaAssetIds.current.photo);
+      const stagedBannerId = cleanId(
+        uploadedMediaAssetIds.current.bannerImage,
+      );
+
+      const committedMedia = await commitMediaAssetsToOwner({
+        accountId,
+        ownerTable: CLASS_SUBJECT_MEDIA_OWNER_TABLE,
+        ownerId: savedClassSubjectId,
+        ownerTempKey: mediaSessionKeyRef.current,
+        assets: [
+          {
+            assetId: stagedPhotoId || undefined,
+            fieldKey: MediaFieldKeys.PHOTO,
+          },
+          {
+            assetId: stagedBannerId || undefined,
+            fieldKey: CLASS_SUBJECT_BANNER_FIELD_KEY,
+          },
+        ],
+      });
+
+      const committedPhotoId = committedMedia.find(
+        (item) => item.fieldKey === MediaFieldKeys.PHOTO,
+      )?.assetId;
+      const committedBannerId = committedMedia.find(
+        (item) => item.fieldKey === CLASS_SUBJECT_BANNER_FIELD_KEY,
+      )?.assetId;
+
+      if (committedPhotoId || committedBannerId) {
+        await updateLocal("classSubjects", savedClassSubjectId, {
+          photoMediaId:
+            committedPhotoId ||
+            (existing as any)?.photoMediaId ||
+            undefined,
+          bannerImageMediaId:
+            committedBannerId ||
+            (existing as any)?.bannerImageMediaId ||
+            undefined,
+          photo: safeRecordMediaValue((existing as any)?.photo),
+          bannerImage: safeRecordMediaValue((existing as any)?.bannerImage),
+        } as Partial<ClassSubject>);
+      }
+
+      uploadedMediaAssetIds.current = {};
       mediaSessionKeyRef.current = createMediaSessionKey(
         CLASS_SUBJECT_MEDIA_OWNER_TABLE,
       );
       setModalOpen(false);
       showToast("success", "Class subject saved.");
       await load();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Failed to save class subject:", error);
-      showToast("error", "Failed to save class subject.");
+      showToast(
+        "error",
+        error?.message || "Failed to save class subject.",
+      );
     } finally {
       setSaving(false);
     }

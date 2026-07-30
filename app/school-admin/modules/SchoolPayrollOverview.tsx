@@ -1,4 +1,4 @@
-"use client";
+//"use client";
 
 /**
  * app/school-admin/modules/Schoolpayrolloverview.tsx
@@ -27,6 +27,8 @@
  * - staffPaymentRecords
  * - schoolCurrencySettings / currencies
  */
+
+/*
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -2520,3 +2522,4 @@ const css = `
   .sp-view-tabs { width: 100%; border-radius: 22px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 `;
+*/

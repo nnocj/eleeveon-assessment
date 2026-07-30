@@ -1,0 +1,5 @@
+"use client";
+import type { RouteView } from "../advanced-shared";
+import { AdvancedIdentityStyles, StatusPill } from "../advanced-shared";
+export function RouteCard({route,primaryColor,onOpen,onEdit}:{route:RouteView;primaryColor?:string;onOpen?:(v:RouteView)=>void;onEdit?:(v:RouteView)=>void}) {return <article className="ai-card"><AdvancedIdentityStyles primaryColor={primaryColor}/><div style={{display:"flex",gap:9,alignItems:"center"}}><span style={{fontSize:20}}>⌁</span><span style={{display:"grid",flex:1}}><strong>{route.name}</strong><small style={{fontSize:9,opacity:.6}}>{route.code||"No code"} · {route.stopCount||0} stops</small></span><StatusPill status={route.active===false?"inactive":"active"}/></div><p style={{fontSize:10,opacity:.67,minHeight:28}}>{route.description||"No route description."}</p><div className="ai-actions">{onOpen?<button onClick={()=>onOpen(route)}>Open route</button>:null}{onEdit?<button onClick={()=>onEdit(route)}>Edit</button>:null}</div></article>}
+export default RouteCard;

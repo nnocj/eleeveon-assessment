@@ -1,27 +1,23 @@
 "use client";
 
 /**
- * app/parent/modules/Childfees.tsx
- * ---------------------------------------------------------
- * PARENT PORTAL — CHILD FEE STATEMENTS
- * ---------------------------------------------------------
+ * app/parent/modules/Childsfees.tsx
+ * --------------------------------------------------------------------------
+ * ELEEVEON CHILD FEES — PARENT PORTAL
  *
- * Parent-scoped fee statement center:
- * - No school selector.
- * - No branch selector.
- * - Uses active parent membership.
- * - Shows only fee invoices for children linked to the logged-in parent.
+ * Read-only, offline-first parent finance experience using the same compact
+ * visual language as Branch Fees:
+ * - compact search + child selector + filter + more actions;
+ * - invoice, payment and analytics views;
+ * - cards/table/analytics display modes;
+ * - linked-child isolation through studentParents;
+ * - invoice item detail drawer and payment receipt detail drawer;
+ * - Dexie data through listActiveLocal;
+ * - no unsupported PermissionGate moduleKey/action props.
  *
- * Supports:
- * - new studentFeeInvoices
- * - new studentFeeInvoiceItems
- * - new studentFeePayments
- * - fallback old payments table
- *
- * Phase 3 connected:
- * - Pay Now opens a secure checkout modal.
- * - Backend creates a student-fee payment intent/transaction.
- * - Paystack checkout redirects when authorizationUrl is returned.
+ * Future-ready:
+ * - the Pay button is intentionally a safe UI placeholder until the parent
+ *   Paystack checkout flow is connected.
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -31,2509 +27,1443 @@ import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
 import { useActiveBranch } from "../../context/active-branch-context";
 import { useActiveMembership } from "../../context/active-membership-context";
+import { listActiveLocal } from "../../lib/sync/syncUtils";
+import { useDataRevision } from "../../hooks/useDataRevision";
+import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
 
-import {
-  db,
-  Parent,
-  Payment,
-  Student,
-  StudentFeeInvoice,
-  StudentFeeInvoiceItem,
-  StudentFeePayment,
-  StudentParent,
-} from "../../lib/db/db";
-
-// ======================================================
-// TYPES
-// ======================================================
-
-type TenantRow = {
-  accountId?: string;
-  schoolId?: number;
-  branchId?: number;
-  isDeleted?: boolean;
-};
-
+type AnyRow = Record<string, any>;
 type ViewMode = "cards" | "table" | "analytics";
-type StatusFilter = "all" | "draft" | "issued" | "part_paid" | "paid" | "overdue" | "cancelled" | "void";
-type DateFilter = "all" | "today" | "week" | "month" | "custom";
+type Section = "invoices" | "payments";
+type StatusFilter =
+  | "all"
+  | "issued"
+  | "part_paid"
+  | "paid"
+  | "overdue"
+  | "cancelled";
+type Tone = "green" | "red" | "blue" | "gray" | "orange";
+type DetailState =
+  | { kind: "invoice"; row: InvoiceView }
+  | { kind: "payment"; row: AnyRow }
+  | null;
 
-type FeeStatus = StudentFeeInvoice["status"] | "no_invoice" | string;
-
-type FeeStatement = {
-  invoice: StudentFeeInvoice;
-  student?: Student;
-  items: StudentFeeInvoiceItem[];
-  payments: StudentFeePayment[];
-  fallbackPayments: Payment[];
-  billed: number;
-  paid: number;
-  balance: number;
-  overdue: boolean;
-  currencyCode: string;
-  currencySymbol: string;
+type OpenWorkspaceSession = {
+  membership?: Record<string, any> | null;
+  schoolId?: string | null;
+  branchId?: string | null;
 };
 
-type ChildSummary = {
-  student: Student;
-  invoices: FeeStatement[];
-  billed: number;
-  paid: number;
-  balance: number;
-  overdue: number;
-};
-
-type Breakdown = {
+type ChildView = {
+  id: string;
   name: string;
-  amount: number;
-  count: number;
+  admissionNumber: string;
+  className: string;
+  photo?: string;
 };
 
-type PaymentChannel = "momo" | "card" | "bank" | "cash" | "manual";
-type MomoNetwork = "mtn" | "telecel" | "airteltigo";
-
-type CheckoutState = {
-  open: boolean;
-  statement: FeeStatement | null;
-  method: PaymentChannel;
-  momoNetwork: MomoNetwork;
-  payerName: string;
-  payerPhone: string;
-  payerEmail: string;
-  note: string;
-  error: string;
-  success: string;
+type InvoiceView = AnyRow & {
+  amountPaidValue: number;
+  balanceValue: number;
+  statusValue: string;
+  studentName: string;
+  className: string;
 };
 
-type CheckoutResponse = {
-  ok?: boolean;
-  paymentIntent?: any;
-  paymentTransaction?: any;
-  studentFeePayment?: any;
-  providerResponse?: {
-    authorizationUrl?: string;
-    authorization_url?: string;
-    accessCode?: string;
-    access_code?: string;
-    reference?: string;
-  };
-  authorizationUrl?: string;
-  authorization_url?: string;
-  message?: string;
-};
+const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 
-// ======================================================
-// PAYMENT HELPERS
-// ======================================================
-
-const paymentMethods: PaymentChannel[] = ["momo", "card", "bank", "cash", "manual"];
-
-const paymentMethodLabel = (method: PaymentChannel) => {
-  if (method === "momo") return "Mobile Money";
-  if (method === "card") return "Card";
-  if (method === "bank") return "Bank";
-  if (method === "cash") return "Cash";
-  return "Manual";
-};
-
-const providerForMethod = (method: PaymentChannel) => {
-  if (method === "momo" || method === "card") return "paystack";
-  if (method === "bank") return "bank";
-  if (method === "cash") return "cash";
-  return "manual";
-};
-
-const getApiBase = () => {
-  const value =
-    process.env.NEXT_PUBLIC_API_URL ||
-    process.env.NEXT_PUBLIC_API_BASE_URL ||
-    process.env.NEXT_PUBLIC_BACKEND_URL ||
-    "http://localhost:4000";
-
-  return value.replace(/\/$/, "");
-};
-
-const getAuthToken = () => {
-  if (typeof window === "undefined") return "";
-
-  return (
-    localStorage.getItem("accessToken") ||
-    localStorage.getItem("token") ||
-    localStorage.getItem("authToken") ||
-    localStorage.getItem("eleeveon_token") ||
-    localStorage.getItem("eleeveon_access_token") ||
-    ""
-  );
-};
-
-const authHeaders = () => {
-  const token = getAuthToken();
-
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-};
-
-async function readCheckoutJson(response: Response) {
-  const text = await response.text();
-
-  let json: any = {};
+function storageValue(key: string) {
+  if (typeof window === "undefined") return null;
   try {
-    json = text ? JSON.parse(text) : {};
+    return localStorage.getItem(key) || sessionStorage.getItem(key);
   } catch {
-    json = { message: text };
+    return null;
   }
-
-  if (!response.ok) {
-    throw new Error(json?.message || json?.error || "Payment checkout failed.");
-  }
-
-  return json as CheckoutResponse;
 }
 
-// ======================================================
-// HELPERS
-// ======================================================
+function storedJson<T>(key: string): T | null {
+  const raw = storageValue(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+function idOf(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    const row = value as AnyRow;
+    return String(row.id ?? row.localId ?? row.cloudId ?? "").trim();
+  }
+  return String(value).trim();
+}
 
-const startOfWeekISO = () => {
-  const now = new Date();
-  const day = now.getDay();
-  const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-  const start = new Date(now.setDate(diff));
-  return start.toISOString().slice(0, 10);
-};
+function firstId(...values: unknown[]) {
+  for (const value of values) {
+    const id = idOf(value);
+    if (id && id !== "0") return id;
+  }
+  return "";
+}
 
-const startOfMonthISO = () => {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-};
+function sameId(a: unknown, b: unknown) {
+  const left = idOf(a);
+  const right = idOf(b);
+  return Boolean(left && right && left === right);
+}
 
-const dateValue = (value?: string) => {
-  const time = new Date(value || "").getTime();
-  return Number.isFinite(time) ? time : 0;
-};
+function n(value: unknown) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
 
-const money = (amount: number, symbol = "GH₵", code = "GHS") => {
-  const value = Number(amount || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+function text(value: unknown, fallback = "") {
+  return String(value || "").trim() || fallback;
+}
 
-  return `${symbol || code} ${value}`;
-};
+function rowName(row?: AnyRow | null) {
+  return text(row?.fullName || row?.name || row?.title, "Unnamed");
+}
 
-const statusLabel = (status?: FeeStatus) => String(status || "unknown").replaceAll("_", " ");
+function sameScope(
+  row: AnyRow,
+  accountId?: string | null,
+  schoolId?: string,
+  branchId?: string,
+) {
+  if (!row || row.isDeleted === true) return false;
+  if (accountId && row.accountId && row.accountId !== accountId) return false;
+  if (schoolId && row.schoolId && !sameId(row.schoolId, schoolId)) return false;
+  if (branchId && row.branchId && !sameId(row.branchId, branchId)) return false;
+  return true;
+}
 
-const statusTone = (status?: FeeStatus): "green" | "red" | "blue" | "gray" | "orange" | "purple" => {
-  if (status === "paid") return "green";
-  if (status === "part_paid") return "blue";
-  if (status === "issued" || status === "draft") return "orange";
-  if (status === "overdue") return "red";
-  if (status === "cancelled" || status === "void") return "purple";
+function money(value: unknown, currency = "GHS") {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency || "GHS",
+      maximumFractionDigits: 2,
+    }).format(n(value));
+  } catch {
+    return `${currency || "GHS"} ${n(value).toLocaleString()}`;
+  }
+}
+
+function dateLabel(value?: string | number | null) {
+  if (!value) return "Not set";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not set";
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(date);
+}
+
+function invoiceStatus(total: number, paid: number, dueDate?: string) {
+  if (total > 0 && paid >= total) return "paid";
+  if (paid > 0) return "part_paid";
+  if (dueDate && new Date(dueDate).getTime() < Date.now()) return "overdue";
+  return "issued";
+}
+
+function statusLabel(value?: string) {
+  return text(value, "issued")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function statusTone(value?: string): Tone {
+  const status = String(value || "").toLowerCase();
+  if (["paid", "success", "succeeded"].includes(status)) return "green";
+  if (["overdue", "failed", "cancelled", "reversed"].includes(status)) return "red";
+  if (["part_paid", "pending", "processing"].includes(status)) return "orange";
+  if (["issued", "draft"].includes(status)) return "blue";
   return "gray";
-};
-
-function percentage(value: number, total: number) {
-  if (!total) return 0;
-  return Math.round((Number(value || 0) / Number(total || 0)) * 100);
 }
 
-// ======================================================
-// COMPONENT
-// ======================================================
+function Chip({ children, tone = "gray" }: { children: React.ReactNode; tone?: Tone }) {
+  return <span className={`cf-chip ${tone}`}>{children}</span>;
+}
 
-export default function Childfees() {
+function SliderIcon() {
+  return (
+    <svg className="cf-slider-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h9" />
+      <path d="M17 7h3" />
+      <circle cx="15" cy="7" r="2" />
+      <path d="M4 17h3" />
+      <path d="M11 17h9" />
+      <circle cx="9" cy="17" r="2" />
+    </svg>
+  );
+}
+
+function Empty({ title, body }: { title: string; body: string }) {
+  return (
+    <section className="cf-empty">
+      <div>₵</div>
+      <h3>{title}</h3>
+      <p>{body}</p>
+    </section>
+  );
+}
+
+export default function ChildsFees() {
   const router = useRouter();
-
+  const revision = useDataRevision();
+  const { loading, setLoading } = useBackgroundLoader();
   const {
-    accountId,
+    accountId: rawAccountId,
     authenticated,
     loading: accountLoading,
   } = useAccount();
-
   const { settings, loading: settingsLoading } = useSettings();
-
+  const { activeMembership } = useActiveMembership() as AnyRow;
   const {
     activeSchool,
     activeSchoolId,
     activeBranch,
     activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch();
+  } = useActiveBranch() as AnyRow;
 
-  const membershipContext = useActiveMembership() as any;
+  const openWorkspace = useMemo(
+    () => storedJson<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY),
+    [],
+  );
+  const storedMembership = useMemo(
+    () => storedJson<AnyRow>("activeMembership"),
+    [],
+  );
+  const membership = useMemo(
+    () =>
+      (openWorkspace?.membership ||
+        activeMembership ||
+        storedMembership ||
+        {}) as AnyRow,
+    [activeMembership, openWorkspace, storedMembership],
+  );
 
-  const activeMembership = membershipContext?.activeMembership;
-  const activeParentId =
-    membershipContext?.activeParentId ||
-    activeMembership?.parentLocalId ||
-    undefined;
+  const accountId = useMemo(
+    () =>
+      text(rawAccountId) ||
+      text(membership.accountId) ||
+      text(settings?.accountId),
+    [membership.accountId, rawAccountId, settings?.accountId],
+  );
 
-  const schoolId = activeSchoolId || activeSchool?.id || settings?.schoolId;
-  const branchId = activeBranchId || activeBranch?.id || settings?.branchId;
-  const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
+  const schoolId = useMemo(
+    () =>
+      firstId(
+        openWorkspace?.schoolId,
+        membership.schoolId,
+        membership.school?.id,
+        activeSchoolId,
+        activeSchool?.id,
+        settings?.schoolId,
+        storageValue("activeSchoolId"),
+      ),
+    [
+      activeSchool?.id,
+      activeSchoolId,
+      membership.school?.id,
+      membership.schoolId,
+      openWorkspace?.schoolId,
+      settings?.schoolId,
+    ],
+  );
 
-  // ======================================================
-  // STATE
-  // ======================================================
+  const branchId = useMemo(
+    () =>
+      firstId(
+        openWorkspace?.branchId,
+        membership.branchId,
+        membership.schoolBranchId,
+        membership.branch?.id,
+        activeBranchId,
+        activeBranch?.id,
+        settings?.branchId,
+        storageValue("activeBranchId"),
+      ),
+    [
+      activeBranch?.id,
+      activeBranchId,
+      membership.branch?.id,
+      membership.branchId,
+      membership.schoolBranchId,
+      openWorkspace?.branchId,
+      settings?.branchId,
+    ],
+  );
 
-  const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const parentId = firstId(
+    membership.parentId,
+    membership.parentLocalId,
+    membership.parent?.id,
+    storageValue("activeParentId"),
+  );
 
-  const [parents, setParents] = useState<Parent[]>([]);
-  const [studentParents, setStudentParents] = useState<StudentParent[]>([]);
-  const [students, setStudents] = useState<Student[]>([]);
-  const [invoices, setInvoices] = useState<StudentFeeInvoice[]>([]);
-  const [invoiceItems, setInvoiceItems] = useState<StudentFeeInvoiceItem[]>([]);
-  const [feePayments, setFeePayments] = useState<StudentFeePayment[]>([]);
-  const [oldPayments, setOldPayments] = useState<Payment[]>([]);
+  const role = String(membership.role || "").toLowerCase();
+  const canView = role === "parent";
 
-  const [search, setSearch] = useState("");
-  const [studentFilter, setStudentFilter] = useState<number | "all">("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [dateFilter, setDateFilter] = useState<DateFilter>("all");
-  const [fromDate, setFromDate] = useState(startOfMonthISO());
-  const [toDate, setToDate] = useState(todayISO());
+  const primary = settings?.primaryColor || "var(--primary-color,#2563eb)";
 
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
+  const [parents, setParents] = useState<AnyRow[]>([]);
+  const [students, setStudents] = useState<AnyRow[]>([]);
+  const [studentParents, setStudentParents] = useState<AnyRow[]>([]);
+  const [enrollments, setEnrollments] = useState<AnyRow[]>([]);
+  const [classes, setClasses] = useState<AnyRow[]>([]);
+  const [structures, setStructures] = useState<AnyRow[]>([]);
+  const [periods, setPeriods] = useState<AnyRow[]>([]);
+  const [currencySettings, setCurrencySettings] = useState<AnyRow[]>([]);
+  const [feeStructures, setFeeStructures] = useState<AnyRow[]>([]);
+  const [invoices, setInvoices] = useState<AnyRow[]>([]);
+  const [invoiceItems, setInvoiceItems] = useState<AnyRow[]>([]);
+  const [payments, setPayments] = useState<AnyRow[]>([]);
 
-  const [checkout, setCheckout] = useState<CheckoutState>({
-    open: false,
-    statement: null,
-    method: "momo",
-    momoNetwork: "mtn",
-    payerName: "",
-    payerPhone: "",
-    payerEmail: "",
-    note: "",
-    error: "",
-    success: "",
+  const [section, setSection] = useState<Section>("invoices");
+  const [view, setView] = useState<ViewMode>("cards");
+  const [childId, setChildId] = useState("");
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [structureId, setStructureId] = useState("");
+  const [periodId, setPeriodId] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [detail, setDetail] = useState<DetailState>(null);
+  const [toast, setToast] = useState("");
+
+  const mediaByStudentId = useEntityMediaUrls({
+    accountId,
+    ownerTable: "students",
+    rows: students,
+    fields: [{ fieldKey: "photo", mediaIdKey: "photoMediaId" }],
   });
 
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
-
-  // ======================================================
-  // AUTH PROTECTION
-  // ======================================================
-
   useEffect(() => {
-    if (accountLoading || contextLoading) return;
+    if (accountLoading) return;
+    if (!authenticated || !accountId) router.replace("/login");
+  }, [accountId, accountLoading, authenticated, router]);
 
-    if (!authenticated || !accountId) {
-      router.replace("/login");
-      return;
-    }
-
-    if (!activeSchoolId || !activeBranchId) {
-      router.replace("/owner");
-    }
-  }, [
-    accountLoading,
-    contextLoading,
-    authenticated,
-    accountId,
-    activeSchoolId,
-    activeBranchId,
-    router,
-  ]);
-
-  // ======================================================
-  // LOAD DATA
-  // ======================================================
-
-  const sameTenant = (row: TenantRow) =>
-    row.accountId === accountId &&
-    row.schoolId === schoolId &&
-    row.branchId === branchId &&
-    !row.isDeleted;
-
-  const clearData = () => {
-    setParents([]);
-    setStudentParents([]);
-    setStudents([]);
-    setInvoices([]);
-    setInvoiceItems([]);
-    setFeePayments([]);
-    setOldPayments([]);
-  };
-
-  const load = async () => {
-    if (!authenticated || !accountId || !schoolId || !branchId) {
-      clearData();
+  async function load() {
+    if (!authenticated || !accountId || !schoolId || !branchId || !canView) {
       setLoading(false);
       return;
     }
 
+    setLoading(true);
     try {
-      setLoading(true);
-
       const [
         parentRows,
-        studentParentRows,
         studentRows,
+        linkRows,
+        enrollmentRows,
+        classRows,
+        structureRows,
+        periodRows,
+        currencyRows,
+        feeRows,
         invoiceRows,
-        invoiceItemRows,
-        feePaymentRows,
+        itemRows,
         paymentRows,
       ] = await Promise.all([
-        db.parents.toArray(),
-        db.studentParents.toArray(),
-        db.students.toArray(),
-        "studentFeeInvoices" in db ? db.studentFeeInvoices.toArray() : Promise.resolve([]),
-        "studentFeeInvoiceItems" in db ? db.studentFeeInvoiceItems.toArray() : Promise.resolve([]),
-        "studentFeePayments" in db ? db.studentFeePayments.toArray() : Promise.resolve([]),
-        db.payments.toArray(),
+        listActiveLocal<AnyRow>("parents" as any),
+        listActiveLocal<AnyRow>("students" as any),
+        listActiveLocal<AnyRow>("studentParents" as any),
+        listActiveLocal<AnyRow>("studentEnrollments" as any),
+        listActiveLocal<AnyRow>("classes" as any),
+        listActiveLocal<AnyRow>("academicStructures" as any),
+        listActiveLocal<AnyRow>("academicPeriods" as any),
+        listActiveLocal<AnyRow>("schoolCurrencySettings" as any),
+        listActiveLocal<AnyRow>("feeStructures" as any),
+        listActiveLocal<AnyRow>("studentFeeInvoices" as any),
+        listActiveLocal<AnyRow>("studentFeeInvoiceItems" as any),
+        listActiveLocal<AnyRow>("studentFeePayments" as any),
       ]);
 
-      const scopedParents = parentRows.filter(sameTenant);
-      const scopedStudentParents = studentParentRows.filter(sameTenant);
-      const scopedStudents = studentRows.filter(sameTenant);
+      const scoped = (rows: AnyRow[]) =>
+        rows.filter((row) => sameScope(row, accountId, schoolId, branchId));
 
-      const parentIds = new Set<number>();
-
-      if (activeParentId) {
-        parentIds.add(Number(activeParentId));
-      }
-
-      const membershipParentId = activeMembership?.parentLocalId;
-      if (membershipParentId) {
-        parentIds.add(Number(membershipParentId));
-      }
-
-      const userEmail = String((activeMembership as any)?.email || "").toLowerCase();
-      scopedParents
-        .filter((parent) => userEmail && String(parent.email || "").toLowerCase() === userEmail)
-        .forEach((parent) => {
-          if (parent.id) parentIds.add(parent.id);
-        });
-
-      const childIds = new Set<number>(
-        scopedStudentParents
-          .filter((link) => !parentIds.size || parentIds.has(link.parentId))
-          .map((link) => link.studentId)
-      );
-
-      const childRows = scopedStudents.filter((student) => student.id && childIds.has(student.id));
-
-      setParents(parentIds.size ? scopedParents.filter((parent) => parent.id && parentIds.has(parent.id)) : scopedParents);
-      setStudentParents(scopedStudentParents.filter((link) => childIds.has(link.studentId)));
-      setStudents(childRows);
-
-      setInvoices(
-        (invoiceRows as StudentFeeInvoice[])
-          .filter(sameTenant)
-          .filter((row) => childIds.has(row.studentId))
-      );
-
-      setInvoiceItems(
-        (invoiceItemRows as StudentFeeInvoiceItem[])
-          .filter(sameTenant)
-      );
-
-      setFeePayments(
-        (feePaymentRows as StudentFeePayment[])
-          .filter(sameTenant)
-          .filter((row) => childIds.has(row.studentId))
-      );
-
-      setOldPayments(
-        paymentRows
-          .filter(sameTenant)
-          .filter((row) => childIds.has(row.studentId))
-      );
+      setParents(scoped(parentRows));
+      setStudents(scoped(studentRows).sort((a, b) => rowName(a).localeCompare(rowName(b))));
+      setStudentParents(scoped(linkRows));
+      setEnrollments(scoped(enrollmentRows));
+      setClasses(scoped(classRows));
+      setStructures(scoped(structureRows));
+      setPeriods(scoped(periodRows));
+      setCurrencySettings(scoped(currencyRows));
+      setFeeStructures(scoped(feeRows));
+      setInvoices(scoped(invoiceRows));
+      setInvoiceItems(scoped(itemRows));
+      setPayments(scoped(paymentRows));
     } catch (error) {
       console.error("Failed to load child fees:", error);
-      clearData();
-      alert("Failed to load child fees.");
+      setToast("Unable to load child fees.");
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   useEffect(() => {
-    load();
+    if (accountLoading || settingsLoading) return;
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, accountId, schoolId, branchId, activeParentId]);
+  }, [
+    authenticated,
+    accountId,
+    schoolId,
+    branchId,
+    accountLoading,
+    settingsLoading,
+    revision,
+    canView,
+  ]);
 
-  // ======================================================
-  // VIEW MODEL
-  // ======================================================
+  const resolvedParentId = useMemo(() => {
+    if (parentId) return parentId;
 
-  const studentMap = useMemo(() => new Map(students.map((student) => [student.id, student])), [students]);
+    const email = text(membership.email || membership.user?.email).toLowerCase();
+    const phone = text(membership.phone || membership.user?.phone).replace(/\s+/g, "");
 
-  const statements = useMemo<FeeStatement[]>(() => {
-    return invoices.map((invoice) => {
-      const items = invoiceItems.filter((item) => item.invoiceId === invoice.id);
-      const payments = feePayments.filter((payment) => payment.invoiceId === invoice.id);
-      const fallbackPayments = oldPayments.filter(
-        (payment) =>
-          payment.studentId === invoice.studentId &&
-          (!invoice.academicPeriodId || (payment as any).academicPeriodId === invoice.academicPeriodId)
-      );
-
-      const billed = Number(invoice.total ?? items.reduce((sum, item) => sum + Number(item.amount || 0), 0));
-      const newPaid = payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-      const storedPaid = Number(invoice.amountPaid || 0);
-      const fallbackPaid = !payments.length && !storedPaid
-        ? fallbackPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
-        : 0;
-
-      const paid = Math.max(newPaid, storedPaid, fallbackPaid);
-      const balance = Math.max(0, Number(invoice.balance ?? billed - paid));
-      const dueDate = invoice.dueDate || "";
-      const overdue = Boolean(balance > 0 && dueDate && dueDate < todayISO() && invoice.status !== "paid");
-
-      return {
-        invoice: overdue && invoice.status !== "paid"
-          ? { ...invoice, status: "overdue" as any }
-          : invoice,
-        student: studentMap.get(invoice.studentId),
-        items,
-        payments,
-        fallbackPayments,
-        billed,
-        paid,
-        balance,
-        overdue,
-        currencyCode: invoice.currencyCode || settings?.currencyCode || "GHS",
-        currencySymbol: invoice.currencySymbol || settings?.currencySymbol || "GH₵",
-      };
+    const parent = parents.find((row) => {
+      const rowEmail = text(row.email).toLowerCase();
+      const rowPhone = text(row.phone).replace(/\s+/g, "");
+      return (email && email === rowEmail) || (phone && phone === rowPhone);
     });
-  }, [invoices, invoiceItems, feePayments, oldPayments, studentMap, settings?.currencyCode, settings?.currencySymbol]);
 
-  const filteredStatements = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    const today = todayISO();
-    const weekStart = startOfWeekISO();
-    const monthStart = startOfMonthISO();
+    return idOf(parent);
+  }, [membership, parentId, parents]);
 
-    return statements
-      .filter((statement) => {
-        const invoice = statement.invoice;
-        const student = statement.student;
-        const date = invoice.issueDate || invoice.dueDate || "";
+  const classMap = useMemo(
+    () => new Map(classes.map((row) => [idOf(row), rowName(row)])),
+    [classes],
+  );
+  const structureMap = useMemo(
+    () => new Map(structures.map((row) => [idOf(row), rowName(row)])),
+    [structures],
+  );
+  const periodMap = useMemo(
+    () => new Map(periods.map((row) => [idOf(row), rowName(row)])),
+    [periods],
+  );
+  const studentMap = useMemo(
+    () => new Map(students.map((row) => [idOf(row), row])),
+    [students],
+  );
+  const invoiceMap = useMemo(
+    () => new Map(invoices.map((row) => [idOf(row), row])),
+    [invoices],
+  );
 
-        if (studentFilter !== "all" && invoice.studentId !== studentFilter) return false;
-        if (statusFilter !== "all" && invoice.status !== statusFilter) return false;
+  const children = useMemo<ChildView[]>(() => {
+    if (!resolvedParentId) return [];
+    const linkedIds = new Set(
+      studentParents
+        .filter((link) => sameId(link.parentId, resolvedParentId))
+        .map((link) => idOf(link.studentId)),
+    );
 
-        if (dateFilter === "today" && date !== today) return false;
-        if (dateFilter === "week" && (date < weekStart || date > today)) return false;
-        if (dateFilter === "month" && (date < monthStart || date > today)) return false;
-        if (dateFilter === "custom") {
-          if (fromDate && date < fromDate) return false;
-          if (toDate && date > toDate) return false;
-        }
+    return students
+      .filter((student) => linkedIds.has(idOf(student)))
+      .map((student) => {
+        const sid = idOf(student);
+        const enrollment =
+          enrollments.find(
+            (row) =>
+              sameId(row.studentId, sid) &&
+              ["active", "promoted"].includes(String(row.status || "").toLowerCase()),
+          ) ||
+          enrollments.find(
+            (row) =>
+              sameId(row.studentId, sid) &&
+              String(row.status || "").toLowerCase() === "completed",
+          );
+        const classId = firstId(enrollment?.classId, student.currentClassId);
+        return {
+          id: sid,
+          name: rowName(student),
+          admissionNumber: text(student.admissionNumber, "No admission number"),
+          className: classMap.get(classId) || "Class not assigned",
+          photo:
+            mediaByStudentId[sid]?.photo ||
+            (String(student.photo || "").startsWith("blob:")
+              ? undefined
+              : student.photo),
+        };
+      });
+  }, [
+    classMap,
+    enrollments,
+    mediaByStudentId,
+    resolvedParentId,
+    studentParents,
+    students,
+  ]);
 
-        if (!query) return true;
+  useEffect(() => {
+    if (!childId && children.length) setChildId(children[0].id);
+    if (childId && !children.some((child) => child.id === childId)) {
+      setChildId(children[0]?.id || "");
+    }
+  }, [childId, children]);
 
-        return `
-          ${student?.fullName || ""}
-          ${student?.admissionNumber || ""}
-          ${invoice.invoiceNumber || ""}
-          ${invoice.status || ""}
-          ${invoice.note || ""}
-          ${statement.items.map((item) => item.name).join(" ")}
-        `
-          .toLowerCase()
-          .includes(query);
-      })
-      .sort((a, b) => dateValue(b.invoice.issueDate || b.invoice.dueDate) - dateValue(a.invoice.issueDate || a.invoice.dueDate));
-  }, [statements, search, studentFilter, statusFilter, dateFilter, fromDate, toDate]);
+  const childIds = useMemo(() => new Set(children.map((child) => child.id)), [children]);
 
-  const childSummaries = useMemo<ChildSummary[]>(() => {
-    return students.map((student) => {
-      const childInvoices = statements.filter((statement) => statement.invoice.studentId === student.id);
-      const billed = childInvoices.reduce((sum, item) => sum + item.billed, 0);
-      const paid = childInvoices.reduce((sum, item) => sum + item.paid, 0);
-      const balance = childInvoices.reduce((sum, item) => sum + item.balance, 0);
-      const overdue = childInvoices.reduce((sum, item) => sum + (item.overdue ? item.balance : 0), 0);
-
-      return { student, invoices: childInvoices, billed, paid, balance, overdue };
-    });
-  }, [students, statements]);
-
-  const summary = useMemo(() => {
-    const billed = filteredStatements.reduce((sum, item) => sum + item.billed, 0);
-    const paid = filteredStatements.reduce((sum, item) => sum + item.paid, 0);
-    const balance = filteredStatements.reduce((sum, item) => sum + item.balance, 0);
-    const overdue = filteredStatements.reduce((sum, item) => sum + (item.overdue ? item.balance : 0), 0);
+  const currency = useMemo(() => {
+    const row =
+      currencySettings.find((item) => item.defaultForFees) ||
+      currencySettings.find((item) => item.active !== false) ||
+      currencySettings[0];
 
     return {
-      invoices: filteredStatements.length,
-      billed,
+      code: text(row?.currencyCode || invoices[0]?.currencyCode, "GHS"),
+      symbol: text(row?.currencySymbol, "₵"),
+    };
+  }, [currencySettings, invoices]);
+
+  const successfulPayments = useMemo(
+    () =>
+      payments.filter((row) =>
+        ["paid", "success", "succeeded"].includes(
+          String(row.status || "paid").toLowerCase(),
+        ),
+      ),
+    [payments],
+  );
+
+  const invoiceRows = useMemo<InvoiceView[]>(() => {
+    const q = query.trim().toLowerCase();
+    return invoices
+      .filter((row) => childIds.has(idOf(row.studentId)))
+      .filter((row) => !childId || sameId(row.studentId, childId))
+      .filter(
+        (row) => !structureId || sameId(row.academicStructureId, structureId),
+      )
+      .filter((row) => !periodId || sameId(row.academicPeriodId, periodId))
+      .map((row): InvoiceView => {
+        const paidFromRows = successfulPayments
+          .filter((payment) => sameId(payment.invoiceId, idOf(row)))
+          .reduce((sum, payment) => sum + n(payment.amount), 0);
+        const amountPaidValue = Math.max(n(row.amountPaid), paidFromRows);
+        const balanceValue = Math.max(0, n(row.total) - amountPaidValue);
+        const statusValue = invoiceStatus(
+          n(row.total),
+          amountPaidValue,
+          row.dueDate,
+        );
+        const student = studentMap.get(idOf(row.studentId));
+        return {
+          ...(row as AnyRow),
+          amountPaidValue,
+          balanceValue,
+          statusValue,
+          studentName: rowName(student),
+          className: classMap.get(idOf(row.classId)) || "Class",
+        };
+      })
+      .filter((row) => status === "all" || row.statusValue === status)
+      .filter((row) => {
+        if (!q) return true;
+        return [
+          row.invoiceNumber,
+          row.studentName,
+          row.className,
+          row.statusValue,
+          row.note,
+          structureMap.get(idOf(row.academicStructureId)),
+          periodMap.get(idOf(row.academicPeriodId)),
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(q);
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.issueDate || b.createdAt || 0).getTime() -
+          new Date(a.issueDate || a.createdAt || 0).getTime(),
+      );
+  }, [
+    childId,
+    childIds,
+    classMap,
+    invoices,
+    periodId,
+    periodMap,
+    query,
+    status,
+    structureId,
+    structureMap,
+    studentMap,
+    successfulPayments,
+  ]);
+
+  const paymentRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return payments
+      .filter((row) => childIds.has(idOf(row.studentId)))
+      .filter((row) => !childId || sameId(row.studentId, childId))
+      .filter((row) => {
+        const invoice = invoiceMap.get(idOf(row.invoiceId));
+        if (
+          structureId &&
+          !sameId(invoice?.academicStructureId, structureId)
+        ) {
+          return false;
+        }
+        if (periodId && !sameId(invoice?.academicPeriodId, periodId)) {
+          return false;
+        }
+        return true;
+      })
+      .filter((row) => {
+        if (!q) return true;
+        const invoice = invoiceMap.get(idOf(row.invoiceId));
+        return [
+          row.receiptNumber,
+          row.referenceNumber,
+          row.providerReference,
+          row.method,
+          row.status,
+          row.payerName,
+          rowName(studentMap.get(idOf(row.studentId))),
+          invoice?.invoiceNumber,
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(q);
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.paidAt || b.date || b.createdAt || 0).getTime() -
+          new Date(a.paidAt || a.date || a.createdAt || 0).getTime(),
+      );
+  }, [
+    childId,
+    childIds,
+    invoiceMap,
+    payments,
+    periodId,
+    query,
+    structureId,
+    studentMap,
+  ]);
+
+  const summary = useMemo(() => {
+    const total = invoiceRows.reduce((sum, row) => sum + n(row.total), 0);
+    const paid = invoiceRows.reduce(
+      (sum, row) => sum + row.amountPaidValue,
+      0,
+    );
+    const balance = invoiceRows.reduce(
+      (sum, row) => sum + row.balanceValue,
+      0,
+    );
+    return {
+      total,
       paid,
       balance,
-      overdue,
-      currencyCode: filteredStatements[0]?.currencyCode || settings?.currencyCode || "GHS",
-      currencySymbol: filteredStatements[0]?.currencySymbol || settings?.currencySymbol || "GH₵",
+      invoices: invoiceRows.length,
+      paidInvoices: invoiceRows.filter((row) => row.statusValue === "paid").length,
+      overdue: invoiceRows.filter((row) => row.statusValue === "overdue").length,
+      partPaid: invoiceRows.filter((row) => row.statusValue === "part_paid").length,
+      payments: paymentRows.length,
     };
-  }, [filteredStatements, settings?.currencyCode, settings?.currencySymbol]);
+  }, [invoiceRows, paymentRows.length]);
 
-  const feeItemBreakdown = useMemo<Breakdown[]>(() => {
-    const map = new Map<string, Breakdown>();
+  const selectedChild = children.find((child) => child.id === childId);
+  const filteredPeriods = structureId
+    ? periods.filter((row) => sameId(row.academicStructureId, structureId))
+    : periods;
 
-    filteredStatements.forEach((statement) => {
-      statement.items.forEach((item) => {
-        const key = item.name || "Fee Item";
-        const existing = map.get(key) || { name: key, amount: 0, count: 0 };
-        existing.amount += Number(item.amount || 0);
-        existing.count += 1;
-        map.set(key, existing);
-      });
-    });
+  const activeFilterCount = [
+    childId,
+    structureId,
+    periodId,
+    status !== "all" ? status : "",
+  ].filter(Boolean).length;
 
-    return Array.from(map.values()).sort((a, b) => b.amount - a.amount);
-  }, [filteredStatements]);
+  const invoiceItemsFor = (invoiceId: string) =>
+    invoiceItems
+      .filter((row) => sameId(row.invoiceId, invoiceId))
+      .sort((a, b) => n(a.order) - n(b.order));
 
-  const statusBreakdown = useMemo<Breakdown[]>(() => {
-    const map = new Map<string, Breakdown>();
-
-    filteredStatements.forEach((statement) => {
-      const key = statusLabel(statement.invoice.status);
-      const existing = map.get(key) || { name: key, amount: 0, count: 0 };
-      existing.amount += Number(statement.balance || 0);
-      existing.count += 1;
-      map.set(key, existing);
-    });
-
-    return Array.from(map.values()).sort((a, b) => b.amount - a.amount);
-  }, [filteredStatements]);
-
-  const selectedStatement = useMemo(() => {
-    if (!selectedInvoiceId) return null;
-    return statements.find((statement) => statement.invoice.id === selectedInvoiceId) || null;
-  }, [selectedInvoiceId, statements]);
-
-  const closeCheckout = () => {
-    if (checkoutLoading) return;
-
-    setCheckout((prev) => ({
-      ...prev,
-      open: false,
-      statement: null,
-      error: "",
-      success: "",
-    }));
+  const resetFilters = () => {
+    setStatus("all");
+    setStructureId("");
+    setPeriodId("");
+    setQuery("");
   };
 
-  const handlePayNow = (statement: FeeStatement) => {
-    if (statement.balance <= 0) return;
-
-    const parent = parents[0];
-    const student = statement.student;
-
-    setSelectedInvoiceId(statement.invoice.id || null);
-    setCheckout({
-      open: true,
-      statement,
-      method: "momo",
-      momoNetwork: "mtn",
-      payerName: parent?.fullName || student?.parentName || "",
-      payerPhone: parent?.phone || student?.parentPhone || "",
-      payerEmail: parent?.email || student?.parentEmail || "",
-      note: `Fee payment for invoice ${statement.invoice.invoiceNumber}`,
-      error: "",
-      success: "",
-    });
+  const paymentPlaceholder = () => {
+    setToast("Online checkout will open here after Paystack is connected.");
+    window.setTimeout(() => setToast(""), 3800);
   };
 
-  const startCheckout = async () => {
-    const statement = checkout.statement;
+  const contextLoading = accountLoading || settingsLoading || loading;
 
-    if (!statement || !statement.invoice.id) {
-      setCheckout((prev) => ({ ...prev, error: "Select a valid invoice first." }));
-      return;
-    }
-
-    if (!accountId || !schoolId || !branchId) {
-      setCheckout((prev) => ({ ...prev, error: "Your school branch context is missing." }));
-      return;
-    }
-
-    if ((checkout.method === "momo" || checkout.method === "card") && !checkout.payerEmail.trim()) {
-      setCheckout((prev) => ({ ...prev, error: "Payer email is required for Paystack checkout." }));
-      return;
-    }
-
-    if (checkout.method === "momo" && !checkout.payerPhone.trim()) {
-      setCheckout((prev) => ({ ...prev, error: "Phone number is required for mobile money checkout." }));
-      return;
-    }
-
-    try {
-      setCheckoutLoading(true);
-      setCheckout((prev) => ({ ...prev, error: "", success: "" }));
-
-      const apiBase = getApiBase();
-      const provider = providerForMethod(checkout.method);
-
-      const payload = {
-        accountId,
-        schoolId,
-        branchId,
-        purpose: "student_fee",
-        feeInvoiceId: statement.invoice.id,
-        invoiceId: statement.invoice.id,
-        invoiceNumber: statement.invoice.invoiceNumber,
-        studentId: statement.invoice.studentId,
-        parentId: activeParentId ? Number(activeParentId) : parents[0]?.id,
-        amount: statement.balance,
-        currencyCode: statement.currencyCode,
-        currencySymbol: statement.currencySymbol,
-        currencyName: statement.invoice.currencyName || settings?.currencyName || "Ghanaian Cedi",
-        channel: checkout.method,
-        method: checkout.method,
-        provider,
-        momoNetwork: checkout.method === "momo" ? checkout.momoNetwork : undefined,
-        payerName: checkout.payerName.trim() || parents[0]?.fullName || statement.student?.parentName,
-        payerPhone: checkout.payerPhone.trim() || parents[0]?.phone || statement.student?.parentPhone,
-        payerEmail: checkout.payerEmail.trim() || parents[0]?.email || statement.student?.parentEmail,
-        description: `School fee payment for ${statement.student?.fullName || "student"} - ${statement.invoice.invoiceNumber}`,
-        note: checkout.note.trim(),
-        metadata: {
-          source: "parent_portal",
-          invoiceNumber: statement.invoice.invoiceNumber,
-          studentName: statement.student?.fullName,
-          schoolName: activeSchool?.name,
-          branchName: activeBranch?.name,
-        },
-      };
-
-      /*
-       * Preferred endpoint:
-       * Your Phase 3 backend should expose this route and use PaystackProvider
-       * to return authorizationUrl for momo/card payments.
-       */
-      let response = await fetch(`${apiBase}/payment-gateway/student-fees/checkout`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      /*
-       * Safe fallback:
-       * If the specialized checkout route is not yet added, create a payment
-       * intent using the Phase 2 generic payment-gateway endpoint.
-       * This records the intent but may not redirect unless your backend returns authorizationUrl.
-       */
-      if (response.status === 404 || response.status === 405) {
-        response = await fetch(`${apiBase}/payment-gateway/intents`, {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            schoolId,
-            branchId,
-            purpose: "student_fee",
-            amount: statement.balance,
-            channel: checkout.method,
-            provider,
-            studentId: statement.invoice.studentId,
-            parentId: activeParentId ? Number(activeParentId) : parents[0]?.id,
-            feeInvoiceId: statement.invoice.id,
-            currencyCode: statement.currencyCode,
-            currencySymbol: statement.currencySymbol,
-            currencyName: statement.invoice.currencyName || settings?.currencyName || "Ghanaian Cedi",
-            payerName: payload.payerName,
-            payerPhone: payload.payerPhone,
-            payerEmail: payload.payerEmail,
-            momoNetwork: payload.momoNetwork,
-            description: payload.description,
-            metadata: payload.metadata,
-          }),
-        });
-      }
-
-      const json = await readCheckoutJson(response);
-      const authorizationUrl =
-        json.authorizationUrl ||
-        json.authorization_url ||
-        json.providerResponse?.authorizationUrl ||
-        json.providerResponse?.authorization_url;
-
-      if (authorizationUrl) {
-        window.location.href = authorizationUrl;
-        return;
-      }
-
-      if (provider === "paystack") {
-        setCheckout((prev) => ({
-          ...prev,
-          error:
-            "Payment intent was created, but Paystack did not return a checkout URL. Add the backend student-fee checkout route that calls PaystackProvider.initializePayment.",
-        }));
-        return;
-      }
-
-      setCheckout((prev) => ({
-        ...prev,
-        success: json.message || "Payment request recorded. The school will confirm this payment.",
-      }));
-
-      await load();
-    } catch (error: any) {
-      setCheckout((prev) => ({
-        ...prev,
-        error: error?.message || "Payment checkout failed.",
-      }));
-    } finally {
-      setCheckoutLoading(false);
-    }
-  };
-
-  // ======================================================
-  // PROTECTED STATES
-  // ======================================================
-
-  if (accountLoading || contextLoading || settingsLoading || loading) {
+  if (contextLoading) {
     return (
-      <main className="cfees-page" style={{ "--cfees-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="cfees-state-card">
-          <div className="cfees-spinner" />
-          <h2>Opening fee statements...</h2>
-          <p>Checking parent profile, children, invoices, and payment records.</p>
-        </section>
-      </main>
+      <div className="cf-page cf-loading">
+        <div className="cf-spinner" />
+        <span>Loading child fees…</span>
+        <style jsx>{styles}</style>
+      </div>
     );
   }
 
-  if (!authenticated || !accountId) {
+  if (!canView) {
     return (
-      <main className="cfees-page" style={{ "--cfees-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="cfees-state-card">
-          <h2>Redirecting to login...</h2>
-          <p>You must sign in before viewing child fees.</p>
-        </section>
-      </main>
+      <div className="cf-page cf-state">
+        <div className="cf-state-icon">!</div>
+        <h2>Fees unavailable</h2>
+        <p>This page is available to an active parent membership.</p>
+        <style jsx>{styles}</style>
+      </div>
     );
   }
-
-  if (!schoolId || !branchId) {
-    return (
-      <main className="cfees-page" style={{ "--cfees-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="cfees-state-card">
-          <h2>Assigned school branch required</h2>
-          <p>Your parent portal must be linked to a school branch before fee statements can be shown.</p>
-        </section>
-      </main>
-    );
-  }
-
-  // ======================================================
-  // UI
-  // ======================================================
 
   return (
-    <main className="cfees-page" style={{ "--cfees-primary": primary } as React.CSSProperties}>
-      <style>{css}</style>
-
-      <section className="cfees-hero">
-        <div className="cfees-hero-left">
-          <div className="cfees-hero-icon">💳</div>
-          <div className="cfees-title-wrap">
-            <p>Parent Finance</p>
-            <h2>Fee Statements</h2>
-            <span>
-              {activeSchool?.name || "School"} · {activeBranch?.name || "Branch"}
-            </span>
-          </div>
+    <div
+      className="cf-page"
+      style={{ "--primary": primary } as React.CSSProperties}
+    >
+      <div className="cf-toolbar">
+        <div className="cf-search">
+          <span>⌕</span>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search invoices or receipts…"
+            aria-label="Search child fees"
+          />
+          {query ? (
+            <button onClick={() => setQuery("")} aria-label="Clear search">
+              ×
+            </button>
+          ) : null}
         </div>
+        <button
+          className={`cf-icon-btn ${filterOpen ? "active" : ""}`}
+          onClick={() => setFilterOpen(true)}
+          aria-label="Fee filters"
+        >
+          <SliderIcon />
+          {activeFilterCount ? (
+            <span className="cf-badge">{activeFilterCount}</span>
+          ) : null}
+        </button>
+        <button
+          className="cf-icon-btn"
+          onClick={() => setMoreOpen(true)}
+          aria-label="More options"
+        >
+          ⋯
+        </button>
+      </div>
 
-        <div className="cfees-hero-actions">
-          <button type="button" className="cfees-ghost-btn" onClick={load}>
-            Refresh
-          </button>
-        </div>
-      </section>
-
-      <section className="cfees-context-grid">
-        <article>
-          <div className="cfees-context-icon">👨‍👩‍👧</div>
-          <div>
-            <span>Linked Children</span>
-            <strong>{students.length}</strong>
-            <p>Only fee statements for your linked children appear here.</p>
-          </div>
-        </article>
-
-        <article>
-          <div className="cfees-context-icon">🏫</div>
-          <div>
-            <span>School Branch</span>
-            <strong>{activeBranch?.name || "Assigned branch"}</strong>
-            <p>The parent portal is locked to your child’s assigned branch.</p>
-          </div>
-        </article>
-      </section>
-
-      <section className="cfees-summary-grid" aria-label="Fee summary">
-        <SummaryCard label="Invoices" value={summary.invoices} icon="🧾" />
-        <SummaryCard label="Total Billed" value={money(summary.billed, summary.currencySymbol, summary.currencyCode)} icon="📌" />
-        <SummaryCard label="Total Paid" value={money(summary.paid, summary.currencySymbol, summary.currencyCode)} icon="✅" positive />
-        <SummaryCard label="Outstanding" value={money(summary.balance, summary.currencySymbol, summary.currencyCode)} icon="💳" warning={summary.balance > 0} />
-        <SummaryCard label="Overdue" value={money(summary.overdue, summary.currencySymbol, summary.currencyCode)} icon="⚠️" danger={summary.overdue > 0} />
-      </section>
-
-      <section className="cfees-toolbar">
-        <div className="cfees-view-tabs">
-          <button type="button" className={viewMode === "cards" ? "active" : ""} onClick={() => setViewMode("cards")}>
-            Cards
-          </button>
-          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
-            Table
-          </button>
-          <button type="button" className={viewMode === "analytics" ? "active" : ""} onClick={() => setViewMode("analytics")}>
-            Analytics
-          </button>
-        </div>
-
-        <Chip tone="gray">{filteredStatements.length} invoice(s)</Chip>
-      </section>
-
-      <section className="cfees-filter-card">
-        <input
-          placeholder="Search child, invoice number, fee item..."
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
-
-        <select value={studentFilter} onChange={(event) => setStudentFilter(event.target.value === "all" ? "all" : Number(event.target.value))}>
-          <option value="all">All Children</option>
-          {students.map((student) => (
-            <option key={student.id} value={student.id}>
-              {student.fullName}
-              {student.admissionNumber ? ` • ${student.admissionNumber}` : ""}
-            </option>
+      {children.length > 1 ? (
+        <div className="cf-child-strip">
+          {children.map((child) => (
+            <button
+              key={child.id}
+              className={child.id === childId ? "selected" : ""}
+              onClick={() => setChildId(child.id)}
+            >
+              <span className="cf-mini-avatar">
+                {child.photo ? (
+                  <img src={child.photo} alt="" />
+                ) : (
+                  child.name.charAt(0).toUpperCase()
+                )}
+              </span>
+              <span>
+                <strong>{child.name}</strong>
+                <small>{child.className}</small>
+              </span>
+            </button>
           ))}
-        </select>
+        </div>
+      ) : null}
 
-        <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
-          <option value="all">All Statuses</option>
-          <option value="draft">Draft</option>
-          <option value="issued">Issued</option>
-          <option value="part_paid">Part Paid</option>
-          <option value="paid">Paid</option>
-          <option value="overdue">Overdue</option>
-          <option value="cancelled">Cancelled</option>
-          <option value="void">Void</option>
-        </select>
-
-        <select value={dateFilter} onChange={(event) => setDateFilter(event.target.value as DateFilter)}>
-          <option value="all">All Dates</option>
-          <option value="today">Today</option>
-          <option value="week">This Week</option>
-          <option value="month">This Month</option>
-          <option value="custom">Custom Range</option>
-        </select>
-
-        {dateFilter === "custom" && (
-          <>
-            <input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
-            <input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
-          </>
-        )}
-      </section>
-
-      {viewMode === "analytics" && (
-        <>
-          <section className="cfees-section">
-            <div className="cfees-section-head">
-              <div>
-                <p>Child Overview</p>
-                <h3>Fee Position by Child</h3>
-              </div>
-              <Chip tone="blue">{childSummaries.length} child(ren)</Chip>
+      {selectedChild ? (
+        <section className="cf-child-card">
+          <div className="cf-avatar">
+            {selectedChild.photo ? (
+              <img src={selectedChild.photo} alt={selectedChild.name} />
+            ) : (
+              selectedChild.name.charAt(0).toUpperCase()
+            )}
+          </div>
+          <div className="cf-child-copy">
+            <div>
+              <h1>{selectedChild.name}</h1>
+              <button
+                className="cf-sync-dot"
+                onClick={() => setStatusOpen(true)}
+                aria-label="Data status"
+              />
             </div>
+            <p>
+              {selectedChild.admissionNumber} · {selectedChild.className}
+            </p>
+          </div>
+          <div className="cf-balance-block">
+            <small>Outstanding</small>
+            <strong>{money(summary.balance, currency.code)}</strong>
+          </div>
+        </section>
+      ) : null}
 
-            <div className="cfees-child-grid">
-              {childSummaries.map((child) => (
-                <article key={child.student.id} className="cfees-child-card">
-                  <div className="cfees-child-top">
-                    <div className="cfees-child-avatar">
-                      {child.student.photo ? <img src={child.student.photo} alt={child.student.fullName} /> : child.student.fullName.slice(0, 1).toUpperCase()}
+      <div className="cf-summary-grid">
+        <article>
+          <span className="blue">Σ</span>
+          <div>
+            <strong>{money(summary.total, currency.code)}</strong>
+            <small>Total billed</small>
+          </div>
+        </article>
+        <article>
+          <span className="green">✓</span>
+          <div>
+            <strong>{money(summary.paid, currency.code)}</strong>
+            <small>Paid</small>
+          </div>
+        </article>
+        <article>
+          <span className="red">!</span>
+          <div>
+            <strong>{money(summary.balance, currency.code)}</strong>
+            <small>Balance</small>
+          </div>
+        </article>
+        <article>
+          <span className="orange">▤</span>
+          <div>
+            <strong>{summary.invoices}</strong>
+            <small>Invoices</small>
+          </div>
+        </article>
+      </div>
+
+      <div className="cf-tabs">
+        <button
+          className={section === "invoices" ? "active" : ""}
+          onClick={() => setSection("invoices")}
+        >
+          Invoices <span>{invoiceRows.length}</span>
+        </button>
+        <button
+          className={section === "payments" ? "active" : ""}
+          onClick={() => setSection("payments")}
+        >
+          Payments <span>{paymentRows.length}</span>
+        </button>
+      </div>
+
+      {!resolvedParentId ? (
+        <Empty
+          title="Parent profile not linked"
+          body="The active membership needs a parentId or parentLocalId."
+        />
+      ) : !children.length ? (
+        <Empty
+          title="No linked children"
+          body="No active student-parent relationship was found for this parent."
+        />
+      ) : view === "analytics" ? (
+        <section className="cf-analytics">
+          <article className="cf-analytics-card cf-overview">
+            <div>
+              <span>Payment progress</span>
+              <strong>
+                {summary.total
+                  ? Math.round((summary.paid / summary.total) * 100)
+                  : 0}
+                %
+              </strong>
+              <small>
+                {summary.paidInvoices} of {summary.invoices} invoices fully paid
+              </small>
+            </div>
+            <div
+              className="cf-donut"
+              style={
+                {
+                  "--value": `${
+                    summary.total
+                      ? Math.round((summary.paid / summary.total) * 100)
+                      : 0
+                  }%`,
+                } as React.CSSProperties
+              }
+            >
+              <span>
+                {summary.total
+                  ? Math.round((summary.paid / summary.total) * 100)
+                  : 0}
+                %
+              </span>
+            </div>
+          </article>
+          <article className="cf-analytics-card">
+            <div className="cf-analytics-title">
+              <strong>Invoice health</strong>
+              <small>Current filtered child and period</small>
+            </div>
+            <div className="cf-metric-list">
+              <div>
+                <span>Paid</span>
+                <strong>{summary.paidInvoices}</strong>
+              </div>
+              <div>
+                <span>Part paid</span>
+                <strong>{summary.partPaid}</strong>
+              </div>
+              <div>
+                <span>Overdue</span>
+                <strong>{summary.overdue}</strong>
+              </div>
+              <div>
+                <span>Payments</span>
+                <strong>{summary.payments}</strong>
+              </div>
+            </div>
+          </article>
+        </section>
+      ) : section === "invoices" ? (
+        invoiceRows.length ? (
+          view === "table" ? (
+            <div className="cf-table-shell">
+              <div className="cf-table-title">
+                Invoices ({invoiceRows.length})
+              </div>
+              <div className="cf-table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Invoice</th>
+                      <th>Status</th>
+                      <th>Total</th>
+                      <th>Paid</th>
+                      <th>Balance</th>
+                      <th>Due</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invoiceRows.map((row) => (
+                      <tr
+                        key={idOf(row)}
+                        onClick={() => setDetail({ kind: "invoice", row })}
+                      >
+                        <td>
+                          <strong>{text(row.invoiceNumber, "Invoice")}</strong>
+                          <small>{row.className}</small>
+                        </td>
+                        <td>
+                          <Chip tone={statusTone(row.statusValue)}>
+                            {statusLabel(row.statusValue)}
+                          </Chip>
+                        </td>
+                        <td>{money(row.total, row.currencyCode || currency.code)}</td>
+                        <td>
+                          {money(
+                            row.amountPaidValue,
+                            row.currencyCode || currency.code,
+                          )}
+                        </td>
+                        <td>
+                          {money(
+                            row.balanceValue,
+                            row.currencyCode || currency.code,
+                          )}
+                        </td>
+                        <td>{dateLabel(row.dueDate)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="cf-card-grid">
+              {invoiceRows.map((row) => (
+                <article
+                  className="cf-invoice-card"
+                  key={idOf(row)}
+                  onClick={() => setDetail({ kind: "invoice", row })}
+                >
+                  <div className="cf-card-top">
+                    <div>
+                      <strong>{text(row.invoiceNumber, "Invoice")}</strong>
+                      <small>
+                        {structureMap.get(idOf(row.academicStructureId)) ||
+                          "Academic year"}{" "}
+                        ·{" "}
+                        {periodMap.get(idOf(row.academicPeriodId)) || "Period"}
+                      </small>
+                    </div>
+                    <Chip tone={statusTone(row.statusValue)}>
+                      {statusLabel(row.statusValue)}
+                    </Chip>
+                  </div>
+                  <div className="cf-money-row">
+                    <div>
+                      <small>Total</small>
+                      <strong>
+                        {money(row.total, row.currencyCode || currency.code)}
+                      </strong>
                     </div>
                     <div>
-                      <strong>{child.student.fullName}</strong>
-                      <span>{child.student.admissionNumber || "No admission number"}</span>
+                      <small>Paid</small>
+                      <strong>
+                        {money(
+                          row.amountPaidValue,
+                          row.currencyCode || currency.code,
+                        )}
+                      </strong>
+                    </div>
+                    <div>
+                      <small>Balance</small>
+                      <strong className={row.balanceValue ? "danger" : ""}>
+                        {money(
+                          row.balanceValue,
+                          row.currencyCode || currency.code,
+                        )}
+                      </strong>
                     </div>
                   </div>
-
-                  <div className="cfees-mini-grid">
-                    <MiniStat label="Billed" value={money(child.billed, summary.currencySymbol, summary.currencyCode)} />
-                    <MiniStat label="Paid" value={money(child.paid, summary.currencySymbol, summary.currencyCode)} />
-                    <MiniStat label="Balance" value={money(child.balance, summary.currencySymbol, summary.currencyCode)} />
-                    <MiniStat label="Overdue" value={money(child.overdue, summary.currencySymbol, summary.currencyCode)} />
+                  <div className="cf-card-foot">
+                    <span>Issued {dateLabel(row.issueDate)}</span>
+                    <span>Due {dateLabel(row.dueDate)}</span>
                   </div>
                 </article>
               ))}
-
-              {!childSummaries.length && <EmptyCard text="No linked child fee data was found." />}
             </div>
-          </section>
-
-          <BreakdownSection title="Fee Item Breakdown" total={summary.billed} items={feeItemBreakdown} tone="purple" currencyCode={summary.currencyCode} currencySymbol={summary.currencySymbol} />
-          <BreakdownSection title="Balance by Status" total={summary.balance} items={statusBreakdown} tone="orange" currencyCode={summary.currencyCode} currencySymbol={summary.currencySymbol} />
-        </>
-      )}
-
-      {viewMode === "table" && (
-        <section className="cfees-table-card">
-          <div className="cfees-section-head">
-            <div>
-              <p>Parent Fee Register</p>
-              <h3>Fee Statement Table</h3>
+          )
+        ) : (
+          <Empty
+            title="No invoices found"
+            body="Try another child, period or invoice status."
+          />
+        )
+      ) : paymentRows.length ? (
+        view === "table" ? (
+          <div className="cf-table-shell">
+            <div className="cf-table-title">
+              Payments ({paymentRows.length})
             </div>
-            <Chip tone="blue">Parent Scoped</Chip>
-          </div>
-
-          <div className="cfees-table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Student</th>
-                  <th>Invoice</th>
-                  <th>Status</th>
-                  <th>Issue Date</th>
-                  <th>Due Date</th>
-                  <th>Billed</th>
-                  <th>Paid</th>
-                  <th>Balance</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {filteredStatements.map((statement) => (
-                  <tr key={statement.invoice.id}>
-                    <td>
-                      <strong>{statement.student?.fullName || "Student"}</strong>
-                      <span>{statement.student?.admissionNumber || "No admission number"}</span>
-                    </td>
-                    <td>{statement.invoice.invoiceNumber}</td>
-                    <td><Chip tone={statusTone(statement.invoice.status)}>{statusLabel(statement.invoice.status)}</Chip></td>
-                    <td>{statement.invoice.issueDate || "-"}</td>
-                    <td>{statement.invoice.dueDate || "-"}</td>
-                    <td>{money(statement.billed, statement.currencySymbol, statement.currencyCode)}</td>
-                    <td>{money(statement.paid, statement.currencySymbol, statement.currencyCode)}</td>
-                    <td><strong>{money(statement.balance, statement.currencySymbol, statement.currencyCode)}</strong></td>
-                    <td>
-                      <button type="button" className="cfees-table-btn" onClick={() => setSelectedInvoiceId(statement.invoice.id || null)}>
-                        View
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-
-                {!filteredStatements.length && (
+            <div className="cf-table-scroll">
+              <table>
+                <thead>
                   <tr>
-                    <td colSpan={9}>
-                      <EmptyCard text="No fee invoices were found for your linked children under the selected filters." />
-                    </td>
+                    <th>Receipt</th>
+                    <th>Status</th>
+                    <th>Method</th>
+                    <th>Amount</th>
+                    <th>Date</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {viewMode === "cards" && (
-        <section className="cfees-section">
-          <div className="cfees-section-head">
-            <div>
-              <p>Parent Fee Register</p>
-              <h3>Fee Statements</h3>
+                </thead>
+                <tbody>
+                  {paymentRows.map((row) => (
+                    <tr
+                      key={idOf(row)}
+                      onClick={() => setDetail({ kind: "payment", row })}
+                    >
+                      <td>
+                        <strong>{text(row.receiptNumber, "No receipt")}</strong>
+                        <small>{text(row.referenceNumber, "No reference")}</small>
+                      </td>
+                      <td>
+                        <Chip tone={statusTone(row.status)}>
+                          {statusLabel(row.status)}
+                        </Chip>
+                      </td>
+                      <td>{statusLabel(row.method)}</td>
+                      <td>{money(row.amount, row.currencyCode || currency.code)}</td>
+                      <td>{dateLabel(row.paidAt || row.date)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <Chip tone="gray">{filteredStatements.length} invoice(s)</Chip>
           </div>
-
-          <div className="cfees-list">
-            {filteredStatements.map((statement) => (
-              <article key={statement.invoice.id} className="cfees-card">
-                <div className="cfees-card-top">
-                  <div className="cfees-card-icon">💳</div>
-
-                  <div className="cfees-card-main">
-                    <h3>{statement.student?.fullName || "Student"}</h3>
-                    <p>
-                      {statement.invoice.invoiceNumber}
-                      {statement.student?.admissionNumber ? ` · ${statement.student.admissionNumber}` : ""}
-                    </p>
-
-                    <div className="cfees-chip-row">
-                      <Chip tone={statusTone(statement.invoice.status)}>{statusLabel(statement.invoice.status)}</Chip>
-                      <Chip tone="gray">Due: {statement.invoice.dueDate || "-"}</Chip>
-                      <Chip tone={statement.balance > 0 ? "orange" : "green"}>
-                        Balance: {money(statement.balance, statement.currencySymbol, statement.currencyCode)}
+        ) : (
+          <div className="cf-card-grid">
+            {paymentRows.map((row) => {
+              const invoice = invoiceMap.get(idOf(row.invoiceId));
+              return (
+                <article
+                  className="cf-payment-card"
+                  key={idOf(row)}
+                  onClick={() => setDetail({ kind: "payment", row })}
+                >
+                  <div className="cf-payment-icon">✓</div>
+                  <div className="cf-payment-main">
+                    <div>
+                      <strong>
+                        {money(row.amount, row.currencyCode || currency.code)}
+                      </strong>
+                      <Chip tone={statusTone(row.status)}>
+                        {statusLabel(row.status)}
                       </Chip>
                     </div>
+                    <p>
+                      {statusLabel(row.method)} ·{" "}
+                      {text(invoice?.invoiceNumber, "General payment")}
+                    </p>
+                    <small>
+                      {dateLabel(row.paidAt || row.date)} ·{" "}
+                      {text(row.receiptNumber, "No receipt number")}
+                    </small>
                   </div>
-                </div>
-
-                <div className="cfees-mini-grid">
-                  <MiniStat label="Billed" value={money(statement.billed, statement.currencySymbol, statement.currencyCode)} />
-                  <MiniStat label="Paid" value={money(statement.paid, statement.currencySymbol, statement.currencyCode)} />
-                  <MiniStat label="Balance" value={money(statement.balance, statement.currencySymbol, statement.currencyCode)} />
-                  <MiniStat label="Items" value={statement.items.length} />
-                </div>
-
-                <div className="cfees-action-row">
-                  <button type="button" onClick={() => setSelectedInvoiceId(statement.invoice.id || null)}>
-                    View Statement
-                  </button>
-                  <button type="button" className="primary" disabled={statement.balance <= 0} onClick={() => handlePayNow(statement)}>
-                    Pay Now
-                  </button>
-                </div>
-              </article>
-            ))}
-
-            {!filteredStatements.length && (
-              <EmptyCard text="No fee invoices were found for your linked children under the selected filters." />
-            )}
+                </article>
+              );
+            })}
           </div>
-        </section>
+        )
+      ) : (
+        <Empty
+          title="No payment history"
+          body="Successful and pending payments will appear here."
+        />
       )}
 
-      {checkout.open && checkout.statement && (
-        <div className="cfees-checkout-layer">
-          <button
-            type="button"
-            className="cfees-checkout-overlay"
-            aria-label="Close checkout"
-            onClick={closeCheckout}
-          />
-
-          <aside className="cfees-checkout-modal" role="dialog" aria-modal="true" aria-labelledby="fee-checkout-title">
-            <div className="cfees-checkout-head">
+      {filterOpen ? (
+        <div className="cf-sheet-layer" onMouseDown={() => setFilterOpen(false)}>
+          <aside
+            className="cf-sheet"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="cf-sheet-head">
               <div>
-                <p>Secure Fee Checkout</p>
-                <h2 id="fee-checkout-title">Pay School Fees</h2>
-                <span>
-                  {checkout.statement.student?.fullName || "Student"} · {checkout.statement.invoice.invoiceNumber}
-                </span>
+                <strong>Fee filters</strong>
+                <small>Choose a child, period and status</small>
               </div>
-
-              <button type="button" onClick={closeCheckout} disabled={checkoutLoading} aria-label="Close checkout">
-                ✕
-              </button>
+              <button onClick={() => setFilterOpen(false)}>×</button>
             </div>
-
-            <section className="cfees-checkout-amount">
-              <span>Total payable</span>
-              <strong>
-                {money(checkout.statement.balance, checkout.statement.currencySymbol, checkout.statement.currencyCode)}
-              </strong>
-              <small>
-                {activeSchool?.name || "School"} · {activeBranch?.name || "Branch"}
-              </small>
-            </section>
-
-            <section className="cfees-checkout-section">
-              <div className="cfees-checkout-section-head">
-                <h3>Payment method</h3>
-                <p>MoMo and card payments redirect securely to Paystack.</p>
-              </div>
-
-              <div className="cfees-method-grid" role="radiogroup" aria-label="Payment method">
-                {paymentMethods.map((method) => (
-                  <button
-                    key={method}
-                    type="button"
-                    role="radio"
-                    aria-checked={checkout.method === method}
-                    className={checkout.method === method ? "active" : ""}
-                    onClick={() => setCheckout((prev) => ({ ...prev, method, error: "", success: "" }))}
-                    disabled={checkoutLoading}
-                  >
-                    <span>{method === "momo" ? "Mo" : method === "card" ? "Ca" : method === "bank" ? "Ba" : method === "cash" ? "Cs" : "Mn"}</span>
-                    <strong>{paymentMethodLabel(method)}</strong>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            {checkout.method === "momo" && (
-              <label className="cfees-checkout-field">
-                <span>Mobile Money Network</span>
+            <div className="cf-sheet-body">
+              <label>
+                <span>Child</span>
                 <select
-                  value={checkout.momoNetwork}
-                  onChange={(event) => setCheckout((prev) => ({ ...prev, momoNetwork: event.target.value as MomoNetwork }))}
-                  disabled={checkoutLoading}
+                  value={childId}
+                  onChange={(event) => setChildId(event.target.value)}
                 >
-                  <option value="mtn">MTN Mobile Money</option>
-                  <option value="telecel">Telecel Cash</option>
-                  <option value="airteltigo">AirtelTigo Money</option>
+                  {children.map((child) => (
+                    <option key={child.id} value={child.id}>
+                      {child.name}
+                    </option>
+                  ))}
                 </select>
               </label>
-            )}
-
-            <div className="cfees-checkout-two">
-              <label className="cfees-checkout-field">
-                <span>Payer Name</span>
-                <input
-                  value={checkout.payerName}
-                  onChange={(event) => setCheckout((prev) => ({ ...prev, payerName: event.target.value }))}
-                  placeholder="Parent / guardian name"
-                  disabled={checkoutLoading}
-                />
+              <label>
+                <span>Academic structure</span>
+                <select
+                  value={structureId}
+                  onChange={(event) => {
+                    setStructureId(event.target.value);
+                    setPeriodId("");
+                  }}
+                >
+                  <option value="">All structures</option>
+                  {structures.map((row) => (
+                    <option key={idOf(row)} value={idOf(row)}>
+                      {rowName(row)}
+                    </option>
+                  ))}
+                </select>
               </label>
-
-              <label className="cfees-checkout-field">
-                <span>Phone</span>
-                <input
-                  value={checkout.payerPhone}
-                  onChange={(event) => setCheckout((prev) => ({ ...prev, payerPhone: event.target.value }))}
-                  placeholder="024..."
-                  disabled={checkoutLoading}
-                />
+              <label>
+                <span>Academic period</span>
+                <select
+                  value={periodId}
+                  onChange={(event) => setPeriodId(event.target.value)}
+                >
+                  <option value="">All periods</option>
+                  {filteredPeriods.map((row) => (
+                    <option key={idOf(row)} value={idOf(row)}>
+                      {rowName(row)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Invoice status</span>
+                <select
+                  value={status}
+                  onChange={(event) =>
+                    setStatus(event.target.value as StatusFilter)
+                  }
+                >
+                  <option value="all">All statuses</option>
+                  <option value="issued">Issued</option>
+                  <option value="part_paid">Part paid</option>
+                  <option value="paid">Paid</option>
+                  <option value="overdue">Overdue</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
               </label>
             </div>
-
-            <label className="cfees-checkout-field">
-              <span>Email {checkout.method === "momo" || checkout.method === "card" ? "(required for Paystack)" : ""}</span>
-              <input
-                type="email"
-                value={checkout.payerEmail}
-                onChange={(event) => setCheckout((prev) => ({ ...prev, payerEmail: event.target.value }))}
-                placeholder="parent@example.com"
-                disabled={checkoutLoading}
-              />
-            </label>
-
-            <label className="cfees-checkout-field">
-              <span>Note</span>
-              <input
-                value={checkout.note}
-                onChange={(event) => setCheckout((prev) => ({ ...prev, note: event.target.value }))}
-                placeholder="Optional payment note"
-                disabled={checkoutLoading}
-              />
-            </label>
-
-            {checkout.error && <div className="cfees-checkout-alert error">{checkout.error}</div>}
-            {checkout.success && <div className="cfees-checkout-alert success">{checkout.success}</div>}
-
-            <button
-              type="button"
-              className="cfees-checkout-submit"
-              onClick={startCheckout}
-              disabled={checkoutLoading || checkout.statement.balance <= 0}
-            >
-              {checkoutLoading
-                ? "Starting checkout..."
-                : providerForMethod(checkout.method) === "paystack"
-                  ? "Continue to Paystack"
-                  : "Record Payment Request"}
-            </button>
-
-            <p className="cfees-checkout-footnote">
-              Online payments are confirmed by the backend webhook after Paystack reports success.
-            </p>
+            <div className="cf-sheet-actions">
+              <button className="secondary" onClick={resetFilters}>
+                Reset
+              </button>
+              <button className="primary" onClick={() => setFilterOpen(false)}>
+                Apply
+              </button>
+            </div>
           </aside>
         </div>
-      )}
+      ) : null}
 
-      {selectedStatement && (
-        <div className="cfees-drawer-layer">
-          <button type="button" className="cfees-drawer-overlay" aria-label="Close statement" onClick={() => setSelectedInvoiceId(null)} />
-
-          <aside className="cfees-drawer">
-            <div className="cfees-drawer-head">
+      {moreOpen ? (
+        <div className="cf-sheet-layer" onMouseDown={() => setMoreOpen(false)}>
+          <aside
+            className="cf-sheet cf-short-sheet"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="cf-sheet-head">
               <div>
-                <p>Fee Statement</p>
-                <h2>{selectedStatement.invoice.invoiceNumber}</h2>
-                <span>{selectedStatement.student?.fullName || "Student"} · {activeBranch?.name || "Branch"}</span>
+                <strong>View options</strong>
+                <small>Change how child fees are displayed</small>
               </div>
-              <button type="button" onClick={() => setSelectedInvoiceId(null)}>✕</button>
+              <button onClick={() => setMoreOpen(false)}>×</button>
             </div>
-
-            <section className="cfees-statement-summary">
-              <MiniStat label="Billed" value={money(selectedStatement.billed, selectedStatement.currencySymbol, selectedStatement.currencyCode)} />
-              <MiniStat label="Paid" value={money(selectedStatement.paid, selectedStatement.currencySymbol, selectedStatement.currencyCode)} />
-              <MiniStat label="Balance" value={money(selectedStatement.balance, selectedStatement.currencySymbol, selectedStatement.currencyCode)} />
-              <MiniStat label="Status" value={statusLabel(selectedStatement.invoice.status)} />
-            </section>
-
-            <section className="cfees-drawer-section">
-              <h3>Fee Items</h3>
-              <div className="cfees-line-list">
-                {selectedStatement.items.map((item) => (
-                  <div key={item.id}>
-                    <span>{item.name}</span>
-                    <strong>{money(item.amount, selectedStatement.currencySymbol, selectedStatement.currencyCode)}</strong>
-                  </div>
-                ))}
-
-                {!selectedStatement.items.length && (
+            <div className="cf-view-options">
+              {(["cards", "table", "analytics"] as ViewMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  className={view === mode ? "selected" : ""}
+                  onClick={() => {
+                    setView(mode);
+                    setMoreOpen(false);
+                  }}
+                >
+                  <span>
+                    {mode === "cards" ? "▤" : mode === "table" ? "▦" : "⌁"}
+                  </span>
                   <div>
-                    <span>No itemized fee breakdown found.</span>
-                    <strong>{money(selectedStatement.billed, selectedStatement.currencySymbol, selectedStatement.currencyCode)}</strong>
+                    <strong>
+                      {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    </strong>
+                    <small>
+                      {mode === "cards"
+                        ? "Mobile-friendly finance cards"
+                        : mode === "table"
+                          ? "Compact detailed rows"
+                          : "Balances and payment progress"}
+                    </small>
                   </div>
-                )}
-              </div>
-            </section>
-
-            <section className="cfees-drawer-section">
-              <h3>Payments</h3>
-              <div className="cfees-line-list">
-                {selectedStatement.payments.map((payment) => (
-                  <div key={`fee-payment-${payment.id}`}>
-                    <span>{payment.date || payment.paidAt || "Payment"} · {payment.method}</span>
-                    <strong>{money(payment.amount, selectedStatement.currencySymbol, selectedStatement.currencyCode)}</strong>
-                  </div>
-                ))}
-
-                {!selectedStatement.payments.length && selectedStatement.fallbackPayments.map((payment) => (
-                  <div key={`old-payment-${payment.id}`}>
-                    <span>{payment.date || "Payment"} · {payment.method}</span>
-                    <strong>{money(payment.amount, selectedStatement.currencySymbol, selectedStatement.currencyCode)}</strong>
-                  </div>
-                ))}
-
-                {!selectedStatement.payments.length && !selectedStatement.fallbackPayments.length && (
-                  <div>
-                    <span>No payment has been recorded for this invoice yet.</span>
-                    <strong>{money(0, selectedStatement.currencySymbol, selectedStatement.currencyCode)}</strong>
-                  </div>
-                )}
-              </div>
-            </section>
-
-            <button
-              type="button"
-              className="cfees-pay-btn"
-              disabled={selectedStatement.balance <= 0}
-              onClick={() => handlePayNow(selectedStatement)}
-            >
-              {selectedStatement.balance > 0
-                ? `Pay ${money(selectedStatement.balance, selectedStatement.currencySymbol, selectedStatement.currencyCode)}`
-                : "Fully Paid"}
-            </button>
+                  {view === mode ? <b>✓</b> : null}
+                </button>
+              ))}
+            </div>
           </aside>
         </div>
-      )}
-    </main>
-  );
-}
+      ) : null}
 
-// ======================================================
-// SMALL COMPONENTS
-// ======================================================
+      {detail ? (
+        <div className="cf-sheet-layer" onMouseDown={() => setDetail(null)}>
+          <aside
+            className="cf-sheet"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="cf-sheet-head">
+              <div>
+                <strong>
+                  {detail.kind === "invoice"
+                    ? text(detail.row.invoiceNumber, "Invoice details")
+                    : text(detail.row.receiptNumber, "Payment details")}
+                </strong>
+                <small>
+                  {detail.kind === "invoice"
+                    ? "Invoice items and balance"
+                    : "Payment and receipt information"}
+                </small>
+              </div>
+              <button onClick={() => setDetail(null)}>×</button>
+            </div>
 
-function SummaryCard({
-  label,
-  value,
-  icon,
-  positive = false,
-  warning = false,
-  danger = false,
-}: {
-  label: string;
-  value: string | number;
-  icon: string;
-  positive?: boolean;
-  warning?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <article className={`cfees-summary-card ${positive ? "positive" : ""} ${warning ? "warning" : ""} ${danger ? "danger" : ""}`}>
-      <div className="cfees-summary-icon">{icon}</div>
-      <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
-      </div>
-    </article>
-  );
-}
-
-function BreakdownSection({
-  title,
-  total,
-  items,
-  tone,
-  currencyCode,
-  currencySymbol,
-}: {
-  title: string;
-  total: number;
-  items: Breakdown[];
-  tone: "green" | "blue" | "purple" | "orange";
-  currencyCode: string;
-  currencySymbol: string;
-}) {
-  return (
-    <section className="cfees-section">
-      <div className="cfees-section-head">
-        <div>
-          <p>Analytical View</p>
-          <h3>{title}</h3>
+            {detail.kind === "invoice" ? (
+              <>
+                <div className="cf-detail-summary">
+                  <div>
+                    <small>Total</small>
+                    <strong>
+                      {money(
+                        detail.row.total,
+                        detail.row.currencyCode || currency.code,
+                      )}
+                    </strong>
+                  </div>
+                  <div>
+                    <small>Paid</small>
+                    <strong>
+                      {money(
+                        detail.row.amountPaidValue,
+                        detail.row.currencyCode || currency.code,
+                      )}
+                    </strong>
+                  </div>
+                  <div>
+                    <small>Balance</small>
+                    <strong>
+                      {money(
+                        detail.row.balanceValue,
+                        detail.row.currencyCode || currency.code,
+                      )}
+                    </strong>
+                  </div>
+                </div>
+                <div className="cf-detail-list">
+                  {invoiceItemsFor(idOf(detail.row)).length ? (
+                    invoiceItemsFor(idOf(detail.row)).map((item) => (
+                      <div key={idOf(item)}>
+                        <span>
+                          <strong>{text(item.name, "Fee item")}</strong>
+                          <small>{text(item.description)}</small>
+                        </span>
+                        <b>
+                          {money(
+                            item.amount,
+                            item.currencyCode ||
+                              detail.row.currencyCode ||
+                              currency.code,
+                          )}
+                        </b>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="cf-muted">
+                      No separate invoice items were stored for this invoice.
+                    </p>
+                  )}
+                </div>
+                <div className="cf-meta-list">
+                  <div>
+                    <span>Status</span>
+                    <Chip tone={statusTone(detail.row.statusValue)}>
+                      {statusLabel(detail.row.statusValue)}
+                    </Chip>
+                  </div>
+                  <div>
+                    <span>Issued</span>
+                    <strong>{dateLabel(detail.row.issueDate)}</strong>
+                  </div>
+                  <div>
+                    <span>Due</span>
+                    <strong>{dateLabel(detail.row.dueDate)}</strong>
+                  </div>
+                  <div>
+                    <span>Class</span>
+                    <strong>{detail.row.className}</strong>
+                  </div>
+                </div>
+                {detail.row.balanceValue > 0 ? (
+                  <div className="cf-sheet-actions single">
+                    <button className="primary" onClick={paymentPlaceholder}>
+                      Pay outstanding balance
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="cf-meta-list cf-payment-detail">
+                <div>
+                  <span>Amount</span>
+                  <strong>
+                    {money(
+                      detail.row.amount,
+                      detail.row.currencyCode || currency.code,
+                    )}
+                  </strong>
+                </div>
+                <div>
+                  <span>Status</span>
+                  <Chip tone={statusTone(detail.row.status)}>
+                    {statusLabel(detail.row.status)}
+                  </Chip>
+                </div>
+                <div>
+                  <span>Method</span>
+                  <strong>{statusLabel(detail.row.method)}</strong>
+                </div>
+                <div>
+                  <span>Date</span>
+                  <strong>{dateLabel(detail.row.paidAt || detail.row.date)}</strong>
+                </div>
+                <div>
+                  <span>Receipt</span>
+                  <strong>{text(detail.row.receiptNumber, "Not issued")}</strong>
+                </div>
+                <div>
+                  <span>Reference</span>
+                  <strong>
+                    {text(
+                      detail.row.providerReference ||
+                        detail.row.referenceNumber,
+                      "Not available",
+                    )}
+                  </strong>
+                </div>
+              </div>
+            )}
+          </aside>
         </div>
-        <Chip tone="gray">{items.length} group(s)</Chip>
-      </div>
+      ) : null}
 
-      <div className="cfees-breakdown-grid">
-        {items.map((item) => (
-          <article key={item.name} className="cfees-breakdown-card">
-            <div className="cfees-breakdown-top">
-              <strong>{item.name}</strong>
-              <Chip tone={tone}>{money(item.amount, currencySymbol, currencyCode)}</Chip>
+      {statusOpen ? (
+        <div className="cf-sheet-layer" onMouseDown={() => setStatusOpen(false)}>
+          <aside
+            className="cf-sheet cf-short-sheet"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="cf-sheet-head">
+              <div>
+                <strong>Fee data status</strong>
+                <small>Offline-first parent view</small>
+              </div>
+              <button onClick={() => setStatusOpen(false)}>×</button>
             </div>
-
-            <div className="cfees-bar-track">
-              <div style={{ width: `${percentage(item.amount, total)}%` }} />
+            <div className="cf-status-panel">
+              <span />
+              <div>
+                <strong>Available on this device</strong>
+                <p>
+                  Invoices and payment history are read from the latest
+                  synchronized local school data.
+                </p>
+              </div>
             </div>
+          </aside>
+        </div>
+      ) : null}
 
-            <div className="cfees-chip-row">
-              <Chip tone="gray">{item.count} item(s)</Chip>
-              <Chip tone="gray">{percentage(item.amount, total)}%</Chip>
-            </div>
-          </article>
-        ))}
+      {toast ? <div className="cf-toast">{toast}</div> : null}
 
-        {!items.length && <EmptyCard text={`No ${title.toLowerCase()} available for the selected filters.`} />}
-      </div>
-    </section>
-  );
-}
-
-function Chip({ children, tone = "gray" }: { children: React.ReactNode; tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple" }) {
-  return <span className={`cfees-chip ${tone}`}>{children}</span>;
-}
-
-function MiniStat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="cfees-mini-stat">
-      <strong>{value}</strong>
-      <span>{label}</span>
+      <style jsx>{styles}</style>
     </div>
   );
 }
 
-function EmptyCard({ text }: { text: string }) {
-  return (
-    <section className="cfees-empty-card">
-      <div className="cfees-empty-icon">💳</div>
-      <h3>No fee data</h3>
-      <p>{text}</p>
-    </section>
-  );
-}
-
-// ======================================================
-// CSS
-// ======================================================
-
-const css = `
-@keyframes cfeesSpin { to { transform: rotate(360deg); } }
-
-.cfees-page {
-  min-height: 100dvh;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  padding: 8px;
-  padding-bottom: max(28px, env(safe-area-inset-bottom));
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--cfees-primary) 10%, transparent), transparent 34rem),
-    var(--bg, #f8fafc);
-  color: var(--text, #0f172a);
-  font-family: var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  font-size: var(--font-size, 16px);
-  overflow-x: hidden;
-}
-
-.cfees-page *,
-.cfees-page *::before,
-.cfees-page *::after {
-  box-sizing: border-box;
-}
-
-.cfees-page button,
-.cfees-page input,
-.cfees-page select {
-  font: inherit;
-  max-width: 100%;
-}
-
-.cfees-page input,
-.cfees-page select {
-  width: 100%;
-  min-height: 43px;
-  border: 1px solid var(--input-border, var(--border, rgba(148,163,184,.28)));
-  border-radius: 15px;
-  padding: 0 12px;
-  background: var(--input-bg, var(--surface, #fff));
-  color: var(--input-text, var(--text, #0f172a));
-  outline: none;
-  font-weight: 750;
-}
-
-.cfees-page input:focus,
-.cfees-page select:focus {
-  border-color: var(--cfees-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--cfees-primary) 12%, transparent);
-}
-
-.cfees-state-card {
-  min-height: min(420px, calc(100dvh - 32px));
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 10px;
-  width: min(460px, 100%);
-  margin: 0 auto;
-  padding: 22px;
-  border-radius: 28px;
-  background: var(--card, var(--surface, #fff));
-  border: 1px solid var(--border, rgba(148,163,184,.22));
-  box-shadow: var(--shell-shadow, 0 24px 60px rgba(15,23,42,.08));
-  text-align: center;
-}
-
-.cfees-state-card h2 {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: clamp(18px, 5vw, 24px);
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.cfees-state-card p {
-  max-width: 34rem;
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.cfees-spinner {
-  width: 38px;
-  height: 38px;
-  border-radius: 999px;
-  border: 4px solid color-mix(in srgb, var(--cfees-primary) 18%, transparent);
-  border-top-color: var(--cfees-primary);
-  animation: cfeesSpin .8s linear infinite;
-}
-
-.cfees-hero {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--cfees-primary) 16%, transparent), transparent 20rem),
-    linear-gradient(135deg, var(--card, var(--surface, #fff)), color-mix(in srgb, var(--cfees-primary) 7%, var(--card, #fff)) 72%);
-  border: 1px solid var(--border, rgba(148,163,184,.22));
-  box-shadow: 0 18px 46px rgba(15,23,42,.07);
-  overflow: hidden;
-}
-
-.cfees-hero-left {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1 1 auto;
-}
-
-.cfees-hero-icon {
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 18px;
-  background: var(--cfees-primary);
-  color: #fff;
-  box-shadow: 0 12px 26px color-mix(in srgb, var(--cfees-primary) 28%, transparent);
-  font-size: 22px;
-}
-
-.cfees-title-wrap {
-  min-width: 0;
-}
-
-.cfees-title-wrap p,
-.cfees-title-wrap h2,
-.cfees-title-wrap span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cfees-title-wrap p {
-  margin: 0 0 2px;
-  color: var(--cfees-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.cfees-title-wrap h2 {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: clamp(20px, 5vw, 30px);
-  font-weight: 1000;
-  letter-spacing: -.06em;
-  line-height: 1;
-}
-
-.cfees-title-wrap span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.cfees-hero-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.cfees-ghost-btn,
-.cfees-table-btn,
-.cfees-action-row button,
-.cfees-pay-btn {
-  min-height: 42px;
-  border-radius: 999px;
-  padding: 0 14px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.cfees-ghost-btn,
-.cfees-table-btn,
-.cfees-action-row button {
-  border: 1px solid var(--border, rgba(148,163,184,.24));
-  background: var(--card, var(--surface, #fff));
-  color: var(--text, #0f172a);
-}
-
-.cfees-action-row button.primary,
-.cfees-pay-btn {
-  border: 0;
-  background: var(--cfees-primary);
-  color: #fff;
-  box-shadow: 0 14px 32px color-mix(in srgb, var(--cfees-primary) 26%, transparent);
-}
-
-.cfees-action-row button:disabled,
-.cfees-pay-btn:disabled {
-  opacity: .55;
-  cursor: not-allowed;
-}
-
-.cfees-context-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.cfees-context-grid article {
-  min-width: 0;
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 12px;
-  border-radius: 22px;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--cfees-primary) 10%, var(--card, var(--surface, #fff))), var(--card, var(--surface, #fff)) 70%);
-  border: 1px solid var(--border, rgba(148,163,184,.2));
-  box-shadow: 0 12px 28px rgba(15,23,42,.04);
-}
-
-.cfees-context-icon {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 16px;
-  background: var(--cfees-primary);
-  color: #fff;
-  font-size: 20px;
-}
-
-.cfees-context-grid article > div:last-child {
-  min-width: 0;
-}
-
-.cfees-context-grid span {
-  display: block;
-  color: var(--cfees-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.cfees-context-grid strong {
-  display: block;
-  margin-top: 3px;
-  color: var(--text, #0f172a);
-  font-size: 16px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.cfees-context-grid p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.cfees-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.cfees-summary-card,
-.cfees-toolbar,
-.cfees-filter-card,
-.cfees-table-card,
-.cfees-breakdown-card,
-.cfees-child-card,
-.cfees-card,
-.cfees-empty-card {
-  background: var(--card, var(--surface, #fff));
-  border: 1px solid var(--border, rgba(148,163,184,.2));
-  box-shadow: 0 12px 28px rgba(15,23,42,.045);
-}
-
-.cfees-summary-card {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 22px;
-  overflow: hidden;
-}
-
-.cfees-summary-card.positive {
-  background: linear-gradient(135deg, rgba(34,197,94,.10), var(--card, var(--surface, #fff)));
-}
-
-.cfees-summary-card.warning {
-  background: linear-gradient(135deg, rgba(245,158,11,.10), var(--card, var(--surface, #fff)));
-}
-
-.cfees-summary-card.danger {
-  background: linear-gradient(135deg, rgba(239,68,68,.10), var(--card, var(--surface, #fff)));
-}
-
-.cfees-summary-icon {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--cfees-primary) 12%, var(--surface, #fff));
-}
-
-.cfees-summary-card div:last-child {
-  min-width: 0;
-}
-
-.cfees-summary-card strong,
-.cfees-summary-card span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cfees-summary-card strong {
-  color: var(--text, #0f172a);
-  font-size: 19px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.cfees-summary-card span {
-  margin-top: 2px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.cfees-toolbar,
-.cfees-filter-card,
-.cfees-table-card {
-  margin-top: 10px;
-  padding: 10px;
-  border-radius: 24px;
-}
-
-.cfees-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.cfees-view-tabs {
-  display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  width: min(390px, 100%);
-  padding: 4px;
-  border-radius: 999px;
-  background: var(--shell-section-bg, color-mix(in srgb, var(--cfees-primary) 7%, var(--surface, #fff)));
-  border: 1px solid var(--border, rgba(148,163,184,.18));
-}
-
-.cfees-view-tabs button {
-  min-width: 0;
-  min-height: 35px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 9px;
-  background: transparent;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.cfees-view-tabs button.active {
-  background: var(--cfees-primary);
-  color: #fff;
-}
-
-.cfees-filter-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-}
-
-.cfees-section {
-  margin-top: 16px;
-}
-
-.cfees-section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.cfees-section-head p {
-  margin: 0;
-  color: var(--cfees-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.cfees-section-head h3 {
-  margin: 2px 0 0;
-  color: var(--text, #0f172a);
-  font-size: 19px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.cfees-list,
-.cfees-breakdown-grid,
-.cfees-child-grid {
-  display: grid;
-  gap: 10px;
-}
-
-.cfees-card,
-.cfees-breakdown-card,
-.cfees-child-card,
-.cfees-empty-card {
-  min-width: 0;
-  border-radius: 24px;
-  padding: 13px;
-  overflow: hidden;
-}
-
-.cfees-card {
-  background:
-    linear-gradient(135deg, var(--card, var(--surface, #fff)), color-mix(in srgb, var(--cfees-primary) 4%, var(--card, #fff)));
-}
-
-.cfees-card-top,
-.cfees-child-top {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.cfees-card-icon,
-.cfees-child-avatar {
-  width: 56px;
-  height: 56px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 19px;
-  background: var(--cfees-primary);
-  color: #fff;
-  font-size: 22px;
-  font-weight: 1000;
-  box-shadow: 0 12px 24px rgba(15,23,42,.12);
-  overflow: hidden;
-}
-
-.cfees-child-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.cfees-card-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.cfees-card-main h3,
-.cfees-child-top strong {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: 18px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.cfees-card-main p,
-.cfees-child-top span {
-  display: block;
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-  line-height: 1.4;
-}
-
-.cfees-chip-row,
-.cfees-action-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.cfees-chip {
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  min-height: 25px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 950;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-transform: capitalize;
-}
-
-.cfees-chip.green { background: rgba(34,197,94,.14); color: #22c55e; }
-.cfees-chip.red { background: rgba(239,68,68,.14); color: #ef4444; }
-.cfees-chip.blue { background: rgba(59,130,246,.15); color: #60a5fa; }
-.cfees-chip.gray { background: color-mix(in srgb, var(--muted, #64748b) 14%, transparent); color: var(--muted, #64748b); }
-.cfees-chip.orange { background: rgba(245,158,11,.16); color: #f59e0b; }
-.cfees-chip.purple { background: rgba(147,51,234,.15); color: #a855f7; }
-
-.cfees-mini-grid,
-.cfees-statement-summary {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
-  margin-top: 10px;
-}
-
-.cfees-mini-stat {
-  min-width: 0;
-  padding: 9px;
-  border-radius: 17px;
-  background: color-mix(in srgb, var(--muted, #64748b) 9%, transparent);
-  border: 1px solid var(--border, rgba(148,163,184,.13));
-  overflow: hidden;
-}
-
-.cfees-mini-stat strong,
-.cfees-mini-stat span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cfees-mini-stat strong {
-  color: var(--text, #0f172a);
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.cfees-mini-stat span {
-  margin-top: 2px;
-  color: var(--muted, #64748b);
-  font-size: 10px;
-  font-weight: 850;
-}
-
-.cfees-breakdown-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.cfees-breakdown-card strong {
-  min-width: 0;
-  display: block;
-  color: var(--text, #0f172a);
-  font-size: 16px;
-  font-weight: 1000;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cfees-bar-track {
-  height: 8px;
-  margin-top: 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted, #64748b) 14%, transparent);
-  overflow: hidden;
-}
-
-.cfees-bar-track div {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--cfees-primary);
-}
-
-.cfees-table-scroll {
-  width: 100%;
-  max-width: 100%;
-  overflow-x: auto;
-  border-radius: 18px;
-  border: 1px solid var(--border, rgba(148,163,184,.18));
-}
-
-.cfees-table-scroll table {
-  width: 100%;
-  min-width: 980px;
-  border-collapse: collapse;
-  background: var(--card, var(--surface, #fff));
-}
-
-.cfees-table-scroll th,
-.cfees-table-scroll td {
-  padding: 10px;
-  border-bottom: 1px solid var(--border, rgba(148,163,184,.16));
-  text-align: left;
-  vertical-align: top;
-  color: var(--text, #0f172a);
-  font-size: 13px;
-}
-
-.cfees-table-scroll th {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 1000;
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  background: color-mix(in srgb, var(--cfees-primary) 6%, var(--card, #fff));
-}
-
-.cfees-table-scroll td strong,
-.cfees-table-scroll td span {
-  display: block;
-}
-
-.cfees-table-scroll td span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-}
-
-.cfees-empty-card {
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 8px;
-  min-height: 190px;
-  text-align: center;
-  border-style: dashed;
-}
-
-.cfees-empty-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--cfees-primary) 12%, var(--surface, #fff));
-  font-size: 28px;
-}
-
-.cfees-empty-card h3 {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: 18px;
-  font-weight: 1000;
-}
-
-.cfees-empty-card p {
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.cfees-drawer-layer {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-}
-
-.cfees-drawer-overlay {
-  position: absolute;
-  inset: 0;
-  border: 0;
-  background: rgba(15,23,42,.52);
-}
-
-.cfees-drawer {
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: min(94vw, 620px);
-  max-width: 100vw;
-  overflow-y: auto;
-  overflow-x: hidden;
-  background: var(--card, var(--surface, #fff));
-  color: var(--text, #0f172a);
-  padding: 14px;
-  box-shadow: var(--shell-shadow, -24px 0 70px rgba(15,23,42,.22));
-}
-
-.cfees-drawer-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 0 12px;
-  background: var(--card, var(--surface, #fff));
-}
-
-.cfees-drawer-head div {
-  min-width: 0;
-}
-
-.cfees-drawer-head p {
-  margin: 0;
-  color: var(--cfees-primary);
-  font-size: 11px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.cfees-drawer-head h2,
-.cfees-drawer-head span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.cfees-drawer-head h2 {
-  margin: 2px 0 0;
-  color: var(--text, #0f172a);
-  font-size: 22px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.cfees-drawer-head span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.cfees-drawer-head button {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  border: 1px solid var(--border, rgba(148,163,184,.24));
-  border-radius: 15px;
-  background: var(--surface, #fff);
-  color: var(--text, #0f172a);
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.cfees-drawer-section {
-  margin-top: 16px;
-}
-
-.cfees-drawer-section h3 {
-  margin: 0 0 10px;
-  color: var(--text, #0f172a);
-  font-size: 16px;
-  font-weight: 1000;
-}
-
-.cfees-line-list {
-  display: grid;
-  gap: 7px;
-}
-
-.cfees-line-list div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--muted, #64748b) 9%, transparent);
-  border: 1px solid var(--border, rgba(148,163,184,.14));
-}
-
-.cfees-line-list span {
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.cfees-line-list strong {
-  color: var(--text, #0f172a);
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.cfees-pay-btn {
-  width: 100%;
-  margin-top: 16px;
-}
-
-
-.cfees-checkout-layer {
-  position: fixed;
-  inset: 0;
-  z-index: 95;
-}
-
-.cfees-checkout-overlay {
-  position: absolute;
-  inset: 0;
-  border: 0;
-  background: rgba(15, 23, 42, .58);
-}
-
-.cfees-checkout-modal {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(94vw, 620px);
-  max-height: min(92dvh, 760px);
-  transform: translate(-50%, -50%);
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 14px;
-  border-radius: 28px;
-  background: var(--card, var(--surface, #fff));
-  color: var(--text, #0f172a);
-  border: 1px solid var(--border, rgba(148,163,184,.24));
-  box-shadow: var(--shell-shadow, 0 28px 80px rgba(15,23,42,.28));
-}
-
-.cfees-checkout-head {
-  position: sticky;
-  top: -14px;
-  z-index: 2;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 0 12px;
-  background: var(--card, var(--surface, #fff));
-}
-
-.cfees-checkout-head div {
-  min-width: 0;
-}
-
-.cfees-checkout-head p {
-  margin: 0;
-  color: var(--cfees-primary);
-  font-size: 11px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.cfees-checkout-head h2,
-.cfees-checkout-head span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.cfees-checkout-head h2 {
-  margin: 2px 0 0;
-  color: var(--text, #0f172a);
-  font-size: 23px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.cfees-checkout-head span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.cfees-checkout-head button {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  border: 1px solid var(--border, rgba(148,163,184,.24));
-  border-radius: 15px;
-  background: var(--surface, #fff);
-  color: var(--text, #0f172a);
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.cfees-checkout-amount {
-  padding: 14px;
-  border-radius: 22px;
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--cfees-primary) 18%, transparent), transparent 16rem),
-    color-mix(in srgb, var(--cfees-primary) 8%, var(--card, #fff));
-  border: 1px solid color-mix(in srgb, var(--cfees-primary) 20%, var(--border, rgba(148,163,184,.2)));
-}
-
-.cfees-checkout-amount span,
-.cfees-checkout-amount small {
-  display: block;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.cfees-checkout-amount strong {
-  display: block;
-  margin: 4px 0;
-  color: var(--text, #0f172a);
-  font-size: clamp(24px, 8vw, 36px);
-  font-weight: 1000;
-  letter-spacing: -.07em;
-}
-
-.cfees-checkout-section {
-  margin-top: 12px;
-  padding: 12px;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--muted, #64748b) 7%, transparent);
-  border: 1px solid var(--border, rgba(148,163,184,.16));
-}
-
-.cfees-checkout-section-head h3 {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: 15px;
-  font-weight: 1000;
-}
-
-.cfees-checkout-section-head p {
-  margin: 3px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.cfees-method-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.cfees-method-grid button {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 54px;
-  padding: 8px;
-  border-radius: 18px;
-  border: 1px solid var(--border, rgba(148,163,184,.22));
-  background: var(--card, var(--surface, #fff));
-  color: var(--text, #0f172a);
-  cursor: pointer;
-}
-
-.cfees-method-grid button.active {
-  border-color: var(--cfees-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--cfees-primary) 12%, transparent);
-}
-
-.cfees-method-grid button span {
-  width: 34px;
-  height: 34px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 13px;
-  background: var(--cfees-primary);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 1000;
-}
-
-.cfees-method-grid button strong {
-  min-width: 0;
-  color: var(--text, #0f172a);
-  font-size: 13px;
-  font-weight: 1000;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cfees-checkout-two {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-}
-
-.cfees-checkout-field {
-  display: grid;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.cfees-checkout-field span {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 950;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-
-.cfees-checkout-alert {
-  margin-top: 12px;
-  padding: 11px;
-  border-radius: 16px;
-  font-size: 12px;
-  font-weight: 850;
-  line-height: 1.5;
-}
-
-.cfees-checkout-alert.error {
-  background: rgba(239,68,68,.12);
-  color: #ef4444;
-  border: 1px solid rgba(239,68,68,.18);
-}
-
-.cfees-checkout-alert.success {
-  background: rgba(34,197,94,.12);
-  color: #22c55e;
-  border: 1px solid rgba(34,197,94,.18);
-}
-
-.cfees-checkout-submit {
-  width: 100%;
-  min-height: 46px;
-  margin-top: 12px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--cfees-primary);
-  color: #fff;
-  font-weight: 1000;
-  cursor: pointer;
-  box-shadow: 0 14px 32px color-mix(in srgb, var(--cfees-primary) 26%, transparent);
-}
-
-.cfees-checkout-submit:disabled {
-  opacity: .55;
-  cursor: not-allowed;
-}
-
-.cfees-checkout-footnote {
-  margin: 10px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  line-height: 1.5;
-  text-align: center;
-}
-
-
-@media (min-width: 680px) {
-  .cfees-page { padding: 12px; }
-  .cfees-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .cfees-filter-card { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cfees-context-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-@media (min-width: 1040px) {
-  .cfees-page { padding: 16px; }
-  .cfees-summary-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .cfees-filter-card { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-  .cfees-list,
-  .cfees-breakdown-grid,
-  .cfees-child-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-@media (max-width: 520px) {
-  .cfees-page { padding: 6px; }
-  .cfees-hero { flex-direction: column; border-radius: 22px; padding: 10px; }
-  .cfees-hero-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
-  .cfees-ghost-btn { width: 100%; }
-  .cfees-summary-grid { gap: 6px; }
-  .cfees-summary-card { padding: 10px; border-radius: 19px; }
-  .cfees-summary-card strong { font-size: 16px; }
-  .cfees-toolbar { align-items: stretch; flex-direction: column; border-radius: 20px; }
-  .cfees-view-tabs { width: 100%; }
-  .cfees-card,
-  .cfees-empty-card,
-  .cfees-breakdown-card,
-  .cfees-child-card { border-radius: 20px; padding: 11px; }
-  .cfees-card-icon,
-  .cfees-child-avatar { width: 52px; height: 52px; flex-basis: 52px; }
-  .cfees-mini-grid,
-  .cfees-statement-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cfees-action-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cfees-action-row button { width: 100%; padding: 0 8px; }
-  .cfees-drawer { width: min(96vw, 620px); padding: 12px; }
-  .cfees-checkout-modal { width: min(96vw, 620px); border-radius: 22px; padding: 12px; }
-  .cfees-method-grid { grid-template-columns: minmax(0, 1fr); }
-}
-
+const styles = `
+  .cf-page{--surface:var(--card-background,#fff);--border:var(--border-color,#e5e7eb);--text:var(--text-color,#111827);--muted:var(--muted-color,#6b7280);--soft:var(--soft-background,#f8fafc);min-height:100%;padding:10px 12px 34px;color:var(--text);background:var(--page-background,transparent)}
+  .cf-loading,.cf-state{min-height:55vh;display:grid;place-items:center;align-content:center;gap:10px;text-align:center}.cf-spinner{width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:cf-spin .8s linear infinite}@keyframes cf-spin{to{transform:rotate(360deg)}}.cf-state-icon{width:44px;height:44px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--primary) 12%,var(--soft));color:var(--primary);font-weight:900;font-size:20px}.cf-state h2{margin:5px 0 0;font-size:15px}.cf-state p{margin:0;color:var(--muted);font-size:10px}
+  .cf-toolbar{position:sticky;top:0;z-index:20;display:grid;grid-template-columns:minmax(0,1fr) 40px 40px;gap:7px;padding:4px 0 10px;background:var(--page-background,var(--surface))}.cf-search{height:40px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}.cf-search>span{font-size:21px;color:var(--muted)}.cf-search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font:inherit;font-size:12px}.cf-search button{border:0;background:transparent;color:var(--muted);font-size:19px}.cf-icon-btn{position:relative;display:grid;place-items:center;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-size:21px}.cf-icon-btn.active{border-color:var(--primary);color:var(--primary)}.cf-slider-icon{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8}.cf-badge{position:absolute;right:-4px;top:-5px;min-width:17px;height:17px;padding:0 4px;display:grid;place-items:center;border-radius:10px;background:var(--primary);color:#fff;font-size:9px;font-weight:800}
+  .cf-child-strip{display:flex;gap:7px;overflow:auto;padding:1px 0 9px;scrollbar-width:none}.cf-child-strip::-webkit-scrollbar{display:none}.cf-child-strip>button{flex:0 0 auto;display:flex;align-items:center;gap:7px;padding:6px 9px 6px 6px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);text-align:left}.cf-child-strip>button.selected{border-color:var(--primary);box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 24%,transparent)}.cf-child-strip strong,.cf-child-strip small{display:block}.cf-child-strip strong{font-size:11px}.cf-child-strip small{font-size:9px;color:var(--muted);margin-top:1px}.cf-mini-avatar{width:28px;height:28px;display:grid;place-items:center;overflow:hidden;border-radius:9px;background:color-mix(in srgb,var(--primary) 13%,var(--soft));color:var(--primary);font-size:12px;font-weight:800}.cf-mini-avatar img,.cf-avatar img{width:100%;height:100%;object-fit:cover}
+  .cf-child-card{display:grid;grid-template-columns:52px minmax(0,1fr) auto;align-items:center;gap:10px;padding:12px;border:1px solid var(--border);border-radius:16px;background:var(--surface)}.cf-avatar{width:52px;height:52px;display:grid;place-items:center;overflow:hidden;border-radius:15px;background:color-mix(in srgb,var(--primary) 14%,var(--soft));color:var(--primary);font-size:20px;font-weight:900}.cf-child-copy{min-width:0}.cf-child-copy>div{display:flex;align-items:center;gap:7px}.cf-child-copy h1{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px}.cf-child-copy p{margin:4px 0 0;color:var(--muted);font-size:9px}.cf-sync-dot{width:8px;height:8px;padding:0;border:0;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px color-mix(in srgb,#22c55e 15%,transparent)}.cf-balance-block{text-align:right}.cf-balance-block small,.cf-balance-block strong{display:block}.cf-balance-block small{font-size:8px;color:var(--muted)}.cf-balance-block strong{margin-top:3px;font-size:15px;color:#dc2626}
+  .cf-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.cf-summary-grid article{display:flex;align-items:center;gap:7px;min-width:0;padding:9px;border:1px solid var(--border);border-radius:13px;background:var(--surface)}.cf-summary-grid article>span{width:27px;height:27px;flex:0 0 auto;display:grid;place-items:center;border-radius:8px;font-weight:900}.cf-summary-grid strong,.cf-summary-grid small{display:block}.cf-summary-grid strong{overflow:hidden;text-overflow:ellipsis;font-size:11px}.cf-summary-grid small{margin-top:2px;color:var(--muted);font-size:8px;white-space:nowrap}.green{background:color-mix(in srgb,#22c55e 13%,var(--surface));color:#15803d}.red{background:color-mix(in srgb,#ef4444 13%,var(--surface));color:#dc2626}.orange{background:color-mix(in srgb,#f59e0b 15%,var(--surface));color:#b45309}.blue{background:color-mix(in srgb,#3b82f6 13%,var(--surface));color:#2563eb}
+  .cf-tabs{display:flex;gap:4px;margin:0 0 8px;padding:3px;border:1px solid var(--border);border-radius:12px;background:var(--soft)}.cf-tabs button{flex:1;height:32px;border:0;border-radius:9px;background:transparent;color:var(--muted);font-size:10px;font-weight:800}.cf-tabs button.active{background:var(--surface);color:var(--text);box-shadow:0 1px 4px rgba(15,23,42,.08)}.cf-tabs span{display:inline-grid;place-items:center;min-width:18px;height:18px;margin-left:4px;padding:0 5px;border-radius:9px;background:var(--border);font-size:8px}
+  .cf-card-grid{display:grid;gap:7px}.cf-invoice-card,.cf-payment-card{border:1px solid var(--border);border-radius:14px;background:var(--surface);cursor:pointer}.cf-invoice-card{padding:11px}.cf-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.cf-card-top strong,.cf-card-top small{display:block}.cf-card-top strong{font-size:12px}.cf-card-top small{margin-top:3px;color:var(--muted);font-size:8px}.cf-chip{display:inline-flex;align-items:center;justify-content:center;padding:3px 7px;border-radius:999px;font-size:8px;font-weight:800;white-space:nowrap}.cf-chip.green{background:color-mix(in srgb,#22c55e 13%,var(--surface));color:#15803d}.cf-chip.red{background:color-mix(in srgb,#ef4444 13%,var(--surface));color:#dc2626}.cf-chip.orange{background:color-mix(in srgb,#f59e0b 15%,var(--surface));color:#b45309}.cf-chip.blue{background:color-mix(in srgb,#3b82f6 13%,var(--surface));color:#2563eb}.cf-chip.gray{background:var(--soft);color:var(--muted)}.cf-money-row{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:11px;padding:9px;border-radius:11px;background:var(--soft)}.cf-money-row small,.cf-money-row strong{display:block}.cf-money-row small{font-size:8px;color:var(--muted)}.cf-money-row strong{margin-top:3px;font-size:10px}.cf-money-row strong.danger{color:#dc2626}.cf-card-foot{display:flex;justify-content:space-between;gap:8px;margin-top:9px;color:var(--muted);font-size:8px}.cf-payment-card{display:flex;align-items:center;gap:10px;padding:10px}.cf-payment-icon{width:36px;height:36px;flex:0 0 auto;display:grid;place-items:center;border-radius:11px;background:color-mix(in srgb,#22c55e 13%,var(--surface));color:#15803d;font-weight:900}.cf-payment-main{flex:1;min-width:0}.cf-payment-main>div{display:flex;justify-content:space-between;align-items:center;gap:8px}.cf-payment-main>div>strong{font-size:12px}.cf-payment-main p,.cf-payment-main small{display:block;margin:0;color:var(--muted);font-size:8px}.cf-payment-main p{margin-top:4px}.cf-payment-main small{margin-top:3px}
+  .cf-table-shell{overflow:hidden;border:1px solid var(--border);border-radius:14px;background:var(--surface)}.cf-table-title{padding:10px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:800}.cf-table-scroll{overflow:auto}.cf-table-shell table{width:100%;min-width:690px;border-collapse:collapse}.cf-table-shell th,.cf-table-shell td{padding:9px 11px;border-bottom:1px solid var(--border);text-align:left;font-size:9px}.cf-table-shell th{position:sticky;top:0;background:var(--soft);color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.04em}.cf-table-shell tr{cursor:pointer}.cf-table-shell tbody tr:last-child td{border-bottom:0}.cf-table-shell td strong,.cf-table-shell td small{display:block}.cf-table-shell td small{margin-top:2px;color:var(--muted);font-size:8px}
+  .cf-analytics{display:grid;gap:8px}.cf-analytics-card{padding:12px;border:1px solid var(--border);border-radius:15px;background:var(--surface)}.cf-overview{display:flex;align-items:center;justify-content:space-between}.cf-overview>div:first-child span,.cf-overview>div:first-child strong,.cf-overview>div:first-child small{display:block}.cf-overview>div:first-child span{font-size:9px;color:var(--muted)}.cf-overview>div:first-child strong{margin-top:2px;font-size:25px}.cf-overview>div:first-child small{font-size:8px;color:var(--muted)}.cf-donut{position:relative;width:76px;height:76px;display:grid;place-items:center;border-radius:50%;background:conic-gradient(var(--primary) var(--value),var(--border) 0)}.cf-donut:after{content:"";position:absolute;inset:8px;border-radius:50%;background:var(--surface)}.cf-donut span{position:relative;z-index:1;font-size:11px;font-weight:900}.cf-analytics-title strong,.cf-analytics-title small{display:block}.cf-analytics-title strong{font-size:12px}.cf-analytics-title small{margin-top:2px;color:var(--muted);font-size:8px}.cf-metric-list{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}.cf-metric-list div{padding:10px;border:1px solid var(--border);border-radius:11px;background:var(--soft)}.cf-metric-list span,.cf-metric-list strong{display:block}.cf-metric-list span{font-size:8px;color:var(--muted)}.cf-metric-list strong{margin-top:3px;font-size:16px}
+  .cf-empty{display:grid;justify-items:center;text-align:center;padding:44px 18px;border:1px dashed var(--border);border-radius:16px;background:var(--surface)}.cf-empty>div{width:44px;height:44px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--primary) 12%,var(--soft));color:var(--primary);font-size:18px;font-weight:900}.cf-empty h3{margin:10px 0 3px;font-size:14px}.cf-empty p{max-width:380px;margin:0;color:var(--muted);font-size:9px;line-height:1.55}
+  .cf-sheet-layer{position:fixed;inset:0;z-index:1000;display:flex;justify-content:flex-end;background:rgba(15,23,42,.38);backdrop-filter:blur(2px)}.cf-sheet{width:min(430px,94vw);height:100%;display:flex;flex-direction:column;background:var(--surface);box-shadow:-16px 0 40px rgba(0,0,0,.16)}.cf-short-sheet{height:auto;max-height:78vh;align-self:flex-end;border-radius:20px 0 0 0}.cf-sheet-head{display:flex;align-items:center;justify-content:space-between;padding:15px;border-bottom:1px solid var(--border)}.cf-sheet-head strong,.cf-sheet-head small{display:block}.cf-sheet-head strong{font-size:13px}.cf-sheet-head small{margin-top:2px;color:var(--muted);font-size:9px}.cf-sheet-head button{width:32px;height:32px;border:1px solid var(--border);border-radius:10px;background:var(--soft);color:var(--text);font-size:19px}.cf-sheet-body{flex:1;overflow:auto;display:grid;align-content:start;gap:12px;padding:15px}.cf-sheet-body label>span{display:block;margin-bottom:5px;color:var(--muted);font-size:9px;font-weight:700}.cf-sheet-body select{width:100%;height:40px;padding:0 10px;border:1px solid var(--border);border-radius:11px;outline:0;background:var(--surface);color:var(--text);font:inherit;font-size:10px}.cf-sheet-body select:focus{border-color:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 12%,transparent)}.cf-sheet-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px 15px;border-top:1px solid var(--border)}.cf-sheet-actions.single{grid-template-columns:1fr;margin-top:auto}.cf-sheet-actions button{height:39px;border-radius:11px;font-size:10px;font-weight:800}.cf-sheet-actions .primary{border:1px solid var(--primary);background:var(--primary);color:#fff}.cf-sheet-actions .secondary{border:1px solid var(--border);background:var(--surface);color:var(--text)}
+  .cf-view-options{display:grid;gap:7px;padding:12px}.cf-view-options button{display:grid;grid-template-columns:34px minmax(0,1fr) 20px;align-items:center;gap:9px;padding:10px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);text-align:left}.cf-view-options button.selected{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 6%,var(--surface))}.cf-view-options button>span{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:var(--soft);font-size:17px}.cf-view-options strong,.cf-view-options small{display:block}.cf-view-options strong{font-size:11px}.cf-view-options small{margin-top:2px;color:var(--muted);font-size:8px}.cf-view-options b{color:var(--primary)}
+  .cf-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:15px}.cf-detail-summary div{padding:10px;border:1px solid var(--border);border-radius:11px;background:var(--soft)}.cf-detail-summary small,.cf-detail-summary strong{display:block}.cf-detail-summary small{font-size:8px;color:var(--muted)}.cf-detail-summary strong{margin-top:3px;font-size:11px}.cf-detail-list{display:grid;gap:0;padding:0 15px}.cf-detail-list>div{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}.cf-detail-list strong,.cf-detail-list small{display:block}.cf-detail-list strong{font-size:10px}.cf-detail-list small{margin-top:2px;color:var(--muted);font-size:8px}.cf-detail-list b{font-size:10px}.cf-meta-list{display:grid;padding:10px 15px}.cf-meta-list>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)}.cf-meta-list>div:last-child{border-bottom:0}.cf-meta-list span{font-size:9px;color:var(--muted)}.cf-meta-list strong{font-size:10px;text-align:right}.cf-payment-detail{padding-top:15px}.cf-muted{color:var(--muted);font-size:9px}.cf-status-panel{display:flex;gap:11px;padding:16px}.cf-status-panel>span{width:14px;height:14px;flex:0 0 auto;margin-top:2px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 5px color-mix(in srgb,#22c55e 14%,transparent)}.cf-status-panel strong{font-size:11px}.cf-status-panel p{margin:5px 0 0;color:var(--muted);font-size:9px;line-height:1.55}.cf-toast{position:fixed;left:50%;bottom:20px;z-index:1200;transform:translateX(-50%);max-width:min(420px,90vw);padding:10px 13px;border-radius:11px;background:#111827;color:#fff;font-size:10px;box-shadow:0 12px 30px rgba(0,0,0,.22)}
+  @media(max-width:700px){.cf-page{padding-inline:9px}.cf-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cf-child-card{grid-template-columns:48px minmax(0,1fr)}.cf-avatar{width:48px;height:48px}.cf-balance-block{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;padding-top:8px;border-top:1px solid var(--border);text-align:left}.cf-metric-list{grid-template-columns:repeat(2,1fr)}.cf-short-sheet{width:100%;border-radius:20px 20px 0 0}.cf-sheet-layer{align-items:flex-end}}
+  @media(min-width:900px){.cf-page{max-width:1120px;margin:0 auto;padding-top:14px}.cf-card-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cf-analytics{grid-template-columns:1fr 1fr}.cf-short-sheet{height:100%;max-height:none;align-self:stretch;border-radius:0}}
 `;

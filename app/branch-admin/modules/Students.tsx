@@ -51,6 +51,12 @@
  * - Upload, Apply, Save, Done and Capture use the same Branch Settings primary-action values
  * - Camera, Cancel, Close and other secondary actions use the same neutral/outlined hierarchy
  * - all action colors resolve from --ba-primary so Branch Settings theme changes flow into Students
+ *
+ * Student map view:
+ * - adds Map under More without changing the compact main toolbar
+ * - maps only the already branch-scoped, searched and filtered student rows
+ * - uses shared map privacy/coordinate adapters and preserves approximate locations
+ * - clusters nearby students and lets SchoolMap own marker selection, details, and location editing
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -58,10 +64,13 @@ import { useRouter } from "next/navigation";
 import { useSettings } from "../../context/settings-context";
 import {
   db,
+  type Branch,
   type Class,
   type Organization,
+  type Parent,
   type Student,
   type StudentEnrollment,
+  type Teacher,
 } from "../../lib/db/db";
 import {
   createLocal,
@@ -91,10 +100,22 @@ import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
 import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
 import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
 import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
-type ViewMode = "cards" | "table" | "summary";
+import {
+  SchoolMap,
+  type MapCreateRequest,
+  type MapLocationUpdateRequest,
+} from "../../components/maps";
+import { genericEntityToMarker, type MapMarker } from "../../lib/maps";
+type ViewMode = "cards" | "table" | "map" | "summary";
 type ToastTone = "success" | "error" | "info";
 type StudentStatus = "active" | "graduated" | "transferred" | "withdrawn";
 type CameraField = "photo" | "coverPhoto";
+type ProximityLayer = "branch" | "student" | "teacher" | "parent";
+
+type StudentCreateDefaults = {
+  latitude?: number;
+  longitude?: number;
+};
 
 type TenantRow = {
   accountId?: string | null;
@@ -230,6 +251,19 @@ type FormState = {
   parentPhone: string;
   parentEmail: string;
   address: string;
+  latitude: string;
+  longitude: string;
+  accuracyMeters: string;
+  locationLabel: string;
+  formattedAddress: string;
+  locationType: "home" | "boarding" | "pickup_point" | "dropoff_point" | "workplace" | "other";
+  locationSource: "manual" | "device_gps" | "geocoded" | "imported";
+  locationPrecision: "exact" | "approximate" | "area_only";
+  locationCapturedAt?: number;
+  mapVisible: boolean;
+  locationConsentGiven: boolean;
+  locationConsentAt?: number;
+  locationRestricted: boolean;
   status: StudentStatus;
 };
 
@@ -261,6 +295,19 @@ const emptyForm: FormState = {
   parentPhone: "",
   parentEmail: "",
   address: "",
+  latitude: "",
+  longitude: "",
+  accuracyMeters: "",
+  locationLabel: "",
+  formattedAddress: "",
+  locationType: "home",
+  locationSource: "manual",
+  locationPrecision: "exact",
+  locationCapturedAt: undefined,
+  mapVisible: true,
+  locationConsentGiven: false,
+  locationConsentAt: undefined,
+  locationRestricted: false,
   status: "active",
 };
 
@@ -453,6 +500,9 @@ function Empty({
 export default function StudentsPage() {
   const dataRevision = useBranchTableRevision([
     "students",
+    "teachers",
+    "parents",
+    "branches",
     "classes",
     "organizations",
     "studentEnrollments",
@@ -481,6 +531,9 @@ export default function StudentsPage() {
   const [saving, setSaving] = useState(false);
 
   const [rows, setRows] = useState<Student[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [parents, setParents] = useState<Parent[]>([]);
   const resolvedMediaById = useEntityMediaUrls({
     accountId,
     ownerTable: "students",
@@ -505,6 +558,16 @@ export default function StudentsPage() {
     "all",
   );
   const [filterGender, setFilterGender] = useState("all");
+
+  // Student is the page's primary layer, so it alone is visible initially.
+  const [visibleMapLayers, setVisibleMapLayers] = useState<
+    Record<ProximityLayer, boolean>
+  >({
+    branch: false,
+    student: true,
+    teacher: false,
+    parent: false,
+  });
 
   const [filterOpen, setFilterOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -544,10 +607,22 @@ export default function StudentsPage() {
   ]);
 
   const sameTenant = (row: TenantRow) =>
-    (!row.accountId || row.accountId === accountId) &&
+    (!row.accountId || sameId(row.accountId, accountId)) &&
     (!row.schoolId || sameId(row.schoolId, schoolId)) &&
     (!row.branchId || sameId(row.branchId, branchId)) &&
     !row.isDeleted;
+
+  // Comparison layers follow the proven Owner Branches map approach:
+  // account-safe first, then tolerant school/branch matching.
+  const sameAccount = (row: TenantRow) =>
+    (!row.accountId || sameId(row.accountId, accountId)) &&
+    !row.isDeleted;
+
+  const sameSchool = (row: TenantRow) =>
+    !row.schoolId || sameId(row.schoolId, schoolId);
+
+  const sameBranch = (row: TenantRow) =>
+    !row.branchId || sameId(row.branchId, branchId);
 
   const showToast = (tone: ToastTone, message: string) => {
     setToast({ tone, message });
@@ -614,6 +689,9 @@ export default function StudentsPage() {
   const clearData = () => {
     Object.values(mediaPreviewUrls).forEach(revokeMediaObjectUrl);
     setRows([]);
+    setBranches([]);
+    setTeachers([]);
+    setParents([]);
     setClasses([]);
     setOrganizations([]);
     setEnrollments([]);
@@ -672,21 +750,31 @@ export default function StudentsPage() {
 
     try {
       setLoading(true);
-      const [studentRows, classRows, organizationRows, enrollmentRows] =
-        await Promise.all([
-          tableSafe("students")?.toArray?.() || [],
-          listActiveLocal("classes", {
-            accountId,
-            schoolId: schoolId,
-            branchId: branchId,
-          } as any),
-          listActiveLocal("organizations", {
-            accountId,
-            schoolId: schoolId,
-            branchId: branchId,
-          } as any),
-          tableSafe("studentEnrollments")?.toArray?.() || [],
-        ]);
+      const [
+        studentRows,
+        teacherRows,
+        parentRows,
+        branchRows,
+        classRows,
+        organizationRows,
+        enrollmentRows,
+      ] = await Promise.all([
+        tableSafe("students")?.toArray?.() || [],
+        tableSafe("teachers")?.toArray?.() || [],
+        tableSafe("parents")?.toArray?.() || [],
+        tableSafe("branches")?.toArray?.() || [],
+        listActiveLocal("classes", {
+          accountId,
+          schoolId: schoolId,
+          branchId: branchId,
+        } as any),
+        listActiveLocal("organizations", {
+          accountId,
+          schoolId: schoolId,
+          branchId: branchId,
+        } as any),
+        tableSafe("studentEnrollments")?.toArray?.() || [],
+      ]);
 
       const scopedStudents = (studentRows as Student[])
         .filter((r) => sameTenant(r as TenantRow))
@@ -696,6 +784,62 @@ export default function StudentsPage() {
 
       setRows(scopedStudents);
       await resolveStudentMediaUrls(scopedStudents);
+
+      setTeachers(
+        (teacherRows as Teacher[])
+          .filter(
+            (row: any) =>
+              sameAccount(row as TenantRow) &&
+              sameSchool(row as TenantRow) &&
+              sameBranch(row as TenantRow) &&
+              row.active !== false &&
+              !["deleted", "archived", "inactive"].includes(
+                safeLower(row.status),
+              ),
+          )
+          .sort((a: any, b: any) =>
+            String(a.fullName || a.name || "").localeCompare(
+              String(b.fullName || b.name || ""),
+            ),
+          ),
+      );
+
+      setParents(
+        (parentRows as Parent[])
+          .filter(
+            (row: any) =>
+              sameAccount(row as TenantRow) &&
+              sameSchool(row as TenantRow) &&
+              sameBranch(row as TenantRow) &&
+              row.active !== false &&
+              !["deleted", "archived", "inactive"].includes(
+                safeLower(row.status),
+              ),
+          )
+          .sort((a: any, b: any) =>
+            String(a.fullName || a.name || "").localeCompare(
+              String(b.fullName || b.name || ""),
+            ),
+          ),
+      );
+
+      // Branches are school-scoped rather than branch-scoped because the purpose
+      // is to compare students with every campus belonging to the selected school.
+      setBranches(
+        (branchRows as Branch[])
+          .filter(
+            (row: any) =>
+              sameAccount(row as TenantRow) &&
+              sameSchool(row as TenantRow) &&
+              row.active !== false &&
+              !["deleted", "archived", "inactive"].includes(
+                safeLower(row.status),
+              ),
+          )
+          .sort((a: any, b: any) =>
+            String(a.name || "").localeCompare(String(b.name || "")),
+          ),
+      );
 
       setClasses(
         (classRows as Class[]).sort((a: any, b: any) =>
@@ -950,6 +1094,203 @@ export default function StudentsPage() {
     [viewRows],
   );
 
+  const studentMarkers = useMemo<MapMarker[]>(() => {
+    if (!visibleMapLayers.student) return [];
+
+    return filteredRows.reduce<MapMarker[]>((markers, item) => {
+      const row: any = item.row;
+
+      const marker = genericEntityToMarker(
+        {
+          ...row,
+          id: item.id,
+          photo: item.photoUrl || row.photo,
+        },
+        {
+          entityType: "student",
+          layerId: "proximity",
+          icon: "student",
+          imageUrl: item.photoUrl,
+          subtitle: [
+            item.className,
+            row.admissionNumber || null,
+            row.locationLabel || row.formattedAddress || row.address || null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        },
+      );
+
+      if (!marker) return markers;
+
+      markers.push({
+        ...marker,
+        description: row.parentPhone
+          ? `Parent: ${row.parentPhone}`
+          : row.parentName
+            ? `Parent: ${row.parentName}`
+            : item.organizationName,
+        metadata: {
+          ...(marker.metadata || {}),
+          studentId: item.id,
+          className: item.className,
+          organizationName: item.organizationName,
+          admissionNumber: row.admissionNumber || null,
+          markerRole: "student",
+          markerColor: "#2563eb",
+        },
+      });
+
+      return markers;
+    }, []);
+  }, [filteredRows, visibleMapLayers.student]);
+
+  const branchMarkers = useMemo<MapMarker[]>(() => {
+    if (!visibleMapLayers.branch) return [];
+
+    return branches.reduce<MapMarker[]>((markers, branch: any) => {
+      if (branch.mapVisible === false) return markers;
+
+      const marker = genericEntityToMarker(
+        {
+          ...branch,
+          id: idOf(branch.id),
+          photo: branch.logo || branch.photo,
+        },
+        {
+          entityType: "branch",
+          layerId: "proximity",
+          icon: "school",
+          imageUrl: safeRecordMediaValue(branch.logo || branch.photo),
+          subtitle: [
+            branch.locationLabel ||
+              branch.formattedAddress ||
+              branch.address,
+            branch.city,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        },
+      );
+
+      if (!marker) return markers;
+
+      markers.push({
+        ...marker,
+        description:
+          branch.phone ||
+          branch.email ||
+          "School branch building",
+        metadata: {
+          ...(marker.metadata || {}),
+          branchId: idOf(branch.id),
+          markerRole: "branch-building",
+          markerColor: "#7c3aed",
+        },
+      });
+
+      return markers;
+    }, []);
+  }, [branches, visibleMapLayers.branch]);
+
+  const comparisonPeopleMarkers = useMemo<MapMarker[]>(() => {
+    const markers: MapMarker[] = [];
+
+    const appendPeople = (
+      sourceRows: any[],
+      entityType: "teacher" | "parent",
+      icon: "teacher" | "parent",
+      markerColor: string,
+    ) => {
+      const visible =
+        entityType === "teacher"
+          ? visibleMapLayers.teacher
+          : visibleMapLayers.parent;
+
+      if (!visible) return;
+
+      sourceRows.forEach((row: any) => {
+        if (row.mapVisible === false) return;
+
+        const marker = genericEntityToMarker(row, {
+          entityType,
+          layerId: "proximity",
+          icon,
+          imageUrl: safeRecordMediaValue(row.photo),
+          subtitle: [
+            row.locationLabel ||
+              row.formattedAddress ||
+              row.address,
+            branches.find((branch: any) =>
+              sameId(branch.id, row.branchId),
+            )?.name,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        });
+
+        if (!marker) return;
+
+        markers.push({
+          ...marker,
+          metadata: {
+            ...(marker.metadata || {}),
+            [`${entityType}Id`]: idOf(row.id),
+            branchId: idOf(row.branchId),
+            markerRole: entityType,
+            markerColor,
+          },
+        });
+      });
+    };
+
+    appendPeople(
+      teachers as any[],
+      "teacher",
+      "teacher",
+      "#16a34a",
+    );
+    appendPeople(
+      parents as any[],
+      "parent",
+      "parent",
+      "#ea580c",
+    );
+
+    return markers;
+  }, [
+    branches,
+    parents,
+    teachers,
+    visibleMapLayers.parent,
+    visibleMapLayers.teacher,
+  ]);
+
+  // Visibility is controlled by the compact buttons above the map.
+  // Every returned marker uses the same layer ID. Student markers establish
+  // that layer when SchoolMap mounts, while the other entity buttons only
+  // decide which additional markers are included.
+  const proximityMarkers = useMemo(
+    () => [
+      ...branchMarkers,
+      ...studentMarkers,
+      ...comparisonPeopleMarkers,
+    ],
+    [branchMarkers, comparisonPeopleMarkers, studentMarkers],
+  );
+
   const updateForm = (patch: Partial<FormState>) =>
     setForm((current) => ({ ...current, ...patch }));
 
@@ -1021,11 +1362,15 @@ export default function StudentsPage() {
     return true;
   };
 
-  const openCreate = () => {
+  const openCreate = (defaults?: StudentCreateDefaults) => {
     if (!requireTenant()) return;
 
     mediaSessionKey.current = makeMediaSessionKey();
     uploadedMediaAssetIds.current = {};
+
+    const hasMapCoordinate =
+      Number.isFinite(defaults?.latitude) &&
+      Number.isFinite(defaults?.longitude);
 
     setForm({
       ...emptyForm,
@@ -1033,8 +1378,76 @@ export default function StudentsPage() {
       organizationId:
         filterOrganizationId !== "all" ? filterOrganizationId : "",
       status: filterStatus !== "all" ? filterStatus : "active",
+      latitude: hasMapCoordinate ? String(defaults?.latitude) : "",
+      longitude: hasMapCoordinate ? String(defaults?.longitude) : "",
+      locationSource: "manual",
+      locationCapturedAt: hasMapCoordinate ? Date.now() : undefined,
+      mapVisible: true,
     });
     setModalOpen(true);
+  };
+
+  const handleCreateAtLocation = (request: MapCreateRequest) => {
+    if (request.entityType !== "student") return;
+
+    openCreate({
+      latitude: request.coordinate.latitude,
+      longitude: request.coordinate.longitude,
+    });
+  };
+
+  const handleMapLocationUpdate = async (
+    request: MapLocationUpdateRequest,
+  ) => {
+    if (!authenticated || !accountId || !schoolId || !branchId) {
+      throw new Error("Sign in and select a school branch first.");
+    }
+
+    const entityType = String(request.marker.entityType || "");
+    const metadata = request.marker.metadata || {};
+
+    const target =
+      entityType === "student"
+        ? {
+            table: "students",
+            id: cleanId(metadata.studentId || request.marker.id),
+            label: "Student",
+          }
+        : entityType === "teacher"
+          ? {
+              table: "teachers",
+              id: cleanId(metadata.teacherId || request.marker.id),
+              label: "Teacher",
+            }
+          : entityType === "parent"
+            ? {
+                table: "parents",
+                id: cleanId(metadata.parentId || request.marker.id),
+                label: "Parent",
+              }
+            : entityType === "branch"
+              ? {
+                  table: "branches",
+                  id: cleanId(metadata.branchId || request.marker.id),
+                  label: "Branch",
+                }
+              : null;
+
+    if (!target?.id) {
+      throw new Error("The selected map item could not be identified.");
+    }
+
+    await updateLocal(target.table as any, target.id, {
+      latitude: request.coordinate.latitude,
+      longitude: request.coordinate.longitude,
+      locationSource: "manual",
+      locationCapturedAt: Date.now(),
+      mapVisible: true,
+      isDeleted: false,
+    } as any);
+
+    showToast("success", `${target.label} location updated.`);
+    await load();
   };
 
   const openEdit = (row: Student) => {
@@ -1075,6 +1488,20 @@ export default function StudentsPage() {
       parentPhone: s.parentPhone || "",
       parentEmail: s.parentEmail || "",
       address: s.address || "",
+      latitude: s.latitude == null ? "" : String(s.latitude),
+      longitude: s.longitude == null ? "" : String(s.longitude),
+      accuracyMeters:
+        s.accuracyMeters == null ? "" : String(s.accuracyMeters),
+      locationLabel: s.locationLabel || "",
+      formattedAddress: s.formattedAddress || "",
+      locationType: s.locationType || "home",
+      locationSource: s.locationSource || "manual",
+      locationPrecision: s.locationPrecision || "exact",
+      locationCapturedAt: s.locationCapturedAt || undefined,
+      mapVisible: s.mapVisible !== false,
+      locationConsentGiven: Boolean(s.locationConsentGiven),
+      locationConsentAt: s.locationConsentAt || undefined,
+      locationRestricted: Boolean(s.locationRestricted),
       status: s.status || "active",
     });
     setModalOpen(true);
@@ -1094,6 +1521,30 @@ export default function StudentsPage() {
     if (!form.fullName.trim()) return "Enter student full name.";
     if (form.age !== "" && Number(form.age) < 0)
       return "Age cannot be negative.";
+
+    const hasLatitude = form.latitude.trim() !== "";
+    const hasLongitude = form.longitude.trim() !== "";
+
+    if (hasLatitude !== hasLongitude)
+      return "Enter both latitude and longitude, or leave both empty.";
+
+    if (hasLatitude && hasLongitude) {
+      const latitude = Number(form.latitude);
+      const longitude = Number(form.longitude);
+
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)
+        return "Latitude must be a number between -90 and 90.";
+
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)
+        return "Longitude must be a number between -180 and 180.";
+    }
+
+    if (
+      form.accuracyMeters.trim() !== "" &&
+      (!Number.isFinite(Number(form.accuracyMeters)) ||
+        Number(form.accuracyMeters) < 0)
+    )
+      return "Location accuracy must be zero or greater.";
 
     const duplicate = rows.find((row: any) => {
       if (form.id && sameId(row.id, form.id)) return false;
@@ -1155,6 +1606,29 @@ export default function StudentsPage() {
         parentPhone: form.parentPhone.trim() || undefined,
         parentEmail: form.parentEmail.trim() || undefined,
         address: form.address.trim() || undefined,
+        latitude:
+          form.latitude.trim() === "" ? undefined : Number(form.latitude),
+        longitude:
+          form.longitude.trim() === "" ? undefined : Number(form.longitude),
+        accuracyMeters:
+          form.accuracyMeters.trim() === ""
+            ? undefined
+            : Number(form.accuracyMeters),
+        locationLabel: form.locationLabel.trim() || undefined,
+        formattedAddress: form.formattedAddress.trim() || undefined,
+        locationType: form.locationType,
+        locationSource: form.locationSource,
+        locationPrecision: form.locationPrecision,
+        locationCapturedAt:
+          form.latitude.trim() && form.longitude.trim()
+            ? form.locationCapturedAt || Date.now()
+            : undefined,
+        mapVisible: form.mapVisible,
+        locationConsentGiven: form.locationConsentGiven,
+        locationConsentAt: form.locationConsentGiven
+          ? form.locationConsentAt || Date.now()
+          : undefined,
+        locationRestricted: form.locationRestricted,
         status: form.status || "active",
         active: true,
         isDeleted: false,
@@ -1433,7 +1907,7 @@ export default function StudentsPage() {
         <button
           type="button"
           className="ba-add-inline settings-save-button"
-          onClick={openCreate}
+          onClick={() => openCreate()}
           aria-label="Add student"
         >
           +
@@ -1534,6 +2008,86 @@ export default function StudentsPage() {
           remove={remove}
           setStatus={setStatus}
         />
+      )}
+
+      {viewMode === "map" && (
+        <section className="students-map-view" aria-label="Student proximity map">
+          <div className="students-map-toolbar" aria-label="Map layers">
+            <CompactMapLayerToggle
+              label="Branch"
+              tone="branch"
+              count={branches.length}
+              checked={visibleMapLayers.branch}
+              onChange={(checked) =>
+                setVisibleMapLayers((current) => ({
+                  ...current,
+                  branch: checked,
+                }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Student"
+              tone="student"
+              count={filteredRows.length}
+              checked={visibleMapLayers.student}
+              onChange={(checked) =>
+                setVisibleMapLayers((current) => ({
+                  ...current,
+                  student: checked,
+                }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Teacher"
+              tone="teacher"
+              count={teachers.length}
+              checked={visibleMapLayers.teacher}
+              onChange={(checked) =>
+                setVisibleMapLayers((current) => ({
+                  ...current,
+                  teacher: checked,
+                }))
+              }
+            />
+            <CompactMapLayerToggle
+              label="Parent"
+              tone="parent"
+              count={parents.length}
+              checked={visibleMapLayers.parent}
+              onChange={(checked) =>
+                setVisibleMapLayers((current) => ({
+                  ...current,
+                  parent: checked,
+                }))
+              }
+            />
+          </div>
+
+          <SchoolMap
+            markers={proximityMarkers}
+            height="min(68vh, 720px)"
+            searchable={false}
+            filterable={false}
+            showLegend={false}
+            cluster
+            fitMarkers
+            allowCreateAtLocation
+            createEntityTypes={["student"]}
+            onCreateAtLocation={handleCreateAtLocation}
+            allowLocationEditing
+            onLocationUpdate={handleMapLocationUpdate}
+            emptyView={
+              <div className="students-map-empty">
+                <span aria-hidden="true">⌖</span>
+                <strong>No visible mapped locations</strong>
+                <small>
+                  Keep Student enabled, add student coordinates, or turn on
+                  Branch, Teacher, and Parent comparison layers.
+                </small>
+              </div>
+            }
+          />
+        </section>
       )}
 
       {viewMode === "cards" && (
@@ -1698,6 +2252,34 @@ function StudentListItem({
         />
         <i>⋯</i>
       </span>
+    </button>
+  );
+}
+
+function CompactMapLayerToggle({
+  label,
+  tone,
+  count,
+  checked,
+  onChange,
+}: {
+  label: string;
+  tone: ProximityLayer;
+  count: number;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`students-map-toggle ${tone} ${checked ? "active" : ""}`}
+      aria-pressed={checked}
+      aria-label={`${checked ? "Hide" : "Show"} ${label.toLowerCase()} locations`}
+      title={`${label}: ${count} loaded record${count === 1 ? "" : "s"}`}
+      onClick={() => onChange(!checked)}
+    >
+      <i aria-hidden="true" />
+      <span>{label}</span>
     </button>
   );
 }
@@ -1877,6 +2459,16 @@ function MoreSheet({
             <span>☷</span>
             <b>Table view</b>
             <small>Dense records for laptop work</small>
+          </button>
+
+          <button
+            type="button"
+            className={viewMode === "map" ? "active" : ""}
+            onClick={() => setViewMode("map")}
+          >
+            <span>⌖</span>
+            <b>Map view</b>
+            <small>See filtered students with saved locations</small>
           </button>
 
           <button
@@ -2121,6 +2713,55 @@ function StudentModal({
   openCameraForField: (field: CameraField) => void;
   save: (event?: React.FormEvent) => void;
 }) {
+  const [locating, setLocating] = useState(false);
+
+  const captureCurrentLocation = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      window.alert("Location access is not available on this device or browser.");
+      return;
+    }
+
+    setLocating(true);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const capturedAt = position.timestamp || Date.now();
+
+        updateForm({
+          latitude: position.coords.latitude.toFixed(7),
+          longitude: position.coords.longitude.toFixed(7),
+          accuracyMeters: Number.isFinite(position.coords.accuracy)
+            ? String(Math.round(position.coords.accuracy))
+            : "",
+          locationSource: "device_gps",
+          locationCapturedAt: capturedAt,
+          mapVisible: true,
+        });
+
+        setLocating(false);
+      },
+      (error) => {
+        setLocating(false);
+
+        const message =
+          error.code === error.PERMISSION_DENIED
+            ? "Location permission was denied. Allow location access or enter the coordinates manually."
+            : error.code === error.POSITION_UNAVAILABLE
+              ? "Your current location could not be determined."
+              : error.code === error.TIMEOUT
+                ? "Location capture timed out. Please try again."
+                : "Location capture failed.";
+
+        window.alert(message);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 30000,
+      },
+    );
+  };
+
   return (
     <div className="ba-modal-backdrop">
       <form className="ba-modal" onSubmit={save}>
@@ -2285,6 +2926,220 @@ function StudentModal({
               />
             </label>
           </div>
+        </section>
+
+        <section className="ba-form-section">
+          <div className="ba-section-heading-row">
+            <div>
+              <h3>Map Location</h3>
+              <p>
+                Add the student&apos;s approved home, boarding, pickup, or
+                drop-off location.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              className="ba-media-button secondary"
+              onClick={captureCurrentLocation}
+              disabled={locating}
+            >
+              {locating ? "Getting location..." : "Use Current Location"}
+            </button>
+          </div>
+
+          <div className="ba-form two">
+            <label>
+              <span>Latitude</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                min="-90"
+                max="90"
+                value={form.latitude}
+                onChange={(e) =>
+                  updateForm({
+                    latitude: e.target.value,
+                    locationSource: "manual",
+                  })
+                }
+                placeholder="e.g. 5.603717"
+              />
+            </label>
+
+            <label>
+              <span>Longitude</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                min="-180"
+                max="180"
+                value={form.longitude}
+                onChange={(e) =>
+                  updateForm({
+                    longitude: e.target.value,
+                    locationSource: "manual",
+                  })
+                }
+                placeholder="e.g. -0.186964"
+              />
+            </label>
+
+            <label>
+              <span>Location Label</span>
+              <input
+                value={form.locationLabel}
+                onChange={(e) =>
+                  updateForm({ locationLabel: e.target.value })
+                }
+                placeholder="e.g. Student home or Dansoman pickup point"
+              />
+            </label>
+
+            <label>
+              <span>Location Type</span>
+              <select
+                value={form.locationType}
+                onChange={(e) =>
+                  updateForm({
+                    locationType: e.target.value as FormState["locationType"],
+                  })
+                }
+              >
+                <option value="home">Home</option>
+                <option value="boarding">Boarding</option>
+                <option value="pickup_point">Pickup point</option>
+                <option value="dropoff_point">Drop-off point</option>
+                <option value="workplace">Workplace</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Location Precision</span>
+              <select
+                value={form.locationPrecision}
+                onChange={(e) =>
+                  updateForm({
+                    locationPrecision:
+                      e.target.value as FormState["locationPrecision"],
+                  })
+                }
+              >
+                <option value="exact">Exact</option>
+                <option value="approximate">Approximate</option>
+                <option value="area_only">Area only</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Accuracy in Metres</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                value={form.accuracyMeters}
+                onChange={(e) =>
+                  updateForm({ accuracyMeters: e.target.value })
+                }
+                placeholder="Filled automatically when using GPS"
+              />
+            </label>
+
+            <label className="wide">
+              <span>Formatted Location Address</span>
+              <textarea
+                value={form.formattedAddress}
+                onChange={(e) =>
+                  updateForm({ formattedAddress: e.target.value })
+                }
+                placeholder="Readable address or directions for this map point"
+              />
+            </label>
+          </div>
+
+          <div className="ba-location-options">
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.mapVisible}
+                onChange={(e) =>
+                  updateForm({ mapVisible: e.target.checked })
+                }
+              />
+              <span>
+                <strong>Show on student map</strong>
+                <small>
+                  The point can appear to authorized users within the branch.
+                </small>
+              </span>
+            </label>
+
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.locationConsentGiven}
+                onChange={(e) =>
+                  updateForm({
+                    locationConsentGiven: e.target.checked,
+                    locationConsentAt: e.target.checked
+                      ? form.locationConsentAt || Date.now()
+                      : undefined,
+                  })
+                }
+              />
+              <span>
+                <strong>Location consent recorded</strong>
+                <small>
+                  Confirm that the school is permitted to store this location.
+                </small>
+              </span>
+            </label>
+
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.locationRestricted}
+                onChange={(e) =>
+                  updateForm({ locationRestricted: e.target.checked })
+                }
+              />
+              <span>
+                <strong>Restricted location</strong>
+                <small>
+                  Mark this point as sensitive for stricter access controls.
+                </small>
+              </span>
+            </label>
+          </div>
+
+          {(form.latitude || form.longitude) && (
+            <div className="ba-location-captured">
+              <span>Coordinate source: {form.locationSource.replace("_", " ")}</span>
+              {form.locationCapturedAt ? (
+                <small>
+                  Captured {new Date(form.locationCapturedAt).toLocaleString()}
+                </small>
+              ) : null}
+              <button
+                type="button"
+                onClick={() =>
+                  updateForm({
+                    latitude: "",
+                    longitude: "",
+                    accuracyMeters: "",
+                    locationCapturedAt: undefined,
+                    locationSource: "manual",
+                  })
+                }
+              >
+                Clear coordinates
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="ba-form-section">
@@ -4015,5 +4870,187 @@ const css = `
   color: var(--text, #111827);
 }
 
+.students-map-view {
+  display: grid;
+  gap: 10px;
+}
 
+.students-map-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.students-map-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.students-map-toggle {
+  --layer-color: #64748b;
+  flex: 0 0 auto;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid
+    color-mix(
+      in srgb,
+      var(--layer-color) 24%,
+      var(--border, rgba(0,0,0,.10))
+    );
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--card-bg, var(--surface, #fff));
+  color: var(--muted-text, var(--muted-foreground, #64748b));
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    border-color .16s ease,
+    background .16s ease,
+    color .16s ease,
+    opacity .16s ease;
+}
+
+.students-map-toggle i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--layer-color);
+  box-shadow:
+    0 0 0 3px
+    color-mix(in srgb, var(--layer-color) 12%, transparent);
+}
+
+.students-map-toggle.active {
+  border-color:
+    color-mix(
+      in srgb,
+      var(--layer-color) 45%,
+      var(--border, rgba(0,0,0,.10))
+    );
+  background:
+    color-mix(
+      in srgb,
+      var(--layer-color) 9%,
+      var(--card-bg, var(--surface, #fff))
+    );
+  color: var(--text, #111827);
+}
+
+.students-map-toggle:not(.active) {
+  opacity: .52;
+}
+
+.students-map-toggle.branch { --layer-color: #7c3aed; }
+.students-map-toggle.student { --layer-color: #2563eb; }
+.students-map-toggle.teacher { --layer-color: #16a34a; }
+.students-map-toggle.parent { --layer-color: #ea580c; }
+
+
+.ba-section-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ba-section-heading-row h3 {
+  margin: 0;
+}
+
+.ba-section-heading-row p {
+  margin: 4px 0 0;
+  color: var(--ba-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.ba-location-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ba-check-row {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ba-border);
+  border-radius: 12px;
+  background: var(--ba-card);
+  cursor: pointer;
+}
+
+.ba-check-row input {
+  width: 17px !important;
+  height: 17px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.ba-check-row > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ba-check-row strong {
+  font-size: 0.82rem;
+}
+
+.ba-check-row small {
+  color: var(--ba-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ba-location-captured {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--ba-primary) 8%, var(--ba-card));
+  border: 1px solid color-mix(in srgb, var(--ba-primary) 22%, var(--ba-border));
+  font-size: 0.75rem;
+}
+
+.ba-location-captured small {
+  color: var(--ba-muted);
+}
+
+.ba-location-captured button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--ba-primary);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .ba-section-heading-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ba-section-heading-row .ba-media-button {
+    width: 100%;
+  }
+
+  .ba-location-captured button {
+    margin-left: 0;
+  }
+}
 `;

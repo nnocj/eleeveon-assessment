@@ -38,6 +38,14 @@
  * - edit saves attach only media uploaded during the current edit session; old inherited media IDs are not reattached.
  * - photo and cover fields support Upload and real Take Photo camera capture through the same saveImageAsset(...) pipeline.
  * - media owner/session keys use shared mediaAssetUtils helpers so this page cannot save under student/teacher ownership.
+ *
+ * Parent map and location workflow:
+ * - adds the shared SchoolMap view used by Students and Teachers.
+ * - stores editable address, coordinates, accuracy, source, precision and privacy/consent fields.
+ * - supports creating a parent from a selected map location.
+ * - supports moving an existing parent marker through the shared floating Save/Cancel workflow.
+ * - maps only branch-scoped, searched and filtered parents with visible coordinates.
+ * - lets SchoolMap own marker selection, details, clustering and location editing.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -78,12 +86,24 @@ import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
 import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
 import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
 import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
-type ViewMode = "cards" | "table" | "summary";
+import {
+  SchoolMap,
+  type MapCreateRequest,
+  type MapLocationUpdateRequest,
+} from "../../components/maps";
+import { genericEntityToMarker, type MapMarker } from "../../lib/maps";
+
+type ViewMode = "cards" | "table" | "map" | "summary";
 type ToastTone = "success" | "error" | "info";
 type Relationship = "father" | "mother" | "guardian";
 type StudentParentRelationship = "father" | "mother" | "guardian" | "other";
 type CameraField = "photo" | "coverPhoto";
 type UploadedMediaIds = Partial<Record<CameraField, string>>;
+
+type ParentCreateDefaults = {
+  latitude?: number;
+  longitude?: number;
+};
 
 type TenantRow = {
   accountId?: string | null;
@@ -212,6 +232,19 @@ type FormState = {
   coverPhotoMediaId?: string;
   email: string;
   address: string;
+  latitude: string;
+  longitude: string;
+  accuracyMeters: string;
+  locationLabel: string;
+  formattedAddress: string;
+  locationType: "home" | "workplace" | "pickup_point" | "dropoff_point" | "other";
+  locationSource: "manual" | "device_gps" | "geocoded" | "imported";
+  locationPrecision: "exact" | "approximate" | "area_only";
+  locationCapturedAt?: number;
+  mapVisible: boolean;
+  locationConsentGiven: boolean;
+  locationConsentAt?: number;
+  locationRestricted: boolean;
   occupation: string;
   emergencyContact: string;
   relationship: Relationship;
@@ -244,6 +277,19 @@ const emptyForm: FormState = {
   coverPhotoMediaId: undefined,
   email: "",
   address: "",
+  latitude: "",
+  longitude: "",
+  accuracyMeters: "",
+  locationLabel: "",
+  formattedAddress: "",
+  locationType: "home",
+  locationSource: "manual",
+  locationPrecision: "exact",
+  locationCapturedAt: undefined,
+  mapVisible: true,
+  locationConsentGiven: false,
+  locationConsentAt: undefined,
+  locationRestricted: false,
   occupation: "",
   emergencyContact: "",
   relationship: "guardian",
@@ -359,6 +405,35 @@ function Chip({
   return <span className={`ba-chip ${tone}`}>{children}</span>;
 }
 
+function getReadableTextColor(color: string) {
+  const value = String(color || "").trim();
+
+  if (!value.startsWith("#")) {
+    return "#fff";
+  }
+
+  let hex = value.slice(1);
+
+  if (hex.length === 3) {
+    hex = hex
+      .split("")
+      .map((character) => character + character)
+      .join("");
+  }
+
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
+    return "#fff";
+  }
+
+  const numeric = Number.parseInt(hex, 16);
+  const red = (numeric >> 16) & 255;
+  const green = (numeric >> 8) & 255;
+  const blue = numeric & 255;
+  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
+
+  return brightness > 155 ? "#111827" : "#ffffff";
+}
+
 function Avatar({
   name,
   photo,
@@ -372,9 +447,11 @@ function Avatar({
     <div
       className="ba-avatar"
       style={{
-        background: photo
-          ? `url(${photo}) center/cover`
-          : `linear-gradient(135deg, ${primary}, rgba(15,23,42,.9))`,
+        background: photo ? `url(${photo}) center/cover` : primary,
+        color: photo ? "#ffffff" : getReadableTextColor(primary),
+        borderColor: photo
+          ? "transparent"
+          : `color-mix(in srgb, ${primary} 76%, transparent)`,
       }}
     >
       {!photo &&
@@ -427,6 +504,7 @@ export default function ParentsPage() {
   } = workspace;
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
+  const primaryText = getReadableTextColor(primary);
 
   const { loading, setLoading } = useBackgroundLoader();
   const [saving, setSaving] = useState(false);
@@ -914,6 +992,56 @@ export default function ParentsPage() {
       );
   }, [filterLinked, filterRelationship, search, viewRows]);
 
+  const parentMarkers = useMemo<MapMarker[]>(() => {
+    return filteredRows.reduce<MapMarker[]>((markers, item) => {
+      const row: any = item.row;
+
+      const marker = genericEntityToMarker(
+        {
+          ...row,
+          id: item.id,
+          photo: item.photoUrl || row.photo,
+        },
+        {
+          entityType: "parent",
+          layerId: "parents",
+          icon: "parent",
+          imageUrl: item.photoUrl,
+          subtitle: [
+            relationshipLabel(row.relationship),
+            row.phone || null,
+            row.locationLabel || row.formattedAddress || row.address || null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          privacy: {
+            allowRestricted: true,
+            requireConsent: false,
+          },
+        },
+      );
+
+      if (!marker) return markers;
+
+      markers.push({
+        ...marker,
+        description: item.linkCount
+          ? `${item.linkCount} linked student${item.linkCount === 1 ? "" : "s"}`
+          : row.occupation || "No linked student",
+        metadata: {
+          ...(marker.metadata || {}),
+          parentId: item.id,
+          relationship: row.relationship || "guardian",
+          phone: row.phone || null,
+          linkedStudentCount: item.linkCount,
+          primaryChildren: item.primaryChildren,
+        },
+      });
+
+      return markers;
+    }, []);
+  }, [filteredRows]);
+
   const summary = useMemo(
     () => ({
       total: rows.length,
@@ -980,7 +1108,7 @@ export default function ParentsPage() {
     setFilterLinked("all");
   };
 
-  const openCreate = () => {
+  const openCreate = (defaults?: ParentCreateDefaults) => {
     if (!requireTenant()) return;
 
     mediaSessionKeyRef.current = createMediaSessionKey(
@@ -988,12 +1116,72 @@ export default function ParentsPage() {
     );
     uploadedMediaIdsRef.current = {};
     setSelectedItem(null);
+
+    const hasMapCoordinate =
+      Number.isFinite(defaults?.latitude) &&
+      Number.isFinite(defaults?.longitude);
+
     setForm({
       ...emptyForm,
       relationship:
         filterRelationship !== "all" ? filterRelationship : "guardian",
+      latitude: hasMapCoordinate ? String(defaults?.latitude) : "",
+      longitude: hasMapCoordinate ? String(defaults?.longitude) : "",
+      locationSource: "manual",
+      locationCapturedAt: hasMapCoordinate ? Date.now() : undefined,
+      mapVisible: true,
     });
     setModalOpen(true);
+  };
+
+  const handleCreateAtLocation = (request: MapCreateRequest) => {
+    if (request.entityType !== "parent") return;
+
+    openCreate({
+      latitude: request.coordinate.latitude,
+      longitude: request.coordinate.longitude,
+    });
+  };
+
+  const handleParentLocationUpdate = async (
+    request: MapLocationUpdateRequest,
+  ) => {
+    if (!authenticated || !accountId || !schoolId || !branchId) {
+      throw new Error("Sign in and select a school branch first.");
+    }
+
+    const parentId = cleanId(
+      request.marker.metadata?.parentId ||
+        request.marker.id,
+    );
+
+    if (!parentId) {
+      throw new Error("The selected parent could not be identified.");
+    }
+
+    const existingParent = rows.find((row: any) =>
+      sameId(row.id, parentId),
+    );
+
+    if (!existingParent) {
+      throw new Error("The selected parent record was not found.");
+    }
+
+    await updateLocal(
+      "parents",
+      parentId,
+      {
+        latitude: request.coordinate.latitude,
+        longitude: request.coordinate.longitude,
+        locationSource: "manual",
+        locationCapturedAt: Date.now(),
+        mapVisible: true,
+        isDeleted: false,
+      } as Partial<Parent>,
+    );
+
+    showToast("success", "Parent location updated.");
+    await load();
   };
 
   const openEdit = (row: Parent) => {
@@ -1024,6 +1212,20 @@ export default function ParentsPage() {
         : undefined,
       email: parent.email || "",
       address: parent.address || "",
+      latitude: parent.latitude == null ? "" : String(parent.latitude),
+      longitude: parent.longitude == null ? "" : String(parent.longitude),
+      accuracyMeters:
+        parent.accuracyMeters == null ? "" : String(parent.accuracyMeters),
+      locationLabel: parent.locationLabel || "",
+      formattedAddress: parent.formattedAddress || "",
+      locationType: parent.locationType || "home",
+      locationSource: parent.locationSource || "manual",
+      locationPrecision: parent.locationPrecision || "exact",
+      locationCapturedAt: parent.locationCapturedAt || undefined,
+      mapVisible: parent.mapVisible !== false,
+      locationConsentGiven: Boolean(parent.locationConsentGiven),
+      locationConsentAt: parent.locationConsentAt || undefined,
+      locationRestricted: Boolean(parent.locationRestricted),
       occupation: parent.occupation || "",
       emergencyContact: parent.emergencyContact || "",
       relationship: parent.relationship || "guardian",
@@ -1053,6 +1255,30 @@ export default function ParentsPage() {
     if (!branchId) return "Select a branch first.";
     if (!form.fullName.trim()) return "Enter parent full name.";
     if (!form.phone.trim()) return "Enter parent phone number.";
+
+    const hasLatitude = form.latitude.trim() !== "";
+    const hasLongitude = form.longitude.trim() !== "";
+
+    if (hasLatitude !== hasLongitude)
+      return "Enter both latitude and longitude, or leave both empty.";
+
+    if (hasLatitude && hasLongitude) {
+      const latitude = Number(form.latitude);
+      const longitude = Number(form.longitude);
+
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)
+        return "Latitude must be a number between -90 and 90.";
+
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)
+        return "Longitude must be a number between -180 and 180.";
+    }
+
+    if (
+      form.accuracyMeters.trim() !== "" &&
+      (!Number.isFinite(Number(form.accuracyMeters)) ||
+        Number(form.accuracyMeters) < 0)
+    )
+      return "Location accuracy must be zero or greater.";
 
     const duplicate = rows.find((row: any) => {
       if (form.id && sameId(row.id, form.id)) return false;
@@ -1094,6 +1320,29 @@ export default function ParentsPage() {
         coverPhotoMediaId: form.coverPhotoMediaId || undefined,
         email: form.email.trim() || undefined,
         address: form.address.trim() || undefined,
+        latitude:
+          form.latitude.trim() === "" ? undefined : Number(form.latitude),
+        longitude:
+          form.longitude.trim() === "" ? undefined : Number(form.longitude),
+        accuracyMeters:
+          form.accuracyMeters.trim() === ""
+            ? undefined
+            : Number(form.accuracyMeters),
+        locationLabel: form.locationLabel.trim() || undefined,
+        formattedAddress: form.formattedAddress.trim() || undefined,
+        locationType: form.locationType,
+        locationSource: form.locationSource,
+        locationPrecision: form.locationPrecision,
+        locationCapturedAt:
+          form.latitude.trim() && form.longitude.trim()
+            ? form.locationCapturedAt || Date.now()
+            : undefined,
+        mapVisible: form.mapVisible,
+        locationConsentGiven: form.locationConsentGiven,
+        locationConsentAt: form.locationConsentGiven
+          ? form.locationConsentAt || Date.now()
+          : undefined,
+        locationRestricted: form.locationRestricted,
         occupation: form.occupation.trim() || undefined,
         emergencyContact: form.emergencyContact.trim() || undefined,
         relationship: form.relationship || "guardian",
@@ -1345,8 +1594,13 @@ export default function ParentsPage() {
   if (!schoolId || !branchId) {
     return (
       <main
-        className="ba-page"
-        style={{ "--ba-primary": primary } as React.CSSProperties}
+        className="ba-page students-page"
+        style={
+          {
+            "--ba-primary": primary,
+            "--ba-primary-text": primaryText,
+          } as React.CSSProperties
+        }
       >
         <style>{css}</style>
         <section className="ba-state">
@@ -1369,8 +1623,13 @@ export default function ParentsPage() {
 
   return (
     <main
-      className="ba-page"
-      style={{ "--ba-primary": primary } as React.CSSProperties}
+      className="ba-page students-page"
+      style={
+          {
+            "--ba-primary": primary,
+            "--ba-primary-text": primaryText,
+          } as React.CSSProperties
+        }
     >
       <style>{css}</style>
 
@@ -1404,7 +1663,7 @@ export default function ParentsPage() {
         <button
           type="button"
           className="ba-add-inline"
-          onClick={openCreate}
+          onClick={() => openCreate()}
           aria-label="Add parent"
         >
           +
@@ -1474,6 +1733,44 @@ export default function ParentsPage() {
               conditions.
             </p>
           </article>
+        </section>
+      )}
+
+      {viewMode === "map" && (
+        <section className="students-map-view" aria-label="Parents map">
+          <div className="students-map-summary">
+            <span>Parents on map</span>
+            <strong>{parentMarkers.length}</strong>
+            <small>
+              {filteredRows.length - parentMarkers.length} filtered parent(s)
+              have no visible coordinates.
+            </small>
+          </div>
+
+          <SchoolMap
+            markers={parentMarkers}
+            height="min(68vh, 720px)"
+            searchable={false}
+            filterable={false}
+            showLegend={false}
+            cluster
+            fitMarkers
+            allowCreateAtLocation
+            createEntityTypes={["parent"]}
+            onCreateAtLocation={handleCreateAtLocation}
+            allowLocationEditing
+            onLocationUpdate={handleParentLocationUpdate}
+            emptyView={
+              <div className="students-map-empty">
+                <span aria-hidden="true">⌖</span>
+                <strong>No parent locations to display</strong>
+                <small>
+                  Add latitude and longitude to parent records, or change the
+                  current search and filters.
+                </small>
+              </div>
+            }
+          />
         </section>
       )}
 
@@ -1601,8 +1898,13 @@ function State({
 }) {
   return (
     <main
-      className="ba-page"
-      style={{ "--ba-primary": primary } as React.CSSProperties}
+      className="ba-page students-page"
+      style={
+          {
+            "--ba-primary": primary,
+            "--ba-primary-text": getReadableTextColor(primary),
+          } as React.CSSProperties
+        }
     >
       <style>{css}</style>
       <section className="ba-state">
@@ -1799,6 +2101,16 @@ function MoreSheet({
             <span>☷</span>
             <b>Table view</b>
             <small>Dense records for laptop work</small>
+          </button>
+
+          <button
+            type="button"
+            className={viewMode === "map" ? "active" : ""}
+            onClick={() => setViewMode("map")}
+          >
+            <span>⌖</span>
+            <b>Map view</b>
+            <small>Parent homes and saved locations</small>
           </button>
 
           <button
@@ -2033,6 +2345,55 @@ function ParentModal({
   openCameraForField: (field: CameraField) => void;
   save: (event?: React.FormEvent) => void;
 }) {
+  const [locating, setLocating] = useState(false);
+
+  const captureCurrentLocation = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      window.alert("Location access is not available on this device or browser.");
+      return;
+    }
+
+    setLocating(true);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const capturedAt = position.timestamp || Date.now();
+
+        updateForm({
+          latitude: position.coords.latitude.toFixed(7),
+          longitude: position.coords.longitude.toFixed(7),
+          accuracyMeters: Number.isFinite(position.coords.accuracy)
+            ? String(Math.round(position.coords.accuracy))
+            : "",
+          locationSource: "device_gps",
+          locationCapturedAt: capturedAt,
+          mapVisible: true,
+        });
+
+        setLocating(false);
+      },
+      (error) => {
+        setLocating(false);
+
+        const message =
+          error.code === error.PERMISSION_DENIED
+            ? "Location permission was denied. Allow location access or enter the coordinates manually."
+            : error.code === error.POSITION_UNAVAILABLE
+              ? "Your current location could not be determined."
+              : error.code === error.TIMEOUT
+                ? "Location capture timed out. Please try again."
+                : "Location capture failed.";
+
+        window.alert(message);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 30000,
+      },
+    );
+  };
+
   return (
     <div className="ba-modal-backdrop">
       <form className="ba-modal" onSubmit={save}>
@@ -2136,6 +2497,219 @@ function ParentModal({
               />
             </label>
           </div>
+        </section>
+
+        <section className="ba-form-section">
+          <div className="ba-section-heading-row">
+            <div>
+              <h3>Map Location</h3>
+              <p>
+                Add the parent&apos;s approved home, workplace, pickup, or
+                drop-off location.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              className="ba-media-button secondary"
+              onClick={captureCurrentLocation}
+              disabled={locating}
+            >
+              {locating ? "Getting location..." : "Use Current Location"}
+            </button>
+          </div>
+
+          <div className="ba-form two">
+            <label>
+              <span>Latitude</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                min="-90"
+                max="90"
+                value={form.latitude}
+                onChange={(e) =>
+                  updateForm({
+                    latitude: e.target.value,
+                    locationSource: "manual",
+                  })
+                }
+                placeholder="e.g. 5.603717"
+              />
+            </label>
+
+            <label>
+              <span>Longitude</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                min="-180"
+                max="180"
+                value={form.longitude}
+                onChange={(e) =>
+                  updateForm({
+                    longitude: e.target.value,
+                    locationSource: "manual",
+                  })
+                }
+                placeholder="e.g. -0.186964"
+              />
+            </label>
+
+            <label>
+              <span>Location Label</span>
+              <input
+                value={form.locationLabel}
+                onChange={(e) =>
+                  updateForm({ locationLabel: e.target.value })
+                }
+                placeholder="e.g. Parent home or Dansoman pickup point"
+              />
+            </label>
+
+            <label>
+              <span>Location Type</span>
+              <select
+                value={form.locationType}
+                onChange={(e) =>
+                  updateForm({
+                    locationType: e.target.value as FormState["locationType"],
+                  })
+                }
+              >
+                <option value="home">Home</option>
+                                <option value="pickup_point">Pickup point</option>
+                <option value="dropoff_point">Drop-off point</option>
+                <option value="workplace">Workplace</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Location Precision</span>
+              <select
+                value={form.locationPrecision}
+                onChange={(e) =>
+                  updateForm({
+                    locationPrecision:
+                      e.target.value as FormState["locationPrecision"],
+                  })
+                }
+              >
+                <option value="exact">Exact</option>
+                <option value="approximate">Approximate</option>
+                <option value="area_only">Area only</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Accuracy in Metres</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                value={form.accuracyMeters}
+                onChange={(e) =>
+                  updateForm({ accuracyMeters: e.target.value })
+                }
+                placeholder="Filled automatically when using GPS"
+              />
+            </label>
+
+            <label className="wide">
+              <span>Formatted Location Address</span>
+              <textarea
+                value={form.formattedAddress}
+                onChange={(e) =>
+                  updateForm({ formattedAddress: e.target.value })
+                }
+                placeholder="Readable address or directions for this map point"
+              />
+            </label>
+          </div>
+
+          <div className="ba-location-options">
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.mapVisible}
+                onChange={(e) =>
+                  updateForm({ mapVisible: e.target.checked })
+                }
+              />
+              <span>
+                <strong>Show on student map</strong>
+                <small>
+                  The point can appear to authorized users within the branch.
+                </small>
+              </span>
+            </label>
+
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.locationConsentGiven}
+                onChange={(e) =>
+                  updateForm({
+                    locationConsentGiven: e.target.checked,
+                    locationConsentAt: e.target.checked
+                      ? form.locationConsentAt || Date.now()
+                      : undefined,
+                  })
+                }
+              />
+              <span>
+                <strong>Location consent recorded</strong>
+                <small>
+                  Confirm that the school is permitted to store this location.
+                </small>
+              </span>
+            </label>
+
+            <label className="ba-check-row">
+              <input
+                type="checkbox"
+                checked={form.locationRestricted}
+                onChange={(e) =>
+                  updateForm({ locationRestricted: e.target.checked })
+                }
+              />
+              <span>
+                <strong>Restricted location</strong>
+                <small>
+                  Mark this point as sensitive for stricter access controls.
+                </small>
+              </span>
+            </label>
+          </div>
+
+          {(form.latitude || form.longitude) && (
+            <div className="ba-location-captured">
+              <span>Coordinate source: {form.locationSource.replace("_", " ")}</span>
+              {form.locationCapturedAt ? (
+                <small>
+                  Captured {new Date(form.locationCapturedAt).toLocaleString()}
+                </small>
+              ) : null}
+              <button
+                type="button"
+                onClick={() =>
+                  updateForm({
+                    latitude: "",
+                    longitude: "",
+                    accuracyMeters: "",
+                    locationCapturedAt: undefined,
+                    locationSource: "manual",
+                  })
+                }
+              >
+                Clear coordinates
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="ba-form-section">
@@ -2503,12 +3077,23 @@ const css = `
 
 .ba-page *,
 .ba-page *::before,
-.ba-page *::after { box-sizing: border-box; min-width: 0; }
+.ba-page *::after {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
 .ba-page button,
 .ba-page input,
 .ba-page select,
-.ba-page textarea { font: inherit; max-width: 100%; }
-.ba-page button { -webkit-tap-highlight-color: transparent; }
+.ba-page textarea {
+  font: inherit;
+  max-width: 100%;
+}
+
+.ba-page button {
+  -webkit-tap-highlight-color: transparent;
+}
+
 .ba-page input,
 .ba-page select,
 .ba-page textarea {
@@ -2522,7 +3107,7 @@ const css = `
   outline: none;
   font-weight: 750;
 }
-.ba-page textarea { min-height: 92px; padding: 12px; resize: vertical; line-height: 1.55; }
+
 .ba-page input:focus,
 .ba-page select:focus,
 .ba-page textarea:focus {
@@ -2532,12 +3117,13 @@ const css = `
 
 .ba-state,
 .ba-search-card,
+.ba-summary-line,
+.ba-card,
 .ba-table-card,
 .ba-analysis,
 .ba-empty,
 .ba-sheet,
 .ba-modal,
-.ba-camera-modal,
 .student-row {
   background: var(--card-bg, var(--surface, #fff));
   border: 1px solid var(--border, rgba(0,0,0,.10));
@@ -2556,51 +3142,345 @@ const css = `
   border-radius: 28px;
   text-align: center;
 }
-.ba-spinner { width: 38px; height: 38px; border-radius: 999px; border: 4px solid color-mix(in srgb, var(--ba-primary) 18%, transparent); border-top-color: var(--ba-primary); animation: spin .8s linear infinite; }
-.ba-state h2 { margin: 0; font-size: 22px; font-weight: 1000; letter-spacing: -.04em; }
-.ba-state p { max-width: 34rem; margin: 0; color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; }
-.ba-state-button { min-height: 42px; border: 0; border-radius: 999px; padding: 0 16px; background: var(--ba-primary); color: #fff; font-weight: 950; cursor: pointer; }
 
-.ba-toast { position: sticky; top: 8px; z-index: 40; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; padding: 12px 14px; border-radius: 18px; font-size: 13px; font-weight: 850; box-shadow: 0 18px 40px rgba(15,23,42,.12); }
+.ba-spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 4px solid color-mix(in srgb, var(--ba-primary) 18%, transparent);
+  border-top-color: var(--ba-primary);
+  animation: spin .8s linear infinite;
+}
+
+.ba-state h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 1000;
+  letter-spacing: -.04em;
+}
+
+.ba-state p {
+  max-width: 34rem;
+  margin: 0;
+  color: var(--muted, #64748b);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ba-state-button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 16px;
+  background: var(--ba-primary);
+  color: #fff;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.ba-toast {
+  position: sticky;
+  top: 8px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  font-size: 13px;
+  font-weight: 850;
+  box-shadow: 0 18px 40px rgba(15,23,42,.12);
+}
+
 .ba-toast.success { background: rgba(34,197,94,.14); color: #166534; }
 .ba-toast.error { background: rgba(239,68,68,.12); color: #991b1b; }
 .ba-toast.info { background: rgba(59,130,246,.13); color: #1d4ed8; }
-.ba-toast button { border: 0; background: transparent; color: currentColor; font-weight: 1000; cursor: pointer; }
 
-.ba-search-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; margin-top: 2px; padding: 8px; border-radius: 24px; }
-.ba-search { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; padding: 0 11px; border-radius: 18px; background: color-mix(in srgb, var(--muted,#64748b) 7%, transparent); }
-.ba-search span { color: var(--muted,#64748b); font-size: 17px; font-weight: 1000; }
-.ba-search input { min-height: 42px; border: 0; padding: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 14px; }
+.ba-toast button {
+  border: 0;
+  background: transparent;
+  color: currentColor;
+  font-weight: 1000;
+  cursor: pointer;
+}
+
+/* Compact search/action strip. The page intentionally has no duplicate title header. */
+.ba-topbar,
+.ba-title,
+.ba-topbar-actions {
+  display: none;
+}
+
 .ba-icon-button,
 .ba-filter-button,
-.ba-add-inline { width: 42px; height: 42px; border: 1px solid var(--border, rgba(0,0,0,.10)); border-radius: 999px; display: grid; place-items: center; background: var(--card-bg, var(--surface,#fff)); color: var(--text,#111827); font-size: 18px; font-weight: 1000; cursor: pointer; box-shadow: 0 10px 22px rgba(15,23,42,.045); }
-.ba-add-inline { flex: 0 0 42px; border-color: var(--ba-primary); background: var(--ba-primary); color: #fff; font-size: 25px; line-height: 1; box-shadow: 0 12px 28px color-mix(in srgb, var(--ba-primary) 22%, transparent); }
-.ba-filter-button { position: relative; background: color-mix(in srgb, var(--ba-primary) 8%, var(--card-bg,#fff)); color: var(--ba-primary); }
-.ba-filter-button.active { background: var(--ba-primary); color: #fff; border-color: var(--ba-primary); }
-.ba-filter-button b { position: absolute; top: -4px; right: -4px; min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 999px; background: #ef4444; color: #fff; font-size: 10px; border: 2px solid var(--card-bg,#fff); }
-.ba-slider-icon { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.ba-add-inline {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--border, rgba(0,0,0,.10));
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: var(--card-bg, var(--surface,#fff));
+  color: var(--text,#111827);
+  font-size: 18px;
+  font-weight: 1000;
+  cursor: pointer;
+  box-shadow: 0 10px 22px rgba(15,23,42,.045);
+}
 
-.ba-filter-chips { display: flex; gap: 7px; overflow-x: auto; padding: 8px 1px 0; scrollbar-width: none; -ms-overflow-style: none; }
-.ba-filter-chips::-webkit-scrollbar { display: none; }
-.ba-filter-chips button { flex: 0 0 auto; min-height: 31px; border: 0; border-radius: 999px; padding: 0 10px; background: color-mix(in srgb, var(--ba-primary) 11%, transparent); color: var(--ba-primary); font-size: 11px; font-weight: 950; white-space: nowrap; cursor: pointer; }
-.ba-list { display: grid; gap: 7px; margin-top: 10px; }
-.student-row { width: 100%; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px; border-radius: 22px; text-align: left; cursor: pointer; transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
-.student-row:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--ba-primary) 24%, var(--border, rgba(0,0,0,.10))); box-shadow: 0 16px 34px rgba(15,23,42,.07); }
-.ba-avatar { width: 48px; height: 48px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 18px; color: #fff; font-size: 17px; font-weight: 1000; box-shadow: 0 12px 24px rgba(15,23,42,.12); }
+
+.ba-add-inline {
+  flex: 0 0 42px;
+  border-color: var(--ba-primary);
+  background: var(--ba-primary);
+  color: #fff;
+  font-size: 25px;
+  line-height: 1;
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--ba-primary) 22%, transparent);
+}
+
+.ba-search-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 2px;
+  padding: 8px;
+  border-radius: 24px;
+}
+
+.ba-search {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 11px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--muted,#64748b) 7%, transparent);
+}
+
+.ba-search span {
+  color: var(--muted,#64748b);
+  font-size: 17px;
+  font-weight: 1000;
+}
+
+.ba-search input {
+  min-height: 42px;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 14px;
+}
+
+.ba-slider-icon {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ba-filter-button {
+  position: relative;
+  background: color-mix(in srgb, var(--ba-primary) 8%, var(--card-bg,#fff));
+  color: var(--ba-primary);
+}
+
+.ba-filter-button.active {
+  background: var(--ba-primary);
+  color: #fff;
+  border-color: var(--ba-primary);
+}
+
+.ba-filter-button b {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 19px;
+  height: 19px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  border: 2px solid var(--card-bg,#fff);
+}
+
+.ba-summary-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 20px;
+}
+
+.ba-summary-line div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ba-summary-line strong {
+  font-size: 21px;
+  font-weight: 1000;
+  letter-spacing: -.05em;
+}
+
+.ba-summary-line span,
+.ba-summary-line p {
+  color: var(--muted,#64748b);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.ba-summary-line p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ba-filter-chips {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 8px 1px 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ba-filter-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.ba-filter-chips button {
+  flex: 0 0 auto;
+  min-height: 31px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--ba-primary) 11%, transparent);
+  color: var(--ba-primary);
+  font-size: 11px;
+  font-weight: 950;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ba-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.student-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0,1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 22px;
+  text-align: left;
+  cursor: pointer;
+  transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease);
+}
+
+.student-row:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--ba-primary) 24%, var(--border, rgba(0,0,0,.10)));
+  box-shadow: 0 16px 34px rgba(15,23,42,.07);
+}
+
+.ba-avatar {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 1000;
+  box-shadow: 0 12px 24px rgba(15,23,42,.12);
+}
+
 .student-main,
 .student-main strong,
 .student-main small,
-.student-main em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.student-main strong { color: var(--text,#111827); font-size: 14px; font-weight: 1000; letter-spacing: -.02em; }
-.student-main small { margin-top: 3px; color: var(--muted,#64748b); font-size: 12px; font-weight: 850; font-style: normal; }
-.student-main em { margin-top: 3px; color: color-mix(in srgb, var(--muted,#64748b) 86%, var(--text,#111827)); font-size: 11px; font-weight: 750; font-style: normal; }
-.student-side { display: grid; justify-items: end; gap: 6px; flex: 0 0 auto; }
-.student-side i { color: var(--muted,#64748b); font-style: normal; font-size: 18px; font-weight: 1000; line-height: 1; }
-.status-dot-mini { width: 10px; height: 10px; display: inline-block; border-radius: 999px; background: var(--muted,#64748b); box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 10%, transparent); }
-.status-dot-mini.green { background: #22c55e; }
-.status-dot-mini.orange { background: #f59e0b; }
+.student-main em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-.ba-chip { max-width: 100%; display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize; }
+.student-main strong {
+  color: var(--text,#111827);
+  font-size: 14px;
+  font-weight: 1000;
+  letter-spacing: -.02em;
+}
+
+.student-main small {
+  margin-top: 3px;
+  color: var(--muted,#64748b);
+  font-size: 12px;
+  font-weight: 850;
+  font-style: normal;
+}
+
+.student-main em {
+  margin-top: 3px;
+  color: color-mix(in srgb, var(--muted,#64748b) 86%, var(--text,#111827));
+  font-size: 11px;
+  font-weight: 750;
+  font-style: normal;
+}
+
+.student-side {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.student-side i {
+  color: var(--muted,#64748b);
+  font-style: normal;
+  font-size: 18px;
+  font-weight: 1000;
+  line-height: 1;
+}
+
+.ba-chip {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 950;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+}
+
 .ba-chip.green { background: rgba(34,197,94,.12); color: #16a34a; }
 .ba-chip.red { background: rgba(239,68,68,.12); color: #dc2626; }
 .ba-chip.blue { background: rgba(59,130,246,.12); color: #2563eb; }
@@ -2608,69 +3488,551 @@ const css = `
 .ba-chip.orange { background: rgba(245,158,11,.14); color: #b45309; }
 .ba-chip.purple { background: rgba(147,51,234,.12); color: #7e22ce; }
 
+.status-dot-mini {
+  width: 10px;
+  height: 10px;
+  display: inline-block;
+  border-radius: 999px;
+  background: var(--muted,#64748b);
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.status-dot-mini.green { background: #22c55e; }
+.status-dot-mini.red { background: #ef4444; }
+.status-dot-mini.blue { background: #3b82f6; }
+.status-dot-mini.orange { background: #f59e0b; }
+.status-dot-mini.gray { background: var(--muted,#64748b); }
+
+.status-sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 8px;
+}
+
+.status-sheet-grid span {
+  display: grid;
+  gap: 5px;
+  padding: 11px;
+  border: 1px solid var(--border,rgba(0,0,0,.08));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--muted,#64748b) 7%, transparent);
+}
+
+.status-sheet-grid b {
+  color: var(--muted,#64748b);
+  font-size: 10px;
+  font-weight: 950;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.status-sheet-grid em {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text,#111827);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
 .ba-sheet-backdrop,
-.ba-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: end center; padding: 10px; background: rgba(15,23,42,.50); backdrop-filter: blur(12px); }
-.ba-sheet { width: min(760px, 100%); max-height: min(88dvh, 760px); overflow-y: auto; padding: 14px; border-radius: 28px 28px 22px 22px; box-shadow: 0 30px 90px rgba(15,23,42,.32); animation: sheetIn .18s var(--ease); }
-.ba-sheet.small { width: min(520px, 100%); }
-@keyframes sheetIn { from { transform: translateY(16px); opacity: .7; } to { transform: translateY(0); opacity: 1; } }
+.ba-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: end center;
+  padding: 10px;
+  background: rgba(15,23,42,.50);
+  backdrop-filter: blur(12px);
+}
+
+.ba-sheet {
+  width: min(760px, 100%);
+  max-height: min(88dvh, 760px);
+  overflow-y: auto;
+  padding: 14px;
+  border-radius: 28px 28px 22px 22px;
+  box-shadow: 0 30px 90px rgba(15,23,42,.32);
+  animation: sheetIn .18s var(--ease);
+}
+
+.ba-sheet.small {
+  width: min(520px, 100%);
+}
+
+@keyframes sheetIn {
+  from { transform: translateY(16px); opacity: .7; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 .ba-sheet-head,
-.ba-sheet-profile,
-.ba-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 12px; }
+.ba-sheet-profile {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
 .ba-sheet-head h2,
 .ba-sheet-profile h2,
-.ba-modal-head h2 { margin: 0; color: var(--text,#111827); font-size: 21px; font-weight: 1000; letter-spacing: -.05em; }
+.ba-modal-head h2 {
+  margin: 0;
+  color: var(--text,#111827);
+  font-size: 21px;
+  font-weight: 1000;
+  letter-spacing: -.05em;
+}
+
 .ba-sheet-head p,
 .ba-sheet-profile p,
-.ba-modal-head p { margin: 5px 0 0; color: var(--muted,#64748b); font-size: 12px; line-height: 1.5; font-weight: 750; }
+.ba-modal-head p {
+  margin: 5px 0 0;
+  color: var(--muted,#64748b);
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 750;
+}
+
 .ba-sheet-head button,
 .ba-sheet-profile button,
-.ba-modal-head button { width: 38px; height: 38px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; background: var(--surface,#fff); color: var(--text,#111827); font-weight: 1000; cursor: pointer; flex: 0 0 auto; }
+.ba-modal-head button {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+  border-radius: 999px;
+  background: var(--surface,#fff);
+  color: var(--text,#111827);
+  font-weight: 1000;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
 .ba-sheet-actions,
-.ba-modal-actions { position: sticky; bottom: -14px; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding: 12px 0 2px; background: linear-gradient(to top, var(--card-bg,var(--surface,#fff)) 70%, transparent); }
+.ba-modal-actions {
+  position: sticky;
+  bottom: -14px;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px 0 2px;
+  background: linear-gradient(to top, var(--card-bg,var(--surface,#fff)) 70%, transparent);
+}
+
 .ba-sheet-actions button,
-.ba-modal-actions button { min-height: 42px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; padding: 0 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff)); color: var(--text,#111827); font-size: 12px; font-weight: 950; cursor: pointer; }
+.ba-modal-actions button {
+  min-height: 42px;
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+  border-radius: 999px;
+  padding: 0 16px;
+  background: color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff));
+  color: var(--text,#111827);
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
 .ba-sheet-actions button.primary,
-.ba-modal-actions button:last-child { border-color: var(--ba-primary); background: var(--ba-primary); color: #fff; box-shadow: 0 14px 32px color-mix(in srgb, var(--ba-primary) 25%, transparent); }
-.ba-modal-actions button:disabled { opacity: .65; cursor: not-allowed; }
-.ba-menu-list { display: grid; gap: 8px; }
-.ba-menu-list button { width: 100%; display: grid; grid-template-columns: 42px minmax(0,1fr); column-gap: 10px; align-items: center; min-height: 58px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 18px; padding: 9px; background: var(--surface,#fff); color: var(--text,#111827); text-align: left; cursor: pointer; }
-.ba-menu-list button span { grid-row: span 2; width: 42px; height: 42px; display: grid; place-items: center; border-radius: 16px; background: color-mix(in srgb, var(--ba-primary) 10%, transparent); color: var(--ba-primary); font-weight: 1000; }
+.ba-modal-actions button:last-child {
+  border-color: var(--ba-primary);
+  background: var(--ba-primary);
+  color: #fff;
+  box-shadow: 0 14px 32px color-mix(in srgb, var(--ba-primary) 25%, transparent);
+}
+
+.ba-modal-actions button:disabled {
+  opacity: .65;
+  cursor: not-allowed;
+}
+
+.ba-menu-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ba-menu-list button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 42px minmax(0,1fr);
+  column-gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+  border-radius: 18px;
+  padding: 9px;
+  background: var(--surface,#fff);
+  color: var(--text,#111827);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ba-menu-list button span {
+  grid-row: span 2;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--ba-primary) 10%, transparent);
+  color: var(--ba-primary);
+  font-weight: 1000;
+}
+
 .ba-menu-list button b,
-.ba-menu-list button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ba-menu-list button b { font-size: 13px; font-weight: 1000; }
-.ba-menu-list button small { margin-top: 2px; color: var(--muted,#64748b); font-size: 11px; font-weight: 750; }
-.ba-menu-list button.active { border-color: color-mix(in srgb, var(--ba-primary) 34%, var(--border,rgba(0,0,0,.10))); background: color-mix(in srgb, var(--ba-primary) 8%, var(--surface,#fff)); }
-.ba-menu-list button.danger span { background: color-mix(in srgb, #dc2626 10%, transparent); color: #dc2626; }
-.ba-menu-list button.danger b { color: #991b1b; }
-.parent-detail-strip { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 7px; margin-bottom: 10px; }
-.parent-detail-strip span { display: grid; gap: 4px; padding: 10px; border-radius: 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent); color: var(--muted,#64748b); font-size: 11px; font-weight: 850; overflow: hidden; }
-.parent-detail-strip b { color: var(--text,#111827); font-size: 12px; font-weight: 1000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ba-menu-list button small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-.ba-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
-.ba-form.two { grid-template-columns: minmax(0,1fr); }
-.ba-form label { display: grid; gap: 6px; min-width: 0; }
-.ba-form span { color: var(--muted,#64748b); font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
-.ba-form .wide { grid-column: 1 / -1; }
-.ba-form-section { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--border, rgba(0,0,0,.08)); }
-.ba-form-section:first-of-type { border-top: 0; padding-top: 0; }
-.ba-form-section h3 { margin: 0; font-size: 13px; color: var(--text,#111827); font-weight: 1000; letter-spacing: -.02em; }
-.ba-modal { width: min(980px, 100%); max-height: min(92dvh, 900px); overflow-y: auto; padding: 14px; border-radius: 28px; background: var(--card-bg,var(--surface,#fff)); border: 1px solid var(--border,rgba(0,0,0,.10)); box-shadow: 0 30px 90px rgba(15,23,42,.35); }
-.link-modal { width: min(720px, 100%); }
-.ba-check { min-height: 43px; display: flex !important; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 15px; background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent); border: 1px solid var(--border,rgba(0,0,0,.10)); color: var(--text,#111827); font-size: 13px; font-weight: 850; }
-.ba-check input { width: 18px; min-height: 18px; }
-.ba-check span { color: var(--text,#111827); font-size: 13px; letter-spacing: 0; text-transform: none; }
-.ba-media-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
-.ba-media-button { min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--ba-primary); background: var(--ba-primary); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 950; cursor: pointer; }
-.ba-media-button.secondary { background: var(--surface,#fff); color: var(--ba-primary); }
-.ba-media-hint { display: block; color: var(--muted,#64748b); font-size: 11px; line-height: 1.4; font-weight: 750; }
-.ba-preview-photo { width: 96px; height: 96px; object-fit: cover; border-radius: 22px; border: 1px solid var(--border,rgba(0,0,0,.10)); }
-.ba-preview-banner { width: 100%; height: 130px; object-fit: cover; border-radius: 22px; border: 1px solid var(--border,rgba(0,0,0,.10)); }
+.ba-menu-list button b {
+  font-size: 13px;
+  font-weight: 1000;
+}
 
-.ba-table-card { margin-top: 10px; padding: 0; border-radius: 24px; overflow: hidden; }
-.ba-table-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
-.ba-table-scroll table { width: 100%; min-width: 980px; border-collapse: collapse; background: var(--card-bg,var(--surface,#fff)); }
+.ba-menu-list button small {
+  margin-top: 2px;
+  color: var(--muted,#64748b);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.ba-menu-list button.active {
+  border-color: color-mix(in srgb, var(--ba-primary) 34%, var(--border,rgba(0,0,0,.10)));
+  background: color-mix(in srgb, var(--ba-primary) 8%, var(--surface,#fff));
+}
+
+.ba-menu-list button.danger span {
+  background: color-mix(in srgb, #dc2626 10%, transparent);
+  color: #dc2626;
+}
+
+.ba-menu-list button.danger b {
+  color: #991b1b;
+}
+
+.student-detail-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.student-detail-strip span {
+  display: block;
+  padding: 9px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--muted,#64748b) 8%, transparent);
+  color: var(--muted,#64748b);
+  font-size: 11px;
+  font-weight: 850;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-detail-strip b {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text,#111827);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.ba-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.ba-form.two {
+  grid-template-columns: minmax(0,1fr);
+}
+
+.ba-form.compact {
+  gap: 9px;
+}
+
+.ba-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ba-form span {
+  color: var(--muted,#64748b);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.ba-media-hint {
+  color: var(--muted,#64748b);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.ba-form .wide {
+  grid-column: 1 / -1;
+}
+
+.ba-form-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--border,rgba(0,0,0,.08));
+}
+
+.ba-form-section:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.ba-form-section h3 {
+  margin: 0 0 10px;
+  color: var(--text,#111827);
+  font-size: 14px;
+  font-weight: 1000;
+  letter-spacing: -.03em;
+}
+
+.ba-page input[type="file"] {
+  padding: 10px;
+  font-size: 12px;
+}
+
+.ba-page textarea {
+  min-height: 92px;
+  padding: 12px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+
+.ba-media-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.ba-media-button {
+  width: auto;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ba-primary);
+  border-radius: 999px;
+  padding: 0 14px;
+  background: var(--ba-primary);
+  color: #fff !important;
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  cursor: pointer;
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--ba-primary) 18%, transparent);
+  transition: transform .18s var(--ease), background .18s var(--ease), border-color .18s var(--ease), box-shadow .18s var(--ease), filter .18s var(--ease);
+}
+
+.ba-media-button.secondary {
+  background: var(--surface, #fff);
+  color: var(--ba-primary) !important;
+  box-shadow: none;
+}
+
+.ba-media-button input {
+  display: none;
+}
+
+.ba-preview-photo {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 22px;
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+}
+
+.ba-preview-banner {
+  width: 100%;
+  height: 130px;
+  object-fit: cover;
+  border-radius: 22px;
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+}
+
+.ba-modal {
+  width: min(980px, 100%);
+  max-height: min(92dvh, 900px);
+  overflow-y: auto;
+  padding: 14px;
+  border-radius: 28px;
+  box-shadow: 0 30px 90px rgba(15,23,42,.35);
+}
+
+.ba-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 2px 14px;
+}
+
+.ba-analysis-grid {
+  display: grid;
+  grid-template-columns: minmax(0,1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ba-analysis,
+.ba-table-card,
+.ba-empty {
+  padding: 13px;
+  border-radius: 24px;
+}
+
+.ba-analysis span {
+  color: var(--muted,#64748b);
+  font-size: 11px;
+  font-weight: 950;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.ba-analysis strong {
+  display: block;
+  margin-top: 8px;
+  font-size: clamp(22px,7vw,30px);
+  line-height: 1;
+  font-weight: 1000;
+  letter-spacing: -.06em;
+  overflow-wrap: anywhere;
+}
+
+.ba-analysis p {
+  margin: 8px 0 0;
+  color: var(--muted,#64748b);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ba-analysis-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.ba-analysis-list section {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 16px;
+  background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent);
+}
+
+.ba-analysis-list section > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ba-analysis-list b,
+.ba-analysis-list small {
+  font-size: 12px;
+}
+
+.ba-analysis-list small {
+  color: var(--muted,#64748b);
+  font-weight: 850;
+}
+
+.ba-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb,var(--muted,#64748b) 18%,transparent);
+  overflow: hidden;
+}
+
+.ba-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ba-primary);
+}
+
+.ba-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 220px;
+  text-align: center;
+  border-style: dashed;
+}
+
+.ba-empty-icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: 22px;
+  background: color-mix(in srgb,var(--ba-primary) 12%,var(--surface,#fff));
+  font-size: 28px;
+}
+
+.ba-empty h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 1000;
+}
+
+.ba-empty p {
+  margin: 0;
+  color: var(--muted,#64748b);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ba-table-card {
+  margin-top: 10px;
+}
+
+.ba-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 18px;
+  border: 1px solid var(--border,rgba(0,0,0,.08));
+}
+
+.ba-table-scroll table {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+  background: var(--card-bg, var(--surface, var(--bg, transparent)));
+}
+
 .ba-table-scroll th,
-.ba-table-scroll td { padding: 10px; border-bottom: 1px solid var(--border,rgba(0,0,0,.08)); vertical-align: top; text-align: left; font-size: 13px; }
+.ba-table-scroll td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border,rgba(0,0,0,.08));
+  vertical-align: top;
+  text-align: left;
+  font-size: 13px;
+}
+
 .ba-table-scroll th {
   background: var(--table-header-bg, color-mix(in srgb, var(--ba-primary) 6%, var(--card-bg, var(--surface, var(--bg, transparent)))));
   color: var(--table-header-text, var(--muted, var(--text)));
@@ -2679,53 +4041,69 @@ const css = `
   text-transform: uppercase;
   letter-spacing: .07em;
 }
+
 .ba-table-scroll td strong,
-.ba-table-scroll td span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ba-table-scroll td span { margin-top: 3px; color: var(--muted,#64748b); font-size: 11px; }
-.ba-table-actions { display: flex; flex-wrap: nowrap; gap: 7px; }
-.ba-table-actions button { min-height: 34px; border: 1px solid var(--border,rgba(0,0,0,.10)); border-radius: 999px; padding: 0 10px; background: var(--surface,#fff); color: var(--text,#111827); font-size: 11px; font-weight: 950; cursor: pointer; white-space: nowrap; }
-.ba-table-actions button:first-child { background: var(--ba-primary); color: #fff; border-color: var(--ba-primary); }
+.ba-table-scroll td span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ba-table-scroll td span {
+  margin-top: 3px;
+  color: var(--muted,#64748b);
+  font-size: 11px;
+}
+
+.ba-table-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 7px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ba-table-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.ba-table-actions button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+  border-radius: 999px;
+  padding: 0 10px;
+  background: var(--surface,#fff);
+  color: var(--text,#111827);
+  font-size: 11px;
+  font-weight: 950;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ba-table-actions button:first-child {
+  background: var(--ba-primary);
+  color: #fff;
+  border-color: var(--ba-primary);
+}
+
 .ba-delete,
-.ba-table-actions button.ba-delete { border-color: color-mix(in srgb,#dc2626 24%,var(--border,rgba(0,0,0,.10))); background: color-mix(in srgb,#dc2626 7%,var(--surface,#fff)); color: #991b1b; }
-.ba-empty-table { padding: 22px; text-align: center; color: var(--muted,#64748b); font-weight: 850; }
+.ba-table-actions button.ba-delete {
+  color: #991b1b;
+  background: color-mix(in srgb,#dc2626 7%,var(--surface,#fff));
+  border-color: color-mix(in srgb,#dc2626 24%,var(--border,rgba(0,0,0,.10)));
+}
 
-.ba-analysis-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-top: 10px; }
-.ba-analysis { padding: 13px; border-radius: 24px; }
-.ba-analysis span { color: var(--muted,#64748b); font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .08em; }
-.ba-analysis strong { display: block; margin-top: 8px; font-size: clamp(22px,7vw,30px); line-height: 1; font-weight: 1000; letter-spacing: -.06em; overflow-wrap: anywhere; }
-.ba-analysis p { margin: 8px 0 0; color: var(--muted,#64748b); font-size: 12px; line-height: 1.5; }
-.ba-analysis-list { display: grid; gap: 10px; margin-top: 12px; }
-.ba-analysis-list section { display: grid; gap: 6px; padding: 10px; border-radius: 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent); }
-.ba-analysis-list section > div:first-child { display: flex; justify-content: space-between; gap: 10px; }
-.ba-analysis-list b,
-.ba-analysis-list small { font-size: 12px; }
-.ba-analysis-list small { color: var(--muted,#64748b); font-weight: 850; }
-.ba-progress { height: 8px; border-radius: 999px; background: color-mix(in srgb,var(--muted,#64748b) 18%,transparent); overflow: hidden; }
-.ba-progress i { display: block; height: 100%; border-radius: inherit; background: var(--ba-primary); }
-.ba-empty { display: grid; place-items: center; align-content: center; gap: 8px; min-height: 220px; text-align: center; border-style: dashed; border-radius: 24px; padding: 18px; }
-.ba-empty-icon { width: 56px; height: 56px; display: grid; place-items: center; border-radius: 22px; background: color-mix(in srgb,var(--ba-primary) 12%,var(--surface,#fff)); font-size: 28px; }
-.ba-empty h3 { margin: 0; font-size: 18px; font-weight: 1000; }
-.ba-empty p { margin: 0; color: var(--muted,#64748b); font-size: 13px; line-height: 1.6; }
-
-.link-list { display: grid; gap: 7px; margin: 0 0 10px; }
-.link-list.compact { margin-bottom: 10px; }
-.link-row { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; border-radius: 16px; background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent); border: 1px solid var(--border,rgba(0,0,0,.10)); }
-.link-row div { min-width: 0; }
-.link-row strong,
-.link-row span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.link-row strong { font-size: 12px; font-weight: 1000; color: var(--text,#111827); }
-.link-row span { margin-top: 2px; color: var(--muted,#64748b); font-size: 11px; font-weight: 800; }
-.link-row button { flex: 0 0 auto; min-height: 32px; border: 1px solid color-mix(in srgb,#dc2626 20%,var(--border,rgba(0,0,0,.10))); border-radius: 999px; background: color-mix(in srgb,#dc2626 7%,var(--surface,#fff)); color: #991b1b; font-size: 11px; font-weight: 950; cursor: pointer; padding: 0 10px; }
-
-.ba-camera-modal { width: min(760px, 100%); max-height: min(92dvh, 900px); overflow-y: auto; padding: 14px; border-radius: 28px; box-shadow: 0 30px 90px rgba(15,23,42,.35); }
-.ba-camera-preview { position: relative; width: 100%; aspect-ratio: 4/3; overflow: hidden; border-radius: 22px; background: #020617; display: grid; place-items: center; }
-.ba-camera-preview video { width: 100%; height: 100%; object-fit: cover; }
-.ba-camera-loading { position: absolute; inset: auto 12px 12px; min-height: 36px; display: grid; place-items: center; border-radius: 999px; background: rgba(15,23,42,.72); color: #fff; font-size: 12px; font-weight: 900; }
-.ba-camera-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 12px; }
-.ba-camera-actions button { min-height: 42px; border-radius: 999px; padding: 0 14px; font-size: 12px; font-weight: 950; cursor: pointer; }
-.ba-camera-secondary { border: 1px solid var(--border,rgba(0,0,0,.10)); background: var(--surface,#fff); color: var(--text,#111827); }
-.ba-camera-primary { border: 1px solid var(--ba-primary); background: var(--ba-primary); color: #fff; }
-.ba-camera-actions button:disabled { opacity: .65; cursor: not-allowed; }
+.ba-empty-table {
+  padding: 22px;
+  text-align: center;
+  color: var(--muted,#64748b);
+  font-weight: 850;
+}
 
 @media (min-width: 680px) {
   .ba-page {
@@ -2755,8 +4133,7 @@ const css = `
     grid-template-columns: repeat(2, minmax(0,1fr));
   }
 
-  .ba-form.two,
-  .link-form {
+  .ba-form.two {
     grid-template-columns: repeat(2, minmax(0,1fr));
   }
 
@@ -2771,8 +4148,7 @@ const css = `
     padding: 18px;
   }
 
-  .ba-modal,
-  .ba-camera-modal {
+  .ba-modal {
     padding: 18px;
   }
 
@@ -2785,6 +4161,7 @@ const css = `
   }
 
   .ba-search-card,
+  .ba-summary-line,
   .ba-list,
   .ba-analysis-grid,
   .ba-table-card,
@@ -2810,23 +4187,634 @@ const css = `
     grid-template-columns: repeat(3, minmax(0,1fr));
   }
 
-  .ba-form.two,
-  .link-form {
+  .ba-form.two {
     grid-template-columns: repeat(2, minmax(0,1fr));
   }
 
 }
 
 @media (max-width: 520px) {
-  .ba-page { padding: calc(6px * var(--local-density-scale, 1)); }
-  .ba-search-card { gap: 6px; padding: 7px; border-radius: 22px; }
+  .ba-page {
+    padding: calc(7px * var(--local-density-scale,1));
+    padding-bottom: max(38px, env(safe-area-inset-bottom));
+  }
+
+  .ba-title h1 {
+    font-size: 28px;
+  }
+
   .ba-icon-button,
   .ba-filter-button,
-  .ba-add-inline { width: 40px; height: 40px; }
-  .ba-modal,
-  .ba-camera-modal { border-radius: 20px; padding: 11px; }
-  .ba-modal-actions,
-  .ba-camera-actions { display: grid; grid-template-columns: minmax(0,1fr); }
+  .ba-add-inline {
+    width: 40px;
+    height: 40px;
+  }
+
+  .ba-summary-line {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .student-detail-strip {
+    grid-template-columns: minmax(0,1fr);
+  }
+
+  .ba-sheet,
+  .ba-modal {
+    border-radius: 24px 24px 18px 18px;
+    padding: 12px;
+  }
+
+  .ba-sheet-actions,
+  .ba-modal-actions {
+    display: grid;
+    grid-template-columns: minmax(0,1fr);
+  }
+
+  .ba-sheet-actions button,
+  .ba-modal-actions button {
+    width: 100%;
+  }
+}
+
+
+.ba-media-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ba-media-button {
+  min-height: 40px;
+  border: 1px solid var(--ba-primary);
+  border-radius: 999px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ba-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+  text-align: center;
+  box-shadow: 0 12px 26px color-mix(in srgb, var(--ba-primary) 18%, transparent);
+}
+
+.ba-media-button.secondary {
+  background: var(--surface, #fff);
+  color: var(--ba-primary);
+  box-shadow: none;
+}
+
+.ba-media-hint {
+  display: block;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.camera-backdrop {
+  z-index: 100;
+  place-items: center;
+}
+
+.ba-camera-modal {
+  width: min(720px, 100%);
+  max-height: min(92dvh, 880px);
+  overflow-y: auto;
+  padding: 14px;
+  border-radius: 28px;
+  background: var(--card-bg, var(--surface, #fff));
+  border: 1px solid var(--border, rgba(0,0,0,.10));
+  box-shadow: 0 30px 90px rgba(15,23,42,.35);
+}
+
+.ba-camera-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 24px;
+  background: #020617;
+  border: 1px solid var(--border, rgba(0,0,0,.10));
+}
+
+.ba-camera-preview video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  background: #020617;
+}
+
+.ba-camera-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(2,6,23,.72);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.ba-camera-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ba-camera-actions button {
+  min-height: 42px;
+  border-radius: 999px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.ba-camera-secondary {
+  border: 1px solid var(--border, rgba(0,0,0,.10));
+  background: color-mix(in srgb, var(--muted, #64748b) 8%, var(--surface, #fff));
+  color: var(--text, #111827);
+}
+
+.ba-camera-primary {
+  border: 1px solid var(--ba-primary);
+  background: var(--ba-primary);
+  color: #fff;
+  box-shadow: 0 14px 32px color-mix(in srgb, var(--ba-primary) 25%, transparent);
+}
+
+.ba-camera-actions button:disabled {
+  opacity: .62;
+  cursor: not-allowed;
+}
+
+@media (max-width: 520px) {
+  .ba-media-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ba-media-button,
+  .ba-camera-actions button {
+    width: 100%;
+  }
+
+  .ba-camera-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ba-camera-modal {
+    border-radius: 22px;
+    padding: 11px;
+  }
+}
+
+/* ======================================================
+   STUDENTS — BRANCH SETTINGS ACTION SYSTEM
+   These declarations intentionally mirror Branchsettings.tsx.
+   Do not create a second Students-specific color hierarchy here.
+   ====================================================== */
+
+/* Same compact Branch Settings search/action strip. */
+.students-page .ba-search-card {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
+/* The + occupies the Branch Settings Save action slot while retaining its icon label. */
+.students-page .settings-save-button {
+  width: 42px;
+  min-width: 42px;
+  padding: 0;
+  font-size: 25px;
+  letter-spacing: 0;
+}
+
+/* Branch Settings primary action: Save / + / Upload / Apply / Done / Capture. */
+.students-page .ba-add-inline,
+.students-page .ba-modal-actions button:last-child,
+.students-page .ba-sheet-actions .primary,
+.students-page .ba-state-button,
+.students-page .ba-camera-primary,
+.students-page .ba-media-button:not(.secondary) {
+  border-color: var(--ba-primary);
+  background: var(--ba-primary);
+  color: #fff !important;
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--ba-primary) 22%, transparent);
+}
+
+/* Branch Settings filter treatment. */
+.students-page .ba-filter-button {
+  position: relative;
+  border-color: var(--border, rgba(0,0,0,.10));
+  background: color-mix(in srgb, var(--ba-primary) 8%, var(--card-bg,#fff));
+  color: var(--ba-primary) !important;
+  box-shadow: 0 10px 22px rgba(15,23,42,.045);
+}
+
+.students-page .ba-filter-button.active {
+  border-color: var(--ba-primary);
+  background: var(--ba-primary);
+  color: #fff !important;
+}
+
+.students-page .ba-filter-button b {
+  border-color: var(--card-bg,#fff);
+}
+
+/* Branch Settings More action: neutral card/surface. */
+.students-page .ba-icon-button {
+  border-color: var(--border, rgba(0,0,0,.10));
+  background: var(--card-bg, var(--surface,#fff));
+  color: var(--text,#111827) !important;
+  box-shadow: 0 10px 22px rgba(15,23,42,.045);
+}
+
+/* Branch Settings secondary hierarchy. */
+.students-page .ba-media-button.secondary,
+.students-page .ba-camera-secondary {
+  border-color: var(--ba-primary);
+  background: var(--surface,#fff);
+  color: var(--ba-primary) !important;
+  box-shadow: none;
+}
+
+.students-page .ba-cancel-button,
+.students-page .ba-modal-actions button:not(:last-child),
+.students-page .ba-sheet-actions button:not(.primary) {
+  border-color: var(--border, rgba(0,0,0,.10));
+  background: color-mix(in srgb, var(--muted,#64748b) 8%, var(--surface,#fff));
+  color: var(--text,#111827) !important;
+  box-shadow: none;
+}
+
+.students-page .ba-add-inline:hover,
+.students-page .ba-filter-button.active:hover,
+.students-page .ba-modal-actions button:last-child:hover,
+.students-page .ba-sheet-actions .primary:hover,
+.students-page .ba-state-button:hover,
+.students-page .ba-camera-primary:hover,
+.students-page .ba-media-button:not(.secondary):hover {
+  filter: brightness(.96);
+  transform: translateY(-1px);
+}
+
+.students-page .ba-filter-button:not(.active):hover {
+  background: color-mix(in srgb, var(--ba-primary) 12%, var(--card-bg,#fff));
+  transform: translateY(-1px);
+}
+
+.students-page .ba-icon-button:hover {
+  background: color-mix(in srgb, var(--ba-primary) 4%, var(--card-bg, var(--surface,#fff)));
+  transform: translateY(-1px);
+}
+
+.students-page .ba-media-button.secondary:hover,
+.students-page .ba-camera-secondary:hover {
+  background: color-mix(in srgb, var(--ba-primary) 7%, var(--surface,#fff));
+  transform: translateY(-1px);
+}
+
+.students-page .ba-add-inline:focus-visible,
+.students-page .ba-filter-button:focus-visible,
+.students-page .ba-icon-button:focus-visible,
+.students-page .ba-media-button:focus-visible,
+.students-page .ba-camera-primary:focus-visible,
+.students-page .ba-camera-secondary:focus-visible,
+.students-page .ba-modal-actions button:focus-visible,
+.students-page .ba-sheet-actions button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--ba-primary) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.students-page button:disabled,
+.students-page .ba-media-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: .58;
+  transform: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+}
+
+.students-page .ba-search:focus-within {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ba-primary) 12%, transparent);
+}
+
+/* Subtle branch-color accents for records and data surfaces. */
+.students-page .student-row {
+  position: relative;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--ba-primary) 15%, var(--border, rgba(0,0,0,.10)));
+}
+
+.students-page .student-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ba-primary);
+  opacity: .78;
+}
+
+.students-page .student-row:hover,
+.students-page .student-row:focus-within {
+  border-color: color-mix(in srgb, var(--ba-primary) 46%, var(--border, rgba(0,0,0,.10)));
+  background: color-mix(in srgb, var(--ba-primary) 5%, var(--card-bg, var(--surface, #fff)));
+  box-shadow: 0 14px 30px color-mix(in srgb, var(--ba-primary) 10%, transparent);
+}
+
+.students-page .ba-avatar {
+  border: 1px solid color-mix(in srgb, var(--ba-primary) 42%, transparent);
+  box-shadow: 0 12px 24px color-mix(in srgb, var(--ba-primary) 18%, transparent);
+}
+
+.students-page .ba-filter-chips button,
+.students-page .ba-chip.blue,
+.students-page .ba-chip.purple {
+  border-color: color-mix(in srgb, var(--ba-primary) 30%, transparent);
+  background: color-mix(in srgb, var(--ba-primary) 10%, var(--card-bg, var(--surface, #fff)));
+  color: var(--ba-primary);
+}
+
+.students-page .ba-table-scroll th {
+  background: color-mix(in srgb, var(--ba-primary) 9%, var(--table-head, var(--card-bg, #fff)));
+  color: var(--text, #111827);
+}
+
+.students-map-view {
+  display: grid;
+  gap: 10px;
+}
+
+.students-map-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ba-primary) 16%, var(--border, rgba(0,0,0,.10)));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ba-primary) 4%, var(--card-bg, var(--surface, #fff)));
+}
+
+.students-map-summary span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.students-map-summary strong {
+  color: var(--ba-primary);
+  font-size: 17px;
+}
+
+.students-map-summary small {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: .64;
+}
+
+.students-map-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text, #111827);
+}
+
+.students-map-empty > span {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: var(--ba-primary);
+  background: color-mix(in srgb, var(--ba-primary) 10%, transparent);
+  font-size: 22px;
+}
+
+.students-map-empty strong {
+  font-size: 13px;
+}
+
+.students-map-empty small {
+  max-width: 360px;
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: .62;
+}
+
+@media (max-width: 640px) {
+  .students-map-summary {
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .students-map-summary small {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+
+.ba-section-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ba-section-heading-row h3 {
+  margin: 0;
+}
+
+.ba-section-heading-row p {
+  margin: 4px 0 0;
+  color: var(--ba-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.ba-location-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ba-check-row {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ba-border);
+  border-radius: 12px;
+  background: var(--ba-card);
+  cursor: pointer;
+}
+
+.ba-check-row input {
+  width: 17px !important;
+  height: 17px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.ba-check-row > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ba-check-row strong {
+  font-size: 0.82rem;
+}
+
+.ba-check-row small {
+  color: var(--ba-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ba-location-captured {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--ba-primary) 8%, var(--ba-card));
+  border: 1px solid color-mix(in srgb, var(--ba-primary) 22%, var(--ba-border));
+  font-size: 0.75rem;
+}
+
+.ba-location-captured small {
+  color: var(--ba-muted);
+}
+
+.ba-location-captured button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--ba-primary);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .ba-section-heading-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ba-section-heading-row .ba-media-button {
+    width: 100%;
+  }
+
+  .ba-location-captured button {
+    margin-left: 0;
+  }
+}
+
+
+/* Parent-specific extensions retained on top of the exact Students design system. */
+.parent-detail-strip {
+  display: grid;
+  grid-template-columns: repeat(3,minmax(0,1fr));
+  gap: 7px;
+  margin-bottom: 10px;
+}
+.parent-detail-strip span {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 16px;
+  background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent);
+  color: var(--muted,#64748b);
+  font-size: 11px;
+  font-weight: 850;
+  overflow: hidden;
+}
+.parent-detail-strip b {
+  color: var(--text,#111827);
+  font-size: 12px;
+  font-weight: 1000;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-modal { width: min(720px, 100%); }
+.link-list { display: grid; gap: 7px; margin: 0 0 10px; }
+.link-list.compact { margin-bottom: 10px; }
+.link-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px;
+  border-radius: 16px;
+  background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent);
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+}
+.link-row div { min-width: 0; }
+.link-row strong,
+.link-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-row strong { font-size: 12px; font-weight: 1000; color: var(--text,#111827); }
+.link-row span { margin-top: 2px; color: var(--muted,#64748b); font-size: 11px; font-weight: 800; }
+.link-row button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border: 1px solid color-mix(in srgb,#dc2626 20%,var(--border,rgba(0,0,0,.10)));
+  border-radius: 999px;
+  background: color-mix(in srgb,#dc2626 7%,var(--surface,#fff));
+  color: #991b1b;
+  font-size: 11px;
+  font-weight: 950;
+  cursor: pointer;
+  padding: 0 10px;
+}
+.ba-check {
+  min-height: 43px;
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 15px;
+  background: color-mix(in srgb,var(--muted,#64748b) 8%,transparent);
+  border: 1px solid var(--border,rgba(0,0,0,.10));
+  color: var(--text,#111827);
+  font-size: 13px;
+  font-weight: 850;
+}
+.ba-check input { width: 18px; min-height: 18px; }
+.ba-check span {
+  color: var(--text,#111827);
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+@media (min-width: 760px) {
+  .link-form { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 520px) {
   .parent-detail-strip { grid-template-columns: 1fr; }
 }
 `;

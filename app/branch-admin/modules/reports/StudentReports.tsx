@@ -66,6 +66,7 @@ import {
   School,
   Student,
   StudentEnrollment,
+  StudentAttendanceSummary,
   Parent,
   StudentParent,
   ClassTeacher,
@@ -111,6 +112,12 @@ import { useDataRevision } from "../../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../../hooks/useBackgroundLoader";
 const TemplateAwareStudentReportCard =
   StudentReportCard as React.ComponentType<any>;
+
+const STUDENT_REPORT_TYPE = "student_report";
+
+function isStudentReportRecord(row: any) {
+  return row?.reportType === STUDENT_REPORT_TYPE || !row?.reportType;
+}
 
 type EntityId = string | number;
 
@@ -427,6 +434,9 @@ export default function StudentReports() {
   const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
+  const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
+    StudentAttendanceSummary[]
+  >([]);
   const [computedResults, setComputedResults] = useState<ComputedResult[]>([]);
   const [reportCards, setReportCards] = useState<ReportCard[]>([]);
   const [reportCardItems, setReportCardItems] = useState<ReportCardItem[]>([]);
@@ -489,6 +499,7 @@ export default function StudentReports() {
     setGradingSystems([]);
     setGradeRules([]);
     setAttendance([]);
+    setStudentAttendanceSummaries([]);
     setComputedResults([]);
     setReportCards([]);
     setReportCardItems([]);
@@ -587,6 +598,7 @@ export default function StudentReports() {
         gradingRows,
         ruleRows,
         attendanceRows,
+        studentAttendanceSummaryRows,
         computedRows,
         reportCardRows,
         reportCardItemRows,
@@ -615,6 +627,7 @@ export default function StudentReports() {
         db.gradingSystems.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
+        (db as any).studentAttendanceSummaries?.toArray?.() || [],
         db.computedResults.toArray(),
         db.reportCards.toArray(),
         db.reportCardItems.toArray(),
@@ -665,6 +678,7 @@ export default function StudentReports() {
       )
         .filter((row: any) => {
           if (row.isDeleted || row.active === false) return false;
+          if (!isStudentReportRecord(row)) return false;
           if (row.accountId && row.accountId !== accountId) return false;
           if (
             row.schoolId &&
@@ -688,6 +702,7 @@ export default function StudentReports() {
         reportCardTemplateSettingRows as ReportCardTemplateSettingsLike[]
       ).filter((row: any) => {
         if (row.isDeleted || row.active === false) return false;
+          if (!isStudentReportRecord(row)) return false;
         if (row.accountId && row.accountId !== accountId) return false;
         if (
           row.schoolId &&
@@ -706,6 +721,7 @@ export default function StudentReports() {
         reportCardTemplateAssignmentRows as ReportCardTemplateAssignmentLike[]
       ).filter((row: any) => {
         if (row.isDeleted || row.active === false) return false;
+          if (!isStudentReportRecord(row)) return false;
         if (row.accountId && row.accountId !== accountId) return false;
         if (
           row.schoolId &&
@@ -879,6 +895,11 @@ export default function StudentReports() {
         ruleRows.filter((row) => sameTenant(row) && row.active !== false),
       );
       setAttendance(attendanceRows.filter(sameTenant));
+      setStudentAttendanceSummaries(
+        (studentAttendanceSummaryRows as StudentAttendanceSummary[]).filter(
+          sameTenant,
+        ),
+      );
       setComputedResults(computedRows.filter(sameTenant));
       setReportCards(scopedReportCards);
 
@@ -1087,6 +1108,7 @@ export default function StudentReports() {
       gradingSystems,
       gradeRules,
       attendance,
+      studentAttendanceSummaries,
       computedResults,
       reportCards,
       reportCardItems,
@@ -1113,6 +1135,7 @@ export default function StudentReports() {
       gradingSystems,
       gradeRules,
       attendance,
+      studentAttendanceSummaries,
       computedResults,
       reportCards,
       reportCardItems,
@@ -1233,21 +1256,26 @@ export default function StudentReports() {
   };
 
   const activeReportTemplateAssignment = useMemo(() => {
+    const studentAssignments = reportCardTemplateAssignments.filter(
+      (row: any) => row.active !== false && isStudentReportRecord(row),
+    );
+
     return (
-      reportCardTemplateAssignments.find(
+      studentAssignments.find(
         (row: any) =>
-          row.active !== false &&
           row.isDefault === true &&
           (!row.scopeType || row.scopeType === "branch") &&
           (!row.scopeId ||
             String(row.scopeId ?? "") === String(branchId ?? "")),
       ) ||
-      reportCardTemplateAssignments.find(
+      studentAssignments.find(
         (row: any) =>
-          row.active !== false &&
-          (!row.scopeType || row.scopeType === "branch"),
+          (!row.scopeType || row.scopeType === "branch") &&
+          (!row.scopeId ||
+            String(row.scopeId ?? "") === String(branchId ?? "")),
       ) ||
-      reportCardTemplateAssignments.find((row: any) => row.active !== false) ||
+      studentAssignments.find((row: any) => row.isDefault === true) ||
+      studentAssignments[0] ||
       null
     );
   }, [reportCardTemplateAssignments, branchId]);

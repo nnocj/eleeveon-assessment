@@ -18,7 +18,7 @@
  * - Provides mobile-first card/table/summary views.
  * - Lets the teacher jump to related teacher pages through navigate().
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 
 import { useAccount } from "../../context/account-context";
@@ -1583,3 +1583,4 @@ const css = `
   }
 }
 `;
+*/

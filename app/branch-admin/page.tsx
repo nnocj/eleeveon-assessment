@@ -157,6 +157,17 @@ import Usersroles from "./modules/Usersroles";
 // PLACEHOLDER MODULE
 // ======================================================
 
+import IdentityOverview from "./modules/IdentityOverview";
+import IdentityCredentials from "./modules/IdentityCredentials";
+import IdentityDevices from "./modules/IdentityDevices";
+import IdentityAccessPoints from "./modules/IdentityAccessPoints";
+import IdentityActivity from "./modules/IdentityActivity";
+import IdentityCards from "./modules/IdentityCards";
+import StudentPickup from "./modules/StudentPickup";
+import Visitors from "./modules/Visitors";
+import SchoolTransport from "./modules/SchoolTransport";
+import EmergencyRollCall from "./modules/EmergencyRollCall";
+
 type RouteProps = {
   navigate: (key: string) => void;
 };
@@ -521,8 +532,65 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         label: "Enrollments",
         icon: "🧾",
       },
+      
     ],
   },
+  {
+  title: "Identity & Safety",
+  defaultOpen: false,
+  items: [
+    {
+      key: "identityOverview",
+      label: "Identity Overview",
+      icon: "🆔",
+    },
+    {
+      key: "identityCredentials",
+      label: "Credentials",
+      icon: "🔑",
+    },
+    {
+      key: "identityDevices",
+      label: "Devices",
+      icon: "📱",
+    },
+    {
+      key: "identityAccessPoints",
+      label: "Access Points",
+      icon: "🚪",
+    },
+    {
+      key: "identityActivity",
+      label: "Activity",
+      icon: "📜",
+    },
+    {
+      key: "identityCards",
+      label: "Identity Cards",
+      icon: "💳",
+    },
+    {
+      key: "studentPickup",
+      label: "Student Pickup",
+      icon: "🚸",
+    },
+    {
+      key: "visitors",
+      label: "Visitors",
+      icon: "👥",
+    },
+    {
+      key: "schoolTransport",
+      label: "School Transport",
+      icon: "🚌",
+    },
+    {
+      key: "emergencyRollCall",
+      label: "Emergency Roll Call",
+      icon: "🚨",
+    },
+  ],
+},
 
   {
     title: "Attendance",
@@ -675,6 +743,18 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   classSubjects: ClassSubjects,
   subjectPrerequisites: SubjectPrerequisites,
   studentEnrollments: StudentEnrollments,
+
+  identityOverview: IdentityOverview,
+  identityCredentials: IdentityCredentials,
+  identityDevices: IdentityDevices,
+  identityAccessPoints: IdentityAccessPoints,
+  identityActivity: IdentityActivity,
+  identityCards: IdentityCards,
+  studentPickup: StudentPickup,
+  visitors: Visitors,
+  schoolTransport: SchoolTransport,
+  emergencyRollCall: EmergencyRollCall,
+  
   resourceTimetable: ResourceTimetable,
 
   // Daily Work

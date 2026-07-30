@@ -21,15 +21,15 @@ import RolePortalShell from "../components/role-portals/RolePortalShell";
 import { STUDENT_ROLES } from "../lib/auth/roleRedirect";
 
 import Studentdashboard from "./modules/Studentdashboard";
-import Mysubjects from "./modules/Mysubjects";
-import Myattendance from "./modules/Myattendance";
+import MyAttendance from "./modules/MyAttendance";
 import Myresults from "./modules/Myresults";
-import Myreportcards from "./modules/Myreportcards";
-import Announcements from "./modules/Announcements";
-import Calendar from "./modules/Calendar";
-import Messages from "./modules/Messages";
+import MyReport from "./modules/MyReport";
+import MyCumulativeRecords from "./modules/MyCumulativeRecords";
+//import Announcements from "./modules/Announcements";
+//import Calendar from "./modules/Calendar";
+/*import Messages from "./modules/Messages";
 import MyTimetable from "./modules/MyTimetable";
-import StudentPayments from "./modules/StudentPayments";
+import StudentPayments from "./modules/StudentPayments";*/
 
 export const NAV_SECTIONS = [
   {
@@ -37,7 +37,6 @@ export const NAV_SECTIONS = [
     defaultOpen: true,
     items: [
       { key: "studentDashboard", label: "Dashboard", icon: "🏠" },
-      { key: "mySubjects", label: "My Subjects", icon: "📘" },
       { key: "myAttendance", label: "Attendance", icon: "📅" },
     ],
   },
@@ -45,11 +44,11 @@ export const NAV_SECTIONS = [
     title: "My Records",
     defaultOpen: false,
     items: [
-      { key: "myResults", label: "Results", icon: "📊" },
-      { key: "myReportCards", label: "Report Cards", icon: "📄" },
+      { key: "myReport", label: "Report Card", icon: "📊" },
+      { key: "myCumulativeRecords", label: "Cumulative Records", icon: "📑" },
     ],
   },
-  {
+  /*{
     title: "My Communications",
     defaultOpen: false,
     items: [
@@ -58,7 +57,7 @@ export const NAV_SECTIONS = [
       { key: "messages", label: "Messages", icon: "✉️" },
       { key: "myTimetable", label: "My Timetable", icon: "⏰" },
     ],
-  },
+  },*/
   {
     title: "My Finances",
     defaultOpen: false,
@@ -78,15 +77,15 @@ function StudentDashboardRoute({ navigate }: RouteProps) {
 
 const ROUTES = {
   studentDashboard: StudentDashboardRoute,
-  mySubjects: Mysubjects,
-  myAttendance: Myattendance,
+  myAttendance: MyAttendance,
   myResults: Myresults,
-  myReportCards: Myreportcards,
-  announcements: Announcements,
+  myCumulativeRecords: MyCumulativeRecords,
+  myReport: MyReport,
+  /*announcements: Announcements,
   calendar: Calendar,
   messages: Messages,
   myTimetable: MyTimetable,
-  studentPayments: StudentPayments,
+  studentPayments: StudentPayments,*/
 };
 
 export default function StudentPage() {

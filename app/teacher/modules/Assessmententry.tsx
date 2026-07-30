@@ -20,7 +20,7 @@
  * - App computes totals, weighted percentage, grade and remark.
  * - App saves to assessmentEntries with account/school/branch/teacher/class/subject context.
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 
 import { useAccount } from "../../context/account-context";
@@ -2262,3 +2262,4 @@ const css = `
   }
 }
 `;
+*/

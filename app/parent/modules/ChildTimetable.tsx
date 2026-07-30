@@ -17,9 +17,6 @@ import { useActiveBranch } from "../../context/active-branch-context";
 
 import { db } from "../../lib/db/db";
 import {
-  listCalendarEvents,
-} from "../../lib/calendar";
-import {
   listScheduleResources,
   listSessionsForBranch,
   listTimetables,
@@ -34,39 +31,17 @@ function n(value: any) {
   return Number.isFinite(number) ? number : 0;
 }
 
-function now() {
-  return Date.now();
-}
-
 function text(value: any, fallback = "") {
   const clean = String(value || "").trim();
   return clean || fallback;
 }
 
-function dateLabel(value?: number | string) {
-  if (!value) return "Not set";
-  const stamp = typeof value === "number" ? value : new Date(value).getTime();
-  if (!Number.isFinite(stamp)) return "Not set";
-
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(new Date(stamp));
-  } catch {
-    return "Not set";
-  }
-}
-
-function isBranchRow(row: AnyRow, accountId?: string | null, schoolId?: number | null, branchId?: number | null) {
+function isBranchRow(row: AnyRow, accountId?: string | null, schoolId?: string | null, branchId?: string | null) {
   if (!row || row.isDeleted) return false;
   return (
     (!row.accountId || row.accountId === accountId) &&
-    Number(row.schoolId) === Number(schoolId) &&
-    Number(row.branchId) === Number(branchId)
+    String(row.schoolId) === String(schoolId) &&
+    String(row.branchId) === String(branchId)
   );
 }
 
@@ -358,7 +333,7 @@ const css = `
 `;
 
 
-async function resolveParentContext(accountId?: string | null, schoolId?: number | null, branchId?: number | null) {
+async function resolveParentContext(accountId?: string | null, schoolId?: string | null, branchId?: string | null) {
   const [parents, students, studentParents, memberships, users] = await Promise.all([
     safeArray("parents"),
     safeArray("students"),
@@ -373,7 +348,7 @@ async function resolveParentContext(accountId?: string | null, schoolId?: number
 
   const parentMembership = (memberships as AnyRow[]).find((m) =>
     m.role === "parent" &&
-    isBranchRow(m, accountId, Number(schoolId), Number(branchId))
+    isBranchRow(m, accountId, String(schoolId), String(branchId))
   );
 
   const user = (users as AnyRow[]).find((row) =>
@@ -383,9 +358,9 @@ async function resolveParentContext(accountId?: string | null, schoolId?: number
 
   const parent =
     (parents as AnyRow[]).find((row) =>
-      isBranchRow(row, accountId, Number(schoolId), Number(branchId)) &&
+      isBranchRow(row, accountId, String(schoolId), String(branchId)) &&
       (
-        Number(row.id) === Number(parentMembership?.parentLocalId) ||
+        String(row.id) === String(parentMembership?.parentLocalId) ||
         Boolean(user?.email && row.email && String(row.email).toLowerCase() === String(user.email).toLowerCase()) ||
         Boolean(activeEmail && row.email && String(row.email).toLowerCase() === activeEmail)
       )
@@ -403,7 +378,7 @@ async function resolveParentContext(accountId?: string | null, schoolId?: number
   if (parentMembership?.studentLocalId) linkedStudentIds.add(Number(parentMembership.studentLocalId));
 
   const children = (students as AnyRow[]).filter((student) =>
-    isBranchRow(student, accountId, Number(schoolId), Number(branchId)) &&
+    isBranchRow(student, accountId, String(schoolId), String(branchId)) &&
     (
       linkedStudentIds.has(Number(student.id)) ||
       Boolean(parent?.email && String(student.parentEmail || "").toLowerCase() === String(parent.email).toLowerCase()) ||
@@ -449,23 +424,23 @@ export default function ChildTimetable() {
 
     try {
       setLoading(true);
-      const ctx = await resolveParentContext(accountId, Number(schoolId), Number(branchId));
+      const ctx = await resolveParentContext(accountId, String(schoolId), String(branchId));
       setParent(ctx.parent);
       setChildren(ctx.children);
 
       const [sessionRows, subjectRows, teacherRows, resourceRows, timetableRows] = await Promise.all([
-        listSessionsForBranch({ accountId, schoolId: Number(schoolId), branchId: Number(branchId) }),
+        listSessionsForBranch({ accountId, schoolId: String(schoolId), branchId: String(branchId) }),
         safeArray("subjects"),
         safeArray("teachers"),
-        listScheduleResources({ accountId, schoolId: Number(schoolId), branchId: Number(branchId) }),
-        listTimetables({ accountId, schoolId: Number(schoolId), branchId: Number(branchId) }),
+        listScheduleResources({ accountId, schoolId: String(schoolId), branchId: String(branchId) }),
+        listTimetables({ accountId, schoolId: String(schoolId), branchId: String(branchId) }),
       ]);
 
-      const childClassIds = new Set(ctx.children.map((child) => Number(child.classId || child.currentClassId)).filter(Boolean));
+      const childClassIds = new Set(ctx.children.map((child) => String(child.classId || child.currentClassId)).filter(Boolean));
 
-      setSessions((sessionRows as AnyRow[]).filter((session) => childClassIds.has(Number(session.classId))));
+      setSessions((sessionRows as AnyRow[]).filter((session) => childClassIds.has(String(session.classId))));
       setSubjects((subjectRows as AnyRow[]).filter((row) => !row.isDeleted && (!row.accountId || row.accountId === accountId)));
-      setTeachers((teacherRows as AnyRow[]).filter((row) => isBranchRow(row, accountId, Number(schoolId), Number(branchId)) || (!row.branchId && Number(row.schoolId) === Number(schoolId))));
+      setTeachers((teacherRows as AnyRow[]).filter((row) => isBranchRow(row, accountId, String(schoolId), String(branchId)) || (!row.branchId && String(row.schoolId) === String(schoolId))));
       setResources(resourceRows as AnyRow[]);
       setTimetables(timetableRows as AnyRow[]);
     } finally {
@@ -480,7 +455,7 @@ export default function ChildTimetable() {
 
     if (childId !== "all") {
       const child = children.find((row) => String(row.id) === childId);
-      rows = rows.filter((session) => Number(session.classId) === Number(child?.classId || child?.currentClassId));
+      rows = rows.filter((session) => String(session.classId) === String(child?.classId || child?.currentClassId));
     }
 
     const q = query.toLowerCase().trim();

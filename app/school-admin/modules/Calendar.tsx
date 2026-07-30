@@ -14,7 +14,7 @@
  * - Keeps school-wide calendar behavior.
  * - Keeps cards, table and analytics views.
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -1477,3 +1477,4 @@ const css = `
   }
 }
 `;
+*/

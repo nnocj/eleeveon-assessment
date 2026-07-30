@@ -67,6 +67,7 @@ import {
   SchoolBranchSetting,
   Student,
   StudentEnrollment,
+  StudentAttendanceSummary,
   StudentParent,
   StudentPromotion,
   StudentReportSnapshot,
@@ -421,6 +422,9 @@ export default function PromotionPage() {
   const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
+  const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
+    StudentAttendanceSummary[]
+  >([]);
   const [computedResults, setComputedResults] = useState<ComputedResult[]>([]);
   const [reportCards, setReportCards] = useState<ReportCard[]>([]);
   const [reportCardItems, setReportCardItems] = useState<ReportCardItem[]>([]);
@@ -502,6 +506,7 @@ export default function PromotionPage() {
     setGradingSystems([]);
     setGradeRules([]);
     setAttendance([]);
+    setStudentAttendanceSummaries([]);
     setComputedResults([]);
     setReportCards([]);
     setReportCardItems([]);
@@ -540,6 +545,7 @@ export default function PromotionPage() {
         gradingSystemRows,
         gradeRuleRows,
         attendanceRows,
+        studentAttendanceSummaryRows,
         computedRows,
         reportRows,
         reportItemRows,
@@ -566,6 +572,7 @@ export default function PromotionPage() {
         db.gradingSystems.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
+        db.studentAttendanceSummaries.toArray(),
         db.computedResults.toArray(),
         db.reportCards.toArray(),
         db.reportCardItems.toArray(),
@@ -646,6 +653,9 @@ export default function PromotionPage() {
       );
       setGradeRules(gradeRuleRows.filter(sameTenantLoose));
       setAttendance(attendanceRows.filter(sameTenantLoose));
+      setStudentAttendanceSummaries(
+        studentAttendanceSummaryRows.filter(sameTenantLoose),
+      );
       setComputedResults(computedRows.filter(sameTenantLoose));
       setReportCards(reportRows.filter(sameTenantLoose));
       setReportCardItems(reportItemRows.filter(sameTenantLoose));
@@ -864,6 +874,7 @@ export default function PromotionPage() {
       gradingSystems,
       gradeRules,
       attendance,
+      studentAttendanceSummaries,
       computedResults,
       reportCards,
       reportCardItems,
@@ -890,6 +901,7 @@ export default function PromotionPage() {
     gradingSystems,
     gradeRules,
     attendance,
+    studentAttendanceSummaries,
     computedResults,
     reportCards,
     reportCardItems,

@@ -12,6 +12,7 @@
  * - mediaAssets contains safe metadata only;
  * - mediaBlobs contains Blob/File data and is always local-only;
  * - database protection stores are always local-only;
+ * - map/GPS fields remain part of their owning local-first record payloads;
  * - backward-compatible exports remain available.
  *
  * IMPORTANT:
@@ -62,7 +63,36 @@ export const ALL_KNOWN_DEXIE_TABLES = [
   "computedResults",
 
   "attendance",
+  "studentAttendanceSummaries",
   "teacherAttendance",
+  "attendanceSessions",
+  "attendanceDevices",
+  "attendanceCredentials",
+  "attendanceCredentialEvents",
+  "attendanceCaptureEvents",
+  "attendanceEvidenceAssets",
+
+  // Shared identity, safety and transport
+  "identityCredentials",
+  "identityCredentialDesignSettings",
+  "identityCredentialEvents",
+  "identityDevices",
+  "identityAccessPoints",
+  "identityActivityEvents",
+  "identityEvidenceAssets",
+  "studentIdentityCards",
+  "pickupAuthorizations",
+  "studentPickupEvents",
+  "visitorProfiles",
+  "visitorVisits",
+  "schoolVehicles",
+  "transportRoutes",
+  "transportStops",
+  "studentTransportAssignments",
+  "transportJourneys",
+  "transportJourneyEvents",
+  "emergencyRollCallSessions",
+  "emergencyRollCallEntries",
 
   "reportCards",
   "reportCardItems",
@@ -199,7 +229,36 @@ export const LOCAL_FIRST_SYNC_TABLES = [
 
   // Attendance
   "attendance",
+  "studentAttendanceSummaries",
   "teacherAttendance",
+  "attendanceSessions",
+  "attendanceDevices",
+  "attendanceCredentials",
+  "attendanceCredentialEvents",
+  "attendanceCaptureEvents",
+  "attendanceEvidenceAssets",
+
+  // Shared identity, safety and transport
+  "identityCredentials",
+  "identityCredentialDesignSettings",
+  "identityCredentialEvents",
+  "identityDevices",
+  "identityAccessPoints",
+  "identityActivityEvents",
+  "identityEvidenceAssets",
+  "studentIdentityCards",
+  "pickupAuthorizations",
+  "studentPickupEvents",
+  "visitorProfiles",
+  "visitorVisits",
+  "schoolVehicles",
+  "transportRoutes",
+  "transportStops",
+  "studentTransportAssignments",
+  "transportJourneys",
+  "transportJourneyEvents",
+  "emergencyRollCallSessions",
+  "emergencyRollCallEntries",
 
   // Reporting
   "reportCards",
@@ -271,6 +330,68 @@ export const LOCAL_FIRST_SYNC_TABLES = [
 
 export type LocalFirstSyncTableName =
   (typeof LOCAL_FIRST_SYNC_TABLES)[number];
+
+// ============================================================================
+// MAP / LOCATION-AWARE LOCAL-FIRST DATA
+ //Tables extending MapLocationFields support the full set.
+ //Event, device, access-point and transport tables may support only
+ // latitude, longitude, accuracyMeters or locationLabel.
+ 
+// ============================================================================
+
+export const MAP_LOCATION_FIELDS = [
+  "latitude",
+  "longitude",
+  "altitudeMeters",
+  "accuracyMeters",
+  "geohash",
+  "locationLabel",
+  "formattedAddress",
+  "locationSource",
+  "locationPrecision",
+  "locationCapturedAt",
+  "mapVisible",
+] as const;
+
+export type MapLocationField =
+  (typeof MAP_LOCATION_FIELDS)[number];
+
+export const LOCATION_AWARE_SYNC_TABLES = [
+  // Permanent school and person locations
+  "schools",
+  "branches",
+  "students",
+  "teachers",
+  "parents",
+
+  // Existing attendance capture GPS evidence
+  "attendanceCaptureEvents",
+
+  // Identity devices, access points and scan/activity evidence
+  "identityDevices",
+  "identityAccessPoints",
+  "identityActivityEvents",
+
+  // Transport stop coordinates and journey scan positions
+  "transportStops",
+  "transportJourneyEvents",
+] as const satisfies readonly LocalFirstSyncTableName[];
+
+export type LocationAwareSyncTableName =
+  (typeof LOCATION_AWARE_SYNC_TABLES)[number];
+
+export const LOCATION_AWARE_SYNC_TABLE_SET =
+  new Set<string>(
+    LOCATION_AWARE_SYNC_TABLES,
+  );
+
+export function isLocationAwareSyncTable(
+  tableName: string,
+): tableName is LocationAwareSyncTableName {
+  return LOCATION_AWARE_SYNC_TABLE_SET.has(
+    tableName,
+  );
+}
 
 // ============================================================================
 // BACKEND-OWNED CACHE TABLES

@@ -165,10 +165,9 @@ const ACCOUNT_FIELD_KEYS: Record<CameraField, string> = {
 const createAccountMediaSessionKey = (accountId?: string | null) =>
   createSharedMediaSessionKey(ACCOUNT_MEDIA_OWNER_TABLE, accountId || "new");
 
-const idOf = (value: any) => {
-  if (value === undefined || value === null || value === "") return 0;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
+const idOf = (value: unknown) => {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
 };
 
 const cleanText = (value: any) => String(value || "").trim();
@@ -316,11 +315,11 @@ export default function AccountProfilePage() {
       const ownedAsset = await getOwnerFieldMediaAsset({
         accountId,
         ownerTable: ACCOUNT_MEDIA_OWNER_TABLE,
-        ownerCloudId: cloudId,
+        ownerId: cloudId,
         fieldKey: ACCOUNT_FIELD_KEYS[field],
       });
       if (ownedAsset?.id) {
-        const url = await getMediaObjectUrl(Number(ownedAsset.id));
+        const url = await getMediaObjectUrl(String(ownedAsset.id));
         if (url) return url;
       }
       const fallbackId = idOf(fallbackMediaId);
@@ -613,9 +612,9 @@ export default function AccountProfilePage() {
           .filter((asset) => Boolean(asset.id))
           .map((asset) =>
             attachMediaAssetToOwner({
-              assetId: Number(asset.id),
+              assetId: String(asset.id),
               ownerTable: ACCOUNT_MEDIA_OWNER_TABLE,
-              ownerCloudId: account?.id || accountId!,
+              ownerId: account?.id || accountId!,
               ownerTempKey: mediaSessionKeyRef.current,
             }),
           ),

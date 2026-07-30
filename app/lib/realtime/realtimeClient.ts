@@ -654,15 +654,29 @@ export function updateRealtimeContext(
     return;
   }
 
+  const normalizedContext: Pick<
+    ConnectOptions,
+    "schoolId" | "branchId"
+  > = {
+    schoolId:
+      input.schoolId == null
+        ? input.schoolId
+        : String(input.schoolId),
+    branchId:
+      input.branchId == null
+        ? input.branchId
+        : String(input.branchId),
+  };
+
   connectOptions = {
     ...connectOptions,
-    ...input,
+    ...normalizedContext,
   };
 
   if (socket?.connected) {
     socket.emit(
       "SUBSCRIBE_CONTEXT",
-      input,
+      normalizedContext,
     );
   }
 }

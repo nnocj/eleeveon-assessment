@@ -1,0 +1,5 @@
+"use client";
+import type { StopView } from "../advanced-shared";
+import { AdvancedIdentityStyles, StatusPill } from "../advanced-shared";
+export function StopCard({stop,primaryColor,onOpen,onEdit}:{stop:StopView;primaryColor?:string;onOpen?:(v:StopView)=>void;onEdit?:(v:StopView)=>void}) {return <article className="ai-card"><AdvancedIdentityStyles primaryColor={primaryColor}/><div style={{display:"grid",gridTemplateColumns:"31px 1fr auto",gap:9,alignItems:"center"}}><b style={{width:29,height:29,borderRadius:10,display:"grid",placeItems:"center",background:"color-mix(in srgb,var(--ai-primary) 12%,transparent)",color:"var(--ai-primary)"}}>{stop.order}</b><span style={{display:"grid"}}><strong>{stop.name}</strong><small style={{fontSize:9,opacity:.6}}>{stop.assignedStudents||0} assigned · {stop.expectedArrivalMinute!=null?`${stop.expectedArrivalMinute} min`:"No ETA"}</small></span><StatusPill status={stop.active===false?"inactive":"active"}/></div><div className="ai-actions" style={{marginTop:9}}>{onOpen?<button onClick={()=>onOpen(stop)}>View</button>:null}{onEdit?<button onClick={()=>onEdit(stop)}>Edit</button>:null}</div></article>}
+export default StopCard;

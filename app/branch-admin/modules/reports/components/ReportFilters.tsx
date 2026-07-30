@@ -70,6 +70,27 @@ type Props = {
 };
 
 // ======================================================
+// LOCAL HELPERS
+// ======================================================
+
+function localId(value: unknown): string {
+  if (value === null || value === undefined) return "";
+
+  const normalized = String(value).trim();
+
+  if (
+    !normalized ||
+    normalized === "0" ||
+    normalized === "undefined" ||
+    normalized === "null"
+  ) {
+    return "";
+  }
+
+  return normalized;
+}
+
+// ======================================================
 // COMPONENT
 // ======================================================
 
@@ -401,7 +422,7 @@ export default function ReportFilters({
         <select
           style={input}
           value={effectiveBranchId || ""}
-          onChange={(e) => selectBranch(Number(e.target.value) || undefined)}
+          onChange={(e) => selectBranch(localId(e.target.value) || undefined)}
           disabled={lockBranch}
         >
           <option value="">
@@ -420,7 +441,7 @@ export default function ReportFilters({
           style={input}
           value={filters.academicStructureId || ""}
           onChange={(e) =>
-            selectAcademicStructure(Number(e.target.value) || undefined)
+            selectAcademicStructure(localId(e.target.value) || undefined)
           }
         >
           <option value="">Academic Structure</option>
@@ -435,7 +456,7 @@ export default function ReportFilters({
           style={input}
           value={filters.academicPeriodId || ""}
           onChange={(e) =>
-            selectAcademicPeriod(Number(e.target.value) || undefined)
+            selectAcademicPeriod(localId(e.target.value) || undefined)
           }
         >
           <option value="">Academic Period</option>
@@ -449,7 +470,7 @@ export default function ReportFilters({
         <select
           style={input}
           value={filters.classId || ""}
-          onChange={(e) => selectClass(Number(e.target.value) || undefined)}
+          onChange={(e) => selectClass(localId(e.target.value) || undefined)}
         >
           <option value="">Class</option>
           {availableClasses.map((item) => (
@@ -464,7 +485,7 @@ export default function ReportFilters({
           value={filters.classSubjectId || ""}
           onChange={(e) =>
             updateFilters({
-              classSubjectId: Number(e.target.value) || undefined,
+              classSubjectId: localId(e.target.value) || undefined,
             })
           }
         >
@@ -491,7 +512,7 @@ export default function ReportFilters({
           value={filters.studentId || ""}
           onChange={(e) =>
             updateFilters({
-              studentId: cleanId(e.target.value) || undefined,
+              studentId: localId(e.target.value) || undefined,
             })
           }
         >

@@ -321,7 +321,7 @@ export default function BranchTimetableOverview() {
   const [timetableMode, setTimetableMode] = useState<TimetableMode>("week");
   const [selectedDay, setSelectedDay] = useState("Monday");
   const [query, setQuery] = useState("");
-  const [branchId, setBranchId] = useState("all");
+  const [branchId, setBranchId] = useState<string | number>("all");
 
   useEffect(() => {
     if (!accountLoading && !contextLoading && (!authenticated || !accountId)) {
@@ -373,10 +373,10 @@ export default function BranchTimetableOverview() {
 
         try {
           const [sessionRows, timetableRows, resourceRows, conflictRows] = await Promise.all([
-            listSessionsForBranch({ accountId, schoolId, branchId: id }),
-            listTimetables({ accountId, schoolId, branchId: id }),
-            listScheduleResources({ accountId, schoolId, branchId: id }),
-            listOpenScheduleConflicts({ accountId, schoolId, branchId: id }),
+            listSessionsForBranch({ accountId: String(accountId), schoolId: String(schoolId), branchId: String(id) }),
+            listTimetables({ accountId: String(accountId), schoolId: String(schoolId), branchId: String(id) }),
+            listScheduleResources({ accountId: String(accountId), schoolId: String(schoolId), branchId: String(id) }),
+            listOpenScheduleConflicts({ accountId: String(accountId), schoolId: String(schoolId), branchId: String(id) }),
           ]);
 
           allSessions.push(...(sessionRows as AnyRow[]));
@@ -530,7 +530,10 @@ export default function BranchTimetableOverview() {
       <section className="bt-filter">
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search sessions, teacher, class, subject, room..." />
 
-        <select value={branchId} onChange={(event) => setBranchId(event.target.value)}>
+        <select
+          value={String(branchId)}
+          onChange={(event) => setBranchId(event.target.value === "all" ? "all" : Number(event.target.value))}
+        >
           <option value="all">All Branches</option>
           {branches.map((branch: AnyRow) => (
             <option key={String(idOf(branch))} value={String(idOf(branch))}>

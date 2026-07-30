@@ -451,8 +451,8 @@ export default function Calendar() {
 
       const rows = await listCalendarEvents({
         accountId,
-        schoolId: Number(schoolId),
-        branchId: Number(branchId),
+        schoolId: String(schoolId),
+        branchId: String(branchId),
       });
 
       const childIds = new Set(ctx.children.map((child) => Number(child.id)));

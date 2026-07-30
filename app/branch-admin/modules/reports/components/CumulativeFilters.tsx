@@ -532,7 +532,7 @@ export default function CumulativeFilters({
           <select
             style={input}
             value={effectiveBranchId || ""}
-            onChange={(e) => selectBranch(Number(e.target.value) || undefined)}
+            onChange={(e) => selectBranch(localId(e.target.value) || undefined)}
             disabled={lockBranch}
           >
             <option value="">
@@ -552,7 +552,7 @@ export default function CumulativeFilters({
             style={input}
             value={filters.academicStructureId || ""}
             onChange={(e) =>
-              selectAcademicStructure(Number(e.target.value) || undefined)
+              selectAcademicStructure(localId(e.target.value) || undefined)
             }
           >
             <option value="">All Academic Structures</option>
@@ -591,7 +591,7 @@ export default function CumulativeFilters({
             style={input}
             value={filters.academicPeriodId || ""}
             onChange={(e) =>
-              selectAcademicPeriod(Number(e.target.value) || undefined)
+              selectAcademicPeriod(localId(e.target.value) || undefined)
             }
           >
             <option value="">All Periods</option>
@@ -608,7 +608,7 @@ export default function CumulativeFilters({
           <select
             style={input}
             value={filters.classId || ""}
-            onChange={(e) => selectClass(Number(e.target.value) || undefined)}
+            onChange={(e) => selectClass(localId(e.target.value) || undefined)}
           >
             <option value="">All Classes</option>
             {availableClasses.map((item) => (
@@ -626,7 +626,7 @@ export default function CumulativeFilters({
             value={filters.studentId || ""}
             onChange={(e) =>
               updateFilters({
-                studentId: cleanId(e.target.value) || undefined,
+                studentId: localId(e.target.value) || undefined,
               })
             }
           >
@@ -656,7 +656,7 @@ export default function CumulativeFilters({
             value={filters.subjectId || ""}
             onChange={(e) =>
               updateFilters({
-                subjectId: cleanId(e.target.value) || undefined,
+                subjectId: localId(e.target.value) || undefined,
               })
             }
           >
@@ -815,7 +815,7 @@ export default function CumulativeFilters({
             value={filters.fromAcademicPeriodId || ""}
             onChange={(e) =>
               updateFilters({
-                fromAcademicPeriodId: Number(e.target.value) || undefined,
+                fromAcademicPeriodId: localId(e.target.value) || undefined,
               })
             }
           >
@@ -835,7 +835,7 @@ export default function CumulativeFilters({
             value={filters.toAcademicPeriodId || ""}
             onChange={(e) =>
               updateFilters({
-                toAcademicPeriodId: Number(e.target.value) || undefined,
+                toAcademicPeriodId: localId(e.target.value) || undefined,
               })
             }
           >

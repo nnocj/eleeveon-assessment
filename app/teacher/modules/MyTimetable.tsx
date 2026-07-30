@@ -1,4 +1,4 @@
-"use client";
+/*"use client";
 
 /**
  * app/teacher/modules/MyTimetable.tsx
@@ -7,7 +7,7 @@
  * ---------------------------------------------------------
  * Teacher-scoped module for Eleeveon Schools.
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -466,7 +466,7 @@ export default function MyTimetable() {
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [accountId, schoolId, branchId]);
+  useEffect(() => { load(); /* eslint-disable-next-line *//* }, [accountId, schoolId, branchId]);
 
   const teacherClassIds = useMemo(() => {
     return Array.from(new Set(sessions.map((session) => Number(session.classId || 0)).filter(Boolean)));
@@ -560,3 +560,4 @@ export default function MyTimetable() {
     </main>
   );
 }
+*/

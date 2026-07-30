@@ -1,6 +1,6 @@
 "use client";
 
-/**
+/*
  * app/student/modules/Myattendance.tsx
  * ---------------------------------------------------------
  * ELEEVEON STUDENT MY ATTENDANCE V1

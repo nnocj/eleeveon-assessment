@@ -1,0 +1,4 @@
+"use client";
+import type { TeacherAttendance } from "../../../lib/attendance";
+export function TeacherClockStatus({attendance}:{attendance?:TeacherAttendance|null}){const label=!attendance?.clockIn?"Not clocked in":attendance.clockOut?"Clocked out":"Clocked in";const tone=!attendance?.clockIn?"muted":attendance.clockOut?"neutral":"success";const colors=tone==="success"?{bg:"var(--success-soft,rgba(22,163,74,.11))",fg:"var(--success,#15803d)"}:tone==="neutral"?{bg:"var(--info-soft,rgba(37,99,235,.1))",fg:"var(--primary,#2563eb)"}:{bg:"var(--muted,rgba(148,163,184,.14))",fg:"var(--muted-foreground,#64748b)"};return <span style={{display:"inline-flex",padding:"3px 8px",borderRadius:999,background:colors.bg,color:colors.fg,fontSize:10,fontWeight:800}}>{label}</span>}
+export default TeacherClockStatus;

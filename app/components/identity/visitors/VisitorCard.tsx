@@ -1,0 +1,8 @@
+"use client";
+import type { VisitorProfileView, VisitorVisitView } from "../advanced-shared";
+import { AdvancedIdentityStyles, Avatar, StatusPill, formatIdentityDate } from "../advanced-shared";
+export function VisitorCard({visitor,visit,primaryColor,onOpen,onCheckIn,onCheckOut}:{visitor:VisitorProfileView;visit?:VisitorVisitView|null;primaryColor?:string;onOpen?:(v:VisitorProfileView)=>void;onCheckIn?:(v:VisitorProfileView)=>void;onCheckOut?:(v:VisitorProfileView)=>void}) {
+ const status=visitor.blocked?"blocked":visit?.status||(visitor.active===false?"inactive":"active");
+ return <article className="ai-card"><AdvancedIdentityStyles primaryColor={primaryColor}/><div style={{display:"flex",gap:10,alignItems:"center"}}><Avatar name={visitor.fullName} photoUrl={visitor.photoUrl}/><span style={{display:"grid",flex:1,minWidth:0}}><strong style={{fontSize:13}}>{visitor.fullName}</strong><small style={{fontSize:9,opacity:.6}}>{visitor.organizationName||visitor.phone||"Visitor"}</small><small style={{fontSize:9,opacity:.6}}>Last visit: {formatIdentityDate(visitor.lastVisitAt)}</small></span><StatusPill status={status}/></div>{visitor.blocked&&visitor.blockReason?<p style={{fontSize:10,color:"#b62f25"}}>{visitor.blockReason}</p>:null}<div className="ai-actions" style={{marginTop:10}}>{onOpen?<button onClick={()=>onOpen(visitor)}>Details</button>:null}{!visitor.blocked&&!visit?.checkedInAt&&onCheckIn?<button className="primary" onClick={()=>onCheckIn(visitor)}>Check in</button>:null}{visit?.checkedInAt&&!visit.checkedOutAt&&onCheckOut?<button onClick={()=>onCheckOut(visitor)}>Check out</button>:null}</div></article>
+}
+export default VisitorCard;

@@ -222,10 +222,10 @@ const DEFAULT_FORM: FormState = {
 
 const now = () => Date.now();
 
-function idOf(value: unknown) {
-  if (value === null || value === undefined || value === "") return 0;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+function idOf(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const parsed = String(value).trim();
+  return parsed && parsed !== "0" ? parsed : "";
 }
 
 function safeStorageRead(key: string) {
@@ -259,13 +259,13 @@ function readStoredActiveMembership() {
   return safeJsonRead<Record<string, any>>("activeMembership");
 }
 
-function firstLocalId(...values: unknown[]) {
+function firstLocalId(...values: unknown[]): string {
   for (const value of values) {
     const parsed = idOf(value);
-    if (parsed > 0) return parsed;
+    if (parsed) return parsed;
   }
 
-  return 0;
+  return "";
 }
 
 function selectedWorkspaceSchoolId(args: {
@@ -353,9 +353,9 @@ function tempPasswordFromEmail(email: string) {
   return `${prefix || "user"}@123`;
 }
 
-function num(value?: string | number | null) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+function num(value?: string | number | null): string | undefined {
+  const id = idOf(value);
+  return id || undefined;
 }
 
 function sameTenant(
@@ -912,7 +912,7 @@ async function updateLinkedProfileContactLocally(args: {
   const phone = normalizePhone(args.form.phone);
 
   let table: any = null;
-  let id: number | undefined;
+  let id: EntityId | undefined;
 
   if (role === "teacher") {
     table = (db as any).teachers;
@@ -1394,7 +1394,7 @@ export default function Usersroles() {
   useEffect(() => {
     if (accountLoading || contextLoading) return;
     if (!authenticated || !accountId) router.replace("/login");
-    else if (!schoolId || !branchId) router.replace("/select-role");
+    else if (!schoolId || !branchId) router.replace("/account");
   }, [
     accountLoading,
     contextLoading,

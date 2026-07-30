@@ -131,15 +131,15 @@ function readStoredActiveMembership(): AnyRow | null {
   return safeJson<AnyRow>("activeMembership");
 }
 
-function toPositiveNumber(value: unknown): number | null {
+function cleanId(value: unknown): string | null {
   if (value === null || value === undefined || value === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  const parsed = String(value).trim();
+  return parsed && parsed !== "0" ? parsed : null;
 }
 
-function firstPositiveNumber(...values: unknown[]) {
+function firstId(...values: unknown[]): string | null {
   for (const value of values) {
-    const parsed = toPositiveNumber(value);
+    const parsed = cleanId(value);
     if (parsed) return parsed;
   }
 
@@ -158,8 +158,11 @@ function workspaceMembership(openWorkspace?: OpenWorkspaceSession | null, active
 function selectedParentId(openWorkspace?: OpenWorkspaceSession | null, activeMembership?: AnyRow | null) {
   const membership = workspaceMembership(openWorkspace, activeMembership);
 
-  return firstPositiveNumber(
+  return firstId(
     openWorkspace?.parentLocalId,
+    (openWorkspace as any)?.parentId,
+    (openWorkspace as any)?.membership?.parentLocalId,
+    (openWorkspace as any)?.membership?.parentId,
     membership?.parentLocalId,
     membership?.localParentId,
     membership?.parentId,
@@ -178,7 +181,7 @@ function selectedSchoolId(args: {
 }) {
   const membership = workspaceMembership(args.openWorkspace, args.activeMembership);
 
-  return firstPositiveNumber(
+  return firstId(
     args.openWorkspace?.schoolId,
     membership?.schoolId,
     membership?.school?.id,
@@ -198,7 +201,7 @@ function selectedBranchId(args: {
 }) {
   const membership = workspaceMembership(args.openWorkspace, args.activeMembership);
 
-  return firstPositiveNumber(
+  return firstId(
     args.openWorkspace?.branchId,
     membership?.branchId,
     membership?.schoolBranchId,
@@ -484,7 +487,7 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
 
   const parentId =
     selectedParentId(openWorkspace, activeMembership) ||
-    toPositiveNumber(activeParentId);
+    cleanId(activeParentId);
 
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<ViewMode>("cards");
@@ -537,12 +540,27 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
     const membership = workspaceMembership(openWorkspace, activeMembership);
     const memberEmail = membership?.email || membership?.parentEmail || (openWorkspace as any)?.email;
 
+    const membershipParentId = firstId(
+      membership?.parentLocalId,
+      membership?.parentId,
+      membership?.parent?.id,
+      activeParentId,
+      safeRead("activeParentId"),
+    );
+
     return (
       parents.find((row) => parentId && sameId(idOf(row), parentId)) ||
-      parents.find((row) => memberEmail && sameId(row.email || row.parentEmail, memberEmail)) ||
+      parents.find(
+        (row) => membershipParentId && sameId(idOf(row), membershipParentId),
+      ) ||
+      parents.find(
+        (row) =>
+          memberEmail &&
+          sameId(row.email || row.parentEmail, memberEmail),
+      ) ||
       null
     );
-  }, [activeMembership, openWorkspace, parentId, rows.parents]);
+  }, [activeMembership, activeParentId, openWorkspace, parentId, rows.parents]);
 
   const childLinks = useMemo(() => {
     const links = rows.studentParents || [];
@@ -672,10 +690,6 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
 
   if (!authenticated || !accountId) {
     return <State primary={primary} title="Redirecting to login..." text="You must sign in before viewing the parent portal." />;
-  }
-
-  if (!parentId && !parent) {
-    return <State primary={primary} title="No parent profile selected" text="Choose your parent membership again from Select Role so the dashboard can load the correct parent record." />;
   }
 
   return (

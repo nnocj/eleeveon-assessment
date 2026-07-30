@@ -62,7 +62,7 @@ type Channel = "in_app" | "email" | "sms" | "whatsapp";
 type Audience = "school_admins" | "branch_admins";
 
 type FormState = {
-  id: number;
+  id: string;
   title: string;
   body: string;
   audience: Audience;
@@ -82,7 +82,7 @@ const AUDIENCES: { value: Audience; label: string; note: string }[] = [
 const CHANNELS: Channel[] = ["in_app", "email", "sms", "whatsapp"];
 
 const emptyForm: FormState = {
-  id: 0,
+  id: "",
   title: "",
   body: "",
   audience: "school_admins",
@@ -106,12 +106,18 @@ function text(value: any, fallback = "") {
 }
 
 function idOf(row?: AnyRow) {
-  return row?.id ?? row?.localId ?? row?.cloudId ?? row?.payload?.id ?? row?.payload?.localId;
+  return cleanId(
+    row?.id ??
+      row?.localId ??
+      row?.cloudId ??
+      row?.payload?.id ??
+      row?.payload?.localId,
+  );
 }
 
-function cleanId(value: any) {
-  const parsed = Number(value || 0);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+function cleanId(value: unknown) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
 }
 
 function dateLabel(value?: number | string) {
@@ -224,7 +230,7 @@ function isOwnerAuthorityAnnouncement(row: AnyRow, accountId?: string | null) {
   return isOwnerAuthorityAudience(row);
 }
 
-function isOwnerAuthorityRecipient(row: AnyRow, authorityAnnouncementIds: Set<number>, accountId?: string | null) {
+function isOwnerAuthorityRecipient(row: AnyRow, authorityAnnouncementIds: Set<string>, accountId?: string | null) {
   if (!sameAccount(row, accountId)) return false;
   const announcementId = cleanId(row?.announcementId || row?.announcementLocalId || row?.announcementCloudId);
   if (announcementId && authorityAnnouncementIds.size && !authorityAnnouncementIds.has(announcementId)) return false;
@@ -326,8 +332,10 @@ export default function OwnerAnnouncementsPage() {
       ]);
 
       const ownerSchools = (schoolRows as AnyRow[]).filter((row) => sameAccount(row, accountId));
-      const schoolIds = new Set(ownerSchools.map((school) => Number(idOf(school))).filter(Boolean));
-      const ownerBranches = (branchRows as AnyRow[]).filter((row) => sameAccount(row, accountId)).filter((row) => !schoolIds.size || schoolIds.has(Number(row.schoolId)));
+      const schoolIds = new Set(ownerSchools.map((school) => idOf(school)).filter(Boolean));
+      const ownerBranches = (branchRows as AnyRow[])
+        .filter((row) => sameAccount(row, accountId))
+        .filter((row) => !schoolIds.size || schoolIds.has(cleanId(row.schoolId)));
       const mergedMemberships = (membershipRows as AnyRow[]).length ? (membershipRows as AnyRow[]) : (fallbackMembershipRows as AnyRow[]);
       const mergedUsers = (userRows as AnyRow[]).length ? (userRows as AnyRow[]) : (fallbackUserRows as AnyRow[]);
 
@@ -370,9 +378,9 @@ export default function OwnerAnnouncementsPage() {
   }, [form.schoolId, schools]);
 
   const targetBranches = useMemo(() => {
-    const selectedSchoolIds = new Set(targetSchools.map((school) => Number(idOf(school))).filter(Boolean));
+    const selectedSchoolIds = new Set(targetSchools.map((school) => idOf(school)).filter(Boolean));
     return branches.filter((branch) => {
-      if (form.schoolId !== "all" && !selectedSchoolIds.has(Number(branch.schoolId))) return false;
+      if (form.schoolId !== "all" && !selectedSchoolIds.has(cleanId(branch.schoolId))) return false;
       if (form.branchId !== "all" && String(idOf(branch)) !== String(form.branchId)) return false;
       return true;
     });
@@ -380,14 +388,14 @@ export default function OwnerAnnouncementsPage() {
 
   const candidateRecipients = useMemo(() => {
     const roles = targetRolesForAudience(form.audience).map((role) => role.toLowerCase());
-    const schoolIds = new Set(targetSchools.map((school) => Number(idOf(school))).filter(Boolean));
-    const branchIds = new Set(targetBranches.map((branch) => Number(idOf(branch))).filter(Boolean));
+    const schoolIds = new Set(targetSchools.map((school) => idOf(school)).filter(Boolean));
+    const branchIds = new Set(targetBranches.map((branch) => idOf(branch)).filter(Boolean));
 
     const rows = memberships.filter((membership) => {
       const role = String(membership.role || membership.roleName || "").toLowerCase();
       if (!roles.includes(role)) return false;
-      if (form.schoolId !== "all" && !schoolIds.has(Number(membership.schoolId))) return false;
-      if (form.branchId !== "all" && !branchIds.has(Number(membership.branchId))) return false;
+      if (form.schoolId !== "all" && !schoolIds.has(cleanId(membership.schoolId))) return false;
+      if (form.branchId !== "all" && !branchIds.has(cleanId(membership.branchId))) return false;
       return true;
     });
 
@@ -487,7 +495,7 @@ export default function OwnerAnnouncementsPage() {
   function duplicateAnnouncement(announcement: AnyRow) {
     setDrawerMode("duplicate");
     setForm({
-      id: 0,
+      id: "",
       title: `${String(announcement.title || "Announcement")} Copy`,
       body: String(announcement.body || announcement.message || ""),
       audience: normalizeAudience(announcement.audience || announcement.targetRole),
@@ -518,16 +526,24 @@ export default function OwnerAnnouncementsPage() {
     return "";
   }
 
-  async function replaceRecipients(announcementId: number, targetSchoolIds: number[], targetBranchIds: number[], targetRoles: string[], createdAt: number) {
-    const linked = recipients.filter((recipient) => Number(recipient.announcementId) === Number(announcementId));
+  async function replaceRecipients(
+    announcementId: string,
+    targetSchoolIds: string[],
+    targetBranchIds: string[],
+    targetRoles: string[],
+    createdAt: number,
+  ) {
+    const linked = recipients.filter(
+      (recipient) => cleanId(recipient.announcementId) === announcementId,
+    );
     for (const recipient of linked) {
       const recipientId = cleanId(recipient.id || recipient.localId);
       if (recipientId) await softDeleteLocal("announcementRecipients" as any, recipientId);
     }
 
     const roleScope = targetRoles.length ? targetRoles : ["all"];
-    const schoolScope = targetSchoolIds.length ? targetSchoolIds : [0];
-    const branchScope = targetBranchIds.length ? targetBranchIds : [0];
+    const schoolScope = targetSchoolIds.length ? targetSchoolIds : [""];
+    const branchScope = targetBranchIds.length ? targetBranchIds : [""];
 
     for (const schoolId of schoolScope) {
       for (const branchId of branchScope) {
@@ -560,15 +576,21 @@ export default function OwnerAnnouncementsPage() {
     setSaving(true);
     try {
       const targetRoles = targetRolesForAudience(form.audience);
-      const targetSchoolIds = form.schoolId === "all" ? schools.map((school) => Number(idOf(school))).filter(Boolean) : [Number(form.schoolId)].filter(Boolean);
-      const targetBranchIds = form.branchId === "all" ? targetBranches.map((branch) => Number(idOf(branch))).filter(Boolean) : [Number(form.branchId)].filter(Boolean);
+      const targetSchoolIds =
+        form.schoolId === "all"
+          ? schools.map((school) => idOf(school)).filter(Boolean)
+          : [cleanId(form.schoolId)].filter(Boolean);
+      const targetBranchIds =
+        form.branchId === "all"
+          ? targetBranches.map((branch) => idOf(branch)).filter(Boolean)
+          : [cleanId(form.branchId)].filter(Boolean);
       const createdAt = now();
       const publishAt = form.status === "scheduled" && form.publishAt ? new Date(form.publishAt).getTime() : createdAt;
 
       const payload: AnyRow = {
         accountId: String(accountId),
-        schoolId: targetSchoolIds[0] || 0,
-        branchId: targetBranchIds[0] || 0,
+        schoolId: targetSchoolIds[0] || null,
+        branchId: targetBranchIds[0] || null,
         title: form.title.trim(),
         body: form.body.trim(),
         message: form.body.trim(),
@@ -594,8 +616,14 @@ export default function OwnerAnnouncementsPage() {
       if (drawerMode === "edit" && announcementId) {
         await updateLocal("announcements" as any, announcementId, payload);
       } else {
-        const created = (await createLocal("announcements" as any, payload)) as AnyRow | number | undefined;
-        announcementId = Number(typeof created === "number" ? created : (created as AnyRow)?.id || 0);
+        const created = (await createLocal(
+          "announcements" as any,
+          payload,
+        )) as AnyRow | string | number | undefined;
+        announcementId =
+          typeof created === "object" && created
+            ? cleanId(created.id || created.localId)
+            : cleanId(created);
       }
 
       if (announcementId) await replaceRecipients(announcementId, targetSchoolIds, targetBranchIds, targetRoles, createdAt);
@@ -621,7 +649,9 @@ export default function OwnerAnnouncementsPage() {
 
     try {
       await softDeleteLocal("announcements" as any, id);
-      const linked = recipients.filter((recipient) => Number(recipient.announcementId) === Number(id));
+      const linked = recipients.filter(
+        (recipient) => cleanId(recipient.announcementId) === id,
+      );
       for (const recipient of linked) {
         const recipientId = cleanId(recipient.id || recipient.localId);
         if (recipientId) await softDeleteLocal("announcementRecipients" as any, recipientId);

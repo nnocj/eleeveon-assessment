@@ -2,20 +2,28 @@
 
 /**
  * app/parent/modules/Children.tsx
- * ---------------------------------------------------------
- * PARENT PORTAL — CHILDREN
- * ---------------------------------------------------------
+ * --------------------------------------------------------------------------
+ * PARENT PORTAL — MY CHILDREN
+ * --------------------------------------------------------------------------
  *
- * Parent-scoped children module:
- * - No school selector.
- * - No branch selector.
- * - Uses active parent membership.
- * - Shows only students linked to the logged-in parent.
+ * Read-only, parent-scoped child directory.
  *
- * UI:
- * - Cards / Table / Analytics view switching.
- * - Mobile-first.
- * - Dark-mode safe.
+ * Data rules:
+ * - resolves the active parent membership;
+ * - matches the permanent Parent record;
+ * - follows StudentParent links;
+ * - exposes only students linked to that parent;
+ * - uses string IDs throughout;
+ * - resolves student photos from the shared local-first media system;
+ * - never exposes map/location tooling or branch-wide student data.
+ *
+ * UI rules:
+ * - compact Branch Admin Students-inspired search/action strip;
+ * - cards are the default mobile-first view;
+ * - table and summary views live under More;
+ * - filters open in a sheet;
+ * - student details open in a read-only drawer;
+ * - no add, edit, delete, upload, camera, map, or status-changing controls.
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -27,82 +35,311 @@ import { useActiveBranch } from "../../context/active-branch-context";
 import { useActiveMembership } from "../../context/active-membership-context";
 
 import {
-  AcademicPeriod,
-  AcademicStructure,
-  Class,
+  type Class,
   db,
-  Parent,
-  Student,
-  StudentEnrollment,
-  StudentParent,
+  type Organization,
+  type Parent,
+  type Student,
+  type StudentEnrollment,
+  type StudentParent,
 } from "../../lib/db/db";
 
-// ======================================================
+import { useEntityMediaUrls } from "../../hooks/useEntityMediaUrls";
+import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
+
+// ============================================================================
 // TYPES
-// ======================================================
+// ============================================================================
+
+type ViewMode = "cards" | "table" | "summary";
+type StudentStatus = "active" | "graduated" | "transferred" | "withdrawn";
+type ToastTone = "success" | "error" | "info";
 
 type TenantRow = {
-  accountId?: string;
-  schoolId?: number;
-  branchId?: number;
+  accountId?: string | null;
+  schoolId?: string | null;
+  branchId?: string | null;
   isDeleted?: boolean;
+  active?: boolean;
+  status?: string | null;
 };
-
-type ViewMode = "cards" | "table" | "analytics";
 
 type ChildView = {
+  id: string;
   student: Student;
-  parentLinks: StudentParent[];
+  photoUrl?: string;
   className: string;
-  academicStructureName: string;
-  academicPeriodName: string;
-  enrollmentStatus: string;
+  organizationName: string;
   relationship: string;
   isPrimary: boolean;
+  enrollment?: StudentEnrollment;
+  status: StudentStatus;
+  active: boolean;
 };
 
-type Breakdown = {
+type SummaryGroup = {
   name: string;
   count: number;
 };
 
-// ======================================================
+// ============================================================================
 // HELPERS
-// ======================================================
+// ============================================================================
 
-const textOrDash = (value?: string | number | null) => {
-  if (value === undefined || value === null || value === "") return "-";
-  return String(value);
+const idOf = (value: unknown): string => {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
 };
 
-const ageFromDob = (dob?: string) => {
-  if (!dob) return undefined;
+const sameId = (a: unknown, b: unknown) => idOf(a) === idOf(b);
 
-  const birth = new Date(dob);
-  if (Number.isNaN(birth.getTime())) return undefined;
+const safeLower = (value: unknown) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase();
 
-  const today = new Date();
-  let age = today.getFullYear() - birth.getFullYear();
-  const monthDiff = today.getMonth() - birth.getMonth();
+const safeRecordMediaValue = (value?: string | null) => {
+  const media = String(value || "").trim();
+  if (!media) return undefined;
+  if (media.startsWith("blob:")) return undefined;
+  if (media.startsWith("data:image/")) return undefined;
+  return media;
+};
 
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) {
-    age--;
+const statusLabel = (status?: string | null) => {
+  const value = String(status || "active").replaceAll("_", " ");
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
+
+const relationshipLabel = (relationship?: string | null) => {
+  const value = String(relationship || "guardian").replaceAll("_", " ");
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
+
+const statusTone = (
+  status?: string | null,
+): "green" | "red" | "blue" | "orange" | "gray" => {
+  if (!status || status === "active") return "green";
+  if (status === "graduated") return "blue";
+  if (status === "transferred") return "orange";
+  if (status === "withdrawn") return "red";
+  return "gray";
+};
+
+const isActiveStudent = (student: Student) => {
+  const row = student as Student & { active?: boolean };
+  if (row.isDeleted) return false;
+  if (row.active === false) return false;
+  return !["withdrawn", "deleted", "archived", "inactive"].includes(
+    safeLower(row.status),
+  );
+};
+
+const getReadableTextColor = (color: string) => {
+  const value = String(color || "").trim();
+  if (!value.startsWith("#")) return "#ffffff";
+
+  let hex = value.slice(1);
+  if (hex.length === 3) {
+    hex = hex
+      .split("")
+      .map((character) => character + character)
+      .join("");
   }
 
-  return age >= 0 ? age : undefined;
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return "#ffffff";
+
+  const numeric = Number.parseInt(hex, 16);
+  const red = (numeric >> 16) & 255;
+  const green = (numeric >> 8) & 255;
+  const blue = numeric & 255;
+  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
+
+  return brightness > 155 ? "#111827" : "#ffffff";
 };
 
-const relationshipLabel = (relationship?: string) => {
-  if (!relationship) return "Guardian";
-  return relationship.charAt(0).toUpperCase() + relationship.slice(1);
+const formatDate = (value?: string | null) => {
+  if (!value) return "Not set";
+
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat("en-GH", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  }).format(date);
 };
 
-// ======================================================
+const calculateAge = (student: Student) => {
+  if (typeof student.age === "number" && Number.isFinite(student.age)) {
+    return student.age;
+  }
+
+  if (!student.dateOfBirth) return null;
+
+  const birthDate = new Date(student.dateOfBirth);
+  if (!Number.isFinite(birthDate.getTime())) return null;
+
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDifference = today.getMonth() - birthDate.getMonth();
+
+  if (
+    monthDifference < 0 ||
+    (monthDifference === 0 && today.getDate() < birthDate.getDate())
+  ) {
+    age -= 1;
+  }
+
+  return age >= 0 ? age : null;
+};
+
+function groupedCounts(
+  rows: ChildView[],
+  selector: (row: ChildView) => string,
+): SummaryGroup[] {
+  const map = new Map<string, number>();
+
+  rows.forEach((row) => {
+    const name = selector(row) || "Not set";
+    map.set(name, (map.get(name) || 0) + 1);
+  });
+
+  return Array.from(map.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+// ============================================================================
+// SMALL COMPONENTS
+// ============================================================================
+
+function Avatar({
+  name,
+  photo,
+  primary,
+  size = "normal",
+}: {
+  name: string;
+  photo?: string;
+  primary: string;
+  size?: "normal" | "large";
+}) {
+  return (
+    <div
+      className={`pp-avatar ${size === "large" ? "large" : ""}`}
+      style={{
+        background: photo ? `url("${photo}") center/cover` : primary,
+        color: photo ? "#ffffff" : getReadableTextColor(primary),
+        borderColor: photo
+          ? "transparent"
+          : `color-mix(in srgb, ${primary} 70%, transparent)`,
+      }}
+      aria-label={`${name} photo`}
+    >
+      {!photo && String(name || "S").slice(0, 1).toUpperCase()}
+    </div>
+  );
+}
+
+function Chip({
+  children,
+  tone = "gray",
+}: {
+  children: React.ReactNode;
+  tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple";
+}) {
+  return <span className={`pp-chip ${tone}`}>{children}</span>;
+}
+
+function EmptyState({
+  icon,
+  title,
+  text,
+}: {
+  icon: string;
+  title: string;
+  text: string;
+}) {
+  return (
+    <section className="pp-empty">
+      <div className="pp-empty-icon">{icon}</div>
+      <h3>{title}</h3>
+      <p>{text}</p>
+    </section>
+  );
+}
+
+function SummarySection({
+  title,
+  subtitle,
+  items,
+}: {
+  title: string;
+  subtitle: string;
+  items: SummaryGroup[];
+}) {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+
+  return (
+    <section className="pp-summary-section">
+      <div className="pp-section-head">
+        <div>
+          <p>{subtitle}</p>
+          <h3>{title}</h3>
+        </div>
+        <Chip>{items.length} group(s)</Chip>
+      </div>
+
+      <div className="pp-summary-list">
+        {items.map((item) => {
+          const percentage = total
+            ? Math.round((item.count / total) * 100)
+            : 0;
+
+          return (
+            <article key={item.name} className="pp-summary-row">
+              <div className="pp-summary-row-top">
+                <strong>{item.name}</strong>
+                <span>{item.count}</span>
+              </div>
+              <div className="pp-progress-track">
+                <div style={{ width: `${percentage}%` }} />
+              </div>
+              <small>{percentage}% of linked children</small>
+            </article>
+          );
+        })}
+
+        {!items.length && (
+          <EmptyState
+            icon="📊"
+            title="No summary data"
+            text="There is no information available for this summary."
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ============================================================================
 // COMPONENT
-// ======================================================
+// ============================================================================
 
 export default function Children() {
   const router = useRouter();
+  const dataRevision = useBranchTableRevision([
+    "parents",
+    "studentParents",
+    "students",
+    "classes",
+    "organizations",
+    "studentEnrollments",
+    "mediaAssets",
+    "mediaBlobs",
+  ]);
 
   const {
     accountId,
@@ -121,41 +358,64 @@ export default function Children() {
   } = useActiveBranch();
 
   const membershipContext = useActiveMembership() as any;
-
   const activeMembership = membershipContext?.activeMembership;
-  const activeParentId =
+
+  const activeParentId = idOf(
     membershipContext?.activeParentId ||
-    activeMembership?.parentLocalId ||
-    undefined;
+      activeMembership?.parentLocalId ||
+      activeMembership?.parentId,
+  );
 
-  const schoolId = activeSchoolId || activeSchool?.id || settings?.schoolId;
-  const branchId = activeBranchId || activeBranch?.id || settings?.branchId;
-  const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
+  const schoolId = idOf(
+    activeSchoolId || activeSchool?.id || settings?.schoolId,
+  );
+  const branchId = idOf(
+    activeBranchId || activeBranch?.id || settings?.branchId,
+  );
 
-  // ======================================================
-  // STATE
-  // ======================================================
+  const primary =
+    settings?.primaryColor || "var(--primary-color, #2563eb)";
+  const primaryText = getReadableTextColor(primary);
 
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>("cards");
-
   const [parents, setParents] = useState<Parent[]>([]);
   const [studentParents, setStudentParents] = useState<StudentParent[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
-  const [academicStructures, setAcademicStructures] = useState<AcademicStructure[]>([]);
-  const [academicPeriods, setAcademicPeriods] = useState<AcademicPeriod[]>([]);
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | Student["status"]>("all");
-  const [classFilter, setClassFilter] = useState<number | "all">("all");
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const [filterClassId, setFilterClassId] = useState("all");
+  const [filterStatus, setFilterStatus] = useState<
+    "all" | StudentStatus
+  >("all");
+  const [filterRelationship, setFilterRelationship] = useState("all");
 
-  const [selectedStudentId, setSelectedStudentId] = useState<number | null>(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [selectedChild, setSelectedChild] = useState<ChildView | null>(null);
 
-  // ======================================================
-  // AUTH PROTECTION
-  // ======================================================
+  const [toast, setToast] = useState<{
+    tone: ToastTone;
+    message: string;
+  } | null>(null);
+
+  const resolvedMediaById = useEntityMediaUrls({
+    accountId,
+    ownerTable: "students",
+    rows: students,
+    fields: [{ fieldKey: "photo", mediaIdKey: "photoMediaId" }],
+  });
+
+  const showToast = (tone: ToastTone, message: string) => {
+    setToast({ tone, message });
+    window.setTimeout(
+      () => setToast((current) => (current?.message === message ? null : current)),
+      3800,
+    );
+  };
 
   useEffect(() => {
     if (accountLoading || contextLoading) return;
@@ -165,27 +425,23 @@ export default function Children() {
       return;
     }
 
-    if (!activeSchoolId || !activeBranchId) {
-      router.replace("/owner");
+    if (!schoolId || !branchId) {
+      router.replace("/account");
     }
   }, [
     accountLoading,
     contextLoading,
     authenticated,
     accountId,
-    activeSchoolId,
-    activeBranchId,
+    schoolId,
+    branchId,
     router,
   ]);
 
-  // ======================================================
-  // LOAD DATA
-  // ======================================================
-
   const sameTenant = (row: TenantRow) =>
-    row.accountId === accountId &&
-    row.schoolId === schoolId &&
-    row.branchId === branchId &&
+    (!row.accountId || sameId(row.accountId, accountId)) &&
+    (!row.schoolId || sameId(row.schoolId, schoolId)) &&
+    (!row.branchId || sameId(row.branchId, branchId)) &&
     !row.isDeleted;
 
   const clearData = () => {
@@ -193,9 +449,8 @@ export default function Children() {
     setStudentParents([]);
     setStudents([]);
     setClasses([]);
+    setOrganizations([]);
     setEnrollments([]);
-    setAcademicStructures([]);
-    setAcademicPeriods([]);
   };
 
   const load = async () => {
@@ -210,213 +465,327 @@ export default function Children() {
 
       const [
         parentRows,
-        studentParentRows,
+        linkRows,
         studentRows,
         classRows,
+        organizationRows,
         enrollmentRows,
-        academicStructureRows,
-        academicPeriodRows,
       ] = await Promise.all([
         db.parents.toArray(),
         db.studentParents.toArray(),
         db.students.toArray(),
         db.classes.toArray(),
+        db.organizations.toArray(),
         db.studentEnrollments.toArray(),
-        db.academicStructures.toArray(),
-        db.academicPeriods.toArray(),
       ]);
 
-      const scopedParents = parentRows.filter(sameTenant);
-      const scopedStudentParents = studentParentRows.filter(sameTenant);
-      const scopedStudents = studentRows.filter(sameTenant);
-
-      const parentIds = new Set<number>();
-
-      if (activeParentId) parentIds.add(Number(activeParentId));
-      if (activeMembership?.parentLocalId) parentIds.add(Number(activeMembership.parentLocalId));
-
-      const userEmail = String((activeMembership as any)?.email || "").toLowerCase();
-      scopedParents
-        .filter((parent) => userEmail && String(parent.email || "").toLowerCase() === userEmail)
-        .forEach((parent) => {
-          if (parent.id) parentIds.add(parent.id);
-        });
-
-      const linkedStudentParents = scopedStudentParents.filter(
-        (link) => !parentIds.size || parentIds.has(link.parentId)
+      const scopedParents = parentRows.filter((row) =>
+        sameTenant(row as TenantRow),
+      );
+      const scopedLinks = linkRows.filter((row) =>
+        sameTenant(row as TenantRow),
+      );
+      const scopedStudents = studentRows.filter((row) =>
+        sameTenant(row as TenantRow),
       );
 
-      const childIds = new Set<number>(linkedStudentParents.map((link) => link.studentId));
-      const childRows = scopedStudents.filter((student) => student.id && childIds.has(student.id));
+      const parentIds = new Set<string>();
 
-      setParents(parentIds.size ? scopedParents.filter((parent) => parent.id && parentIds.has(parent.id)) : scopedParents);
-      setStudentParents(linkedStudentParents);
+      if (activeParentId) parentIds.add(activeParentId);
+
+      const membershipEmail = safeLower(
+        activeMembership?.email ||
+          activeMembership?.user?.email ||
+          membershipContext?.activeUser?.email,
+      );
+
+      if (membershipEmail) {
+        scopedParents
+          .filter((parent) => safeLower(parent.email) === membershipEmail)
+          .forEach((parent) => parentIds.add(idOf(parent.id)));
+      }
+
+      const matchedParents = scopedParents.filter((parent) =>
+        parentIds.has(idOf(parent.id)),
+      );
+
+      // Strict parent scoping: an unresolved parent must never fall back to every
+      // child in the branch.
+      const linkedRows = parentIds.size
+        ? scopedLinks.filter((link) => parentIds.has(idOf(link.parentId)))
+        : [];
+
+      const childIds = new Set(
+        linkedRows.map((link) => idOf(link.studentId)).filter(Boolean),
+      );
+
+      const childRows = scopedStudents
+        .filter((student) => childIds.has(idOf(student.id)))
+        .sort((a, b) =>
+          String(a.fullName || "").localeCompare(String(b.fullName || "")),
+        );
+
+      setParents(matchedParents);
+      setStudentParents(linkedRows);
       setStudents(childRows);
-      setClasses(classRows.filter((row) => sameTenant(row) && row.active !== false));
-      setEnrollments(enrollmentRows.filter(sameTenant).filter((row) => childIds.has(row.studentId)));
-      setAcademicStructures(academicStructureRows.filter((row) => sameTenant(row) && row.active !== false));
-      setAcademicPeriods(academicPeriodRows.filter((row) => sameTenant(row) && row.active !== false));
+
+      setClasses(
+        classRows
+          .filter(
+            (row) =>
+              sameTenant(row as TenantRow) &&
+              row.active !== false &&
+              !row.isDeleted,
+          )
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      );
+
+      setOrganizations(
+        organizationRows
+          .filter(
+            (row) =>
+              sameTenant(row as TenantRow) &&
+              row.active !== false &&
+              !row.isDeleted,
+          )
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      );
+
+      setEnrollments(
+        enrollmentRows.filter(
+          (row) =>
+            sameTenant(row as TenantRow) &&
+            childIds.has(idOf(row.studentId)),
+        ),
+      );
     } catch (error) {
-      console.error("Failed to load children:", error);
+      console.error("Failed to load linked children:", error);
       clearData();
-      alert("Failed to load children.");
+      showToast("error", "Failed to load your linked children.");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    if (
+      accountLoading ||
+      contextLoading ||
+      settingsLoading
+    ) {
+      return;
+    }
+
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, accountId, schoolId, branchId, activeParentId]);
+  }, [
+    authenticated,
+    accountId,
+    schoolId,
+    branchId,
+    activeParentId,
+    accountLoading,
+    contextLoading,
+    settingsLoading,
+    dataRevision,
+  ]);
 
-  // ======================================================
-  // VIEW MODEL
-  // ======================================================
+  const classMap = useMemo(
+    () => new Map(classes.map((row) => [idOf(row.id), row])),
+    [classes],
+  );
 
-  const classMap = useMemo(() => new Map(classes.map((row) => [row.id, row])), [classes]);
-  const structureMap = useMemo(() => new Map(academicStructures.map((row) => [row.id, row])), [academicStructures]);
-  const periodMap = useMemo(() => new Map(academicPeriods.map((row) => [row.id, row])), [academicPeriods]);
+  const organizationMap = useMemo(
+    () => new Map(organizations.map((row) => [idOf(row.id), row])),
+    [organizations],
+  );
 
-  const children = useMemo<ChildView[]>(() => {
-    return students
-      .map((student) => {
-        const links = studentParents.filter((link) => link.studentId === student.id);
-        const activeEnrollment =
-          enrollments.find((row) => row.studentId === student.id && row.status === "active") ||
-          enrollments.find((row) => row.studentId === student.id);
+  const activeEnrollmentMap = useMemo(() => {
+    const map = new Map<string, StudentEnrollment>();
 
-        const classId = student.currentClassId || activeEnrollment?.classId;
-        const className = classId ? classMap.get(classId)?.name || "Class not found" : "No class assigned";
+    enrollments
+      .slice()
+      .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+      .forEach((enrollment) => {
+        const studentId = idOf(enrollment.studentId);
+        if (!studentId || map.has(studentId)) return;
 
-        const academicStructureName = activeEnrollment?.academicStructureId
-          ? structureMap.get(activeEnrollment.academicStructureId)?.name || "Structure not found"
-          : "Not enrolled";
+        if (enrollment.status === "active") {
+          map.set(studentId, enrollment);
+        }
+      });
 
-        const academicPeriodName = activeEnrollment?.academicPeriodId
-          ? periodMap.get(activeEnrollment.academicPeriodId)?.name || "Period not found"
-          : "Not enrolled";
+    return map;
+  }, [enrollments]);
 
-        const primaryLink = links.find((link) => link.isPrimary) || links[0];
+  const linkMap = useMemo(() => {
+    const map = new Map<string, StudentParent>();
 
-        return {
-          student,
-          parentLinks: links,
-          className,
-          academicStructureName,
-          academicPeriodName,
-          enrollmentStatus: activeEnrollment?.status || "not_enrolled",
-          relationship: relationshipLabel(primaryLink?.relationship),
-          isPrimary: Boolean(primaryLink?.isPrimary),
-        };
-      })
-      .sort((a, b) => a.student.fullName.localeCompare(b.student.fullName));
-  }, [students, studentParents, enrollments, classMap, structureMap, periodMap]);
+    studentParents.forEach((link) => {
+      const studentId = idOf(link.studentId);
+      if (!studentId) return;
 
-  const filteredChildren = useMemo(() => {
+      const existing = map.get(studentId);
+      if (!existing || link.isPrimary) {
+        map.set(studentId, link);
+      }
+    });
+
+    return map;
+  }, [studentParents]);
+
+  const childRows = useMemo<ChildView[]>(() => {
+    return students.map((student) => {
+      const id = idOf(student.id);
+      const enrollment = activeEnrollmentMap.get(id);
+      const classId = idOf(enrollment?.classId || student.currentClassId);
+      const klass = classMap.get(classId);
+      const organization = organizationMap.get(idOf(student.organizationId));
+      const link = linkMap.get(id);
+      const status = (student.status || "active") as StudentStatus;
+
+      return {
+        id,
+        student,
+        photoUrl:
+          resolvedMediaById[id]?.photo ||
+          safeRecordMediaValue(student.photo),
+        className: klass?.name || "No class assigned",
+        organizationName: organization?.name || "No organization",
+        relationship: relationshipLabel(link?.relationship),
+        isPrimary: Boolean(link?.isPrimary),
+        enrollment,
+        status,
+        active: isActiveStudent(student),
+      };
+    });
+  }, [
+    students,
+    activeEnrollmentMap,
+    classMap,
+    organizationMap,
+    linkMap,
+    resolvedMediaById,
+  ]);
+
+  const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return children.filter((item) => {
-      const student = item.student;
+    return childRows
+      .filter((item) => {
+        const student = item.student;
 
-      if (statusFilter !== "all" && student.status !== statusFilter) return false;
+        if (
+          filterClassId !== "all" &&
+          !sameId(
+            item.enrollment?.classId || student.currentClassId,
+            filterClassId,
+          )
+        ) {
+          return false;
+        }
 
-      if (classFilter !== "all") {
-        const studentClassId = student.currentClassId || enrollments.find((row) => row.studentId === student.id)?.classId;
-        if (studentClassId !== classFilter) return false;
-      }
+        if (filterStatus !== "all" && item.status !== filterStatus) {
+          return false;
+        }
 
-      if (!query) return true;
+        if (
+          filterRelationship !== "all" &&
+          safeLower(item.relationship) !== safeLower(filterRelationship)
+        ) {
+          return false;
+        }
 
-      return `
-        ${student.fullName}
-        ${student.admissionNumber || ""}
-        ${student.gender || ""}
-        ${student.parentName || ""}
-        ${student.parentPhone || ""}
-        ${student.parentEmail || ""}
-        ${student.address || ""}
-        ${item.className}
-        ${item.academicStructureName}
-        ${item.academicPeriodName}
-        ${item.relationship}
-      `
-        .toLowerCase()
-        .includes(query);
-    });
-  }, [children, search, statusFilter, classFilter, enrollments]);
+        if (!query) return true;
 
-  const selectedChild = useMemo(() => {
-    if (!selectedStudentId) return null;
-    return children.find((child) => child.student.id === selectedStudentId) || null;
-  }, [selectedStudentId, children]);
+        return `
+          ${student.fullName || ""}
+          ${student.admissionNumber || ""}
+          ${student.gender || ""}
+          ${student.email || ""}
+          ${item.className}
+          ${item.organizationName}
+          ${item.relationship}
+          ${item.status}
+        `
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) =>
+        a.student.fullName.localeCompare(b.student.fullName),
+      );
+  }, [
+    childRows,
+    search,
+    filterClassId,
+    filterStatus,
+    filterRelationship,
+  ]);
 
-  const summary = useMemo(() => {
-    const active = filteredChildren.filter((child) => child.student.status !== "graduated" && child.student.status !== "withdrawn").length;
-    const enrolled = filteredChildren.filter((child) => child.enrollmentStatus === "active").length;
-    const noClass = filteredChildren.filter((child) => child.className === "No class assigned").length;
-    const primaryLinks = filteredChildren.filter((child) => child.isPrimary).length;
+  const activeFilterCount = useMemo(
+    () =>
+      [filterClassId, filterStatus, filterRelationship].filter(
+        (value) => value !== "all",
+      ).length,
+    [filterClassId, filterStatus, filterRelationship],
+  );
 
-    return {
-      total: filteredChildren.length,
-      active,
-      enrolled,
-      noClass,
-      primaryLinks,
-    };
-  }, [filteredChildren]);
+  const relationshipOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(childRows.map((item) => item.relationship).filter(Boolean)),
+      ).sort(),
+    [childRows],
+  );
 
-  const classBreakdown = useMemo<Breakdown[]>(() => {
-    const map = new Map<string, Breakdown>();
+  const statusSummary = useMemo(
+    () => groupedCounts(childRows, (item) => statusLabel(item.status)),
+    [childRows],
+  );
 
-    filteredChildren.forEach((child) => {
-      const key = child.className || "No class assigned";
-      const existing = map.get(key) || { name: key, count: 0 };
-      existing.count += 1;
-      map.set(key, existing);
-    });
+  const classSummary = useMemo(
+    () => groupedCounts(childRows, (item) => item.className),
+    [childRows],
+  );
 
-    return Array.from(map.values()).sort((a, b) => b.count - a.count);
-  }, [filteredChildren]);
+  const relationshipSummary = useMemo(
+    () => groupedCounts(childRows, (item) => item.relationship),
+    [childRows],
+  );
 
-  const statusBreakdown = useMemo<Breakdown[]>(() => {
-    const map = new Map<string, Breakdown>();
+  const clearFilters = () => {
+    setFilterClassId("all");
+    setFilterStatus("all");
+    setFilterRelationship("all");
+  };
 
-    filteredChildren.forEach((child) => {
-      const key = child.student.status || "active";
-      const existing = map.get(key) || { name: key, count: 0 };
-      existing.count += 1;
-      map.set(key, existing);
-    });
+  const openChild = (child: ChildView) => {
+    setSelectedChild(child);
+  };
 
-    return Array.from(map.values()).sort((a, b) => b.count - a.count);
-  }, [filteredChildren]);
-
-  const relationshipBreakdown = useMemo<Breakdown[]>(() => {
-    const map = new Map<string, Breakdown>();
-
-    filteredChildren.forEach((child) => {
-      const key = child.relationship || "Guardian";
-      const existing = map.get(key) || { name: key, count: 0 };
-      existing.count += 1;
-      map.set(key, existing);
-    });
-
-    return Array.from(map.values()).sort((a, b) => b.count - a.count);
-  }, [filteredChildren]);
-
-  // ======================================================
-  // PROTECTED STATES
-  // ======================================================
-
-  if (accountLoading || contextLoading || settingsLoading || loading) {
+  if (
+    accountLoading ||
+    contextLoading ||
+    settingsLoading ||
+    loading
+  ) {
     return (
-      <main className="pch-page" style={{ "--pch-primary": primary } as React.CSSProperties}>
+      <main
+        className="pp-page"
+        style={
+          {
+            "--pp-primary": primary,
+            "--pp-primary-text": primaryText,
+          } as React.CSSProperties
+        }
+      >
         <style>{css}</style>
-        <section className="pch-state-card">
-          <div className="pch-spinner" />
-          <h2>Opening children...</h2>
-          <p>Checking parent profile, linked children, classes and enrollment records.</p>
+        <section className="pp-state-card">
+          <div className="pp-spinner" />
+          <h2>Opening your children...</h2>
+          <p>
+            Checking your parent profile, linked students, classes, and photos.
+          </p>
         </section>
       </main>
     );
@@ -424,9 +793,17 @@ export default function Children() {
 
   if (!authenticated || !accountId) {
     return (
-      <main className="pch-page" style={{ "--pch-primary": primary } as React.CSSProperties}>
+      <main
+        className="pp-page"
+        style={
+          {
+            "--pp-primary": primary,
+            "--pp-primary-text": primaryText,
+          } as React.CSSProperties
+        }
+      >
         <style>{css}</style>
-        <section className="pch-state-card">
+        <section className="pp-state-card">
           <h2>Redirecting to login...</h2>
           <p>You must sign in before viewing your children.</p>
         </section>
@@ -436,167 +813,277 @@ export default function Children() {
 
   if (!schoolId || !branchId) {
     return (
-      <main className="pch-page" style={{ "--pch-primary": primary } as React.CSSProperties}>
+      <main
+        className="pp-page"
+        style={
+          {
+            "--pp-primary": primary,
+            "--pp-primary-text": primaryText,
+          } as React.CSSProperties
+        }
+      >
         <style>{css}</style>
-        <section className="pch-state-card">
+        <section className="pp-state-card">
           <h2>Assigned school branch required</h2>
-          <p>Your parent portal must be linked to a school branch before children can be shown.</p>
+          <p>
+            Your parent membership must be connected to a school branch before
+            linked children can be shown.
+          </p>
         </section>
       </main>
     );
   }
 
-  // ======================================================
-  // UI
-  // ======================================================
-
   return (
-    <main className="pch-page" style={{ "--pch-primary": primary } as React.CSSProperties}>
+    <main
+      className="pp-page"
+      style={
+        {
+          "--pp-primary": primary,
+          "--pp-primary-text": primaryText,
+        } as React.CSSProperties
+      }
+    >
       <style>{css}</style>
 
-      <section className="pch-hero">
-        <div className="pch-hero-left">
-          <div className="pch-hero-icon">🧒</div>
-          <div className="pch-title-wrap">
-            <p>Parent Workspace</p>
-            <h2>My Children</h2>
-            <span>
-              {activeSchool?.name || "School"} · {activeBranch?.name || "Branch"}
-            </span>
-          </div>
-        </div>
+      {/* Compact primary action strip */}
+      <section className="pp-action-strip">
+        <label className="pp-search-box">
+          <span aria-hidden="true">⌕</span>
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search your children..."
+            aria-label="Search your children"
+          />
+          {search && (
+            <button
+              type="button"
+              className="pp-search-clear"
+              onClick={() => setSearch("")}
+              aria-label="Clear search"
+            >
+              ×
+            </button>
+          )}
+        </label>
 
-        <div className="pch-hero-actions">
-          <button type="button" className="pch-ghost-btn" onClick={load}>
-            Refresh
-          </button>
-        </div>
+        <button
+          type="button"
+          className={`pp-filter-button ${
+            activeFilterCount > 0 ? "active" : ""
+          }`}
+          onClick={() => setFilterOpen(true)}
+          aria-label="Open filters"
+          title="Filter"
+        >
+          <span aria-hidden="true">☷</span>
+          {activeFilterCount > 0 && (
+            <b className="pp-action-count">{activeFilterCount}</b>
+          )}
+        </button>
+
+        <button
+          type="button"
+          className="pp-more-button"
+          onClick={() => setMoreOpen(true)}
+          aria-label="More options"
+          title="More"
+        >
+          ⋯
+        </button>
       </section>
 
-      <section className="pch-context-grid">
-        <article>
-          <div className="pch-context-icon">👨‍👩‍👧</div>
-          <div>
-            <span>Linked Children</span>
-            <strong>{children.length}</strong>
-            <p>Only students linked to your parent profile appear here.</p>
-          </div>
-        </article>
+      {/* Active filter chips only when useful */}
+      {(activeFilterCount > 0 || search) && (
+        <section className="pp-active-filters">
+          {search && (
+            <button type="button" onClick={() => setSearch("")}>
+              Search: {search} <span>×</span>
+            </button>
+          )}
 
-        <article>
-          <div className="pch-context-icon">🏫</div>
-          <div>
-            <span>School Branch</span>
-            <strong>{activeBranch?.name || "Assigned branch"}</strong>
-            <p>This portal is locked to your child’s assigned branch.</p>
-          </div>
-        </article>
-      </section>
+          {filterClassId !== "all" && (
+            <button type="button" onClick={() => setFilterClassId("all")}>
+              {classMap.get(filterClassId)?.name || "Class"} <span>×</span>
+            </button>
+          )}
 
-      <section className="pch-summary-grid" aria-label="Children summary">
-        <SummaryCard label="Children" value={summary.total} icon="🧒" />
-        <SummaryCard label="Active" value={summary.active} icon="✅" positive />
-        <SummaryCard label="Enrolled" value={summary.enrolled} icon="📚" />
-        <SummaryCard label="No Class" value={summary.noClass} icon="⚠️" warning={summary.noClass > 0} />
-        <SummaryCard label="Primary Links" value={summary.primaryLinks} icon="⭐" />
-      </section>
+          {filterStatus !== "all" && (
+            <button type="button" onClick={() => setFilterStatus("all")}>
+              {statusLabel(filterStatus)} <span>×</span>
+            </button>
+          )}
 
-      <section className="pch-toolbar">
-        <div className="pch-view-tabs">
-          <button type="button" className={viewMode === "cards" ? "active" : ""} onClick={() => setViewMode("cards")}>
-            Cards
-          </button>
-          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
-            Table
-          </button>
-          <button type="button" className={viewMode === "analytics" ? "active" : ""} onClick={() => setViewMode("analytics")}>
-            Analytics
-          </button>
-        </div>
-
-        <Chip tone="gray">{filteredChildren.length} child(ren)</Chip>
-      </section>
-
-      <section className="pch-filter-card">
-        <input
-          placeholder="Search child, admission number, class, relationship..."
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
-
-        <select value={statusFilter || "all"} onChange={(event) => setStatusFilter(event.target.value as any)}>
-          <option value="all">All Statuses</option>
-          <option value="active">Active</option>
-          <option value="graduated">Graduated</option>
-          <option value="transferred">Transferred</option>
-          <option value="withdrawn">Withdrawn</option>
-        </select>
-
-        <select value={classFilter} onChange={(event) => setClassFilter(event.target.value === "all" ? "all" : Number(event.target.value))}>
-          <option value="all">All Classes</option>
-          {classes.map((row) => (
-            <option key={row.id} value={row.id}>
-              {row.name}
-            </option>
-          ))}
-        </select>
-      </section>
-
-      {viewMode === "analytics" && (
-        <>
-          <BreakdownSection title="Class Breakdown" items={classBreakdown} tone="blue" />
-          <BreakdownSection title="Status Breakdown" items={statusBreakdown} tone="green" />
-          <BreakdownSection title="Relationship Breakdown" items={relationshipBreakdown} tone="purple" />
-        </>
+          {filterRelationship !== "all" && (
+            <button
+              type="button"
+              onClick={() => setFilterRelationship("all")}
+            >
+              {filterRelationship} <span>×</span>
+            </button>
+          )}
+        </section>
       )}
 
-      {viewMode === "table" && (
-        <section className="pch-table-card">
-          <div className="pch-section-head">
-            <div>
-              <p>Parent Child Register</p>
-              <h3>Children Table</h3>
-            </div>
-            <Chip tone="blue">Parent Scoped</Chip>
+      {/* Cards */}
+      {viewMode === "cards" && (
+        <section className="pp-content-section">
+          <div className="pp-card-grid">
+            {filteredRows.map((child) => {
+              const age = calculateAge(child.student);
+
+              return (
+                <article
+                  key={child.id}
+                  className="pp-child-card"
+                  onClick={() => openChild(child)}
+                >
+                  <div className="pp-child-main">
+                    <Avatar
+                      name={child.student.fullName}
+                      photo={child.photoUrl}
+                      primary={primary}
+                    />
+
+                    <div className="pp-child-copy">
+                      <div className="pp-name-line">
+                        <h3>{child.student.fullName}</h3>
+                        <span
+                          className={`pp-status-dot ${statusTone(
+                            child.status,
+                          )}`}
+                          title={statusLabel(child.status)}
+                        />
+                      </div>
+
+                      <p>
+                        {child.className}
+                        {child.student.admissionNumber
+                          ? ` · ${child.student.admissionNumber}`
+                          : ""}
+                      </p>
+
+                      <div className="pp-card-meta">
+                        <span>{child.relationship}</span>
+                        {age !== null && <span>{age} years</span>}
+                        {child.student.gender && (
+                          <span>{child.student.gender}</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="pp-row-more"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openChild(child);
+                      }}
+                      aria-label={`View ${child.student.fullName}`}
+                    >
+                      ›
+                    </button>
+                  </div>
+
+                  <div className="pp-card-footer">
+                    <span>{child.organizationName}</span>
+                    <strong>{statusLabel(child.status)}</strong>
+                  </div>
+                </article>
+              );
+            })}
           </div>
 
-          <div className="pch-table-scroll">
+          {!filteredRows.length && (
+            <EmptyState
+              icon="🧒"
+              title={
+                childRows.length
+                  ? "No children match your filters"
+                  : "No linked children found"
+              }
+              text={
+                childRows.length
+                  ? "Clear or adjust the current search and filters."
+                  : activeParentId || parents.length
+                    ? "The school has not linked a student to this parent profile yet."
+                    : "Your login is not connected to a permanent parent profile in this branch."
+              }
+            />
+          )}
+        </section>
+      )}
+
+      {/* Table */}
+      {viewMode === "table" && (
+        <section className="pp-table-card">
+          <div className="pp-section-head">
+            <div>
+              <p>Parent directory</p>
+              <h3>Children ({filteredRows.length})</h3>
+            </div>
+            <Chip tone="blue">Read only</Chip>
+          </div>
+
+          <div className="pp-table-scroll">
             <table>
               <thead>
                 <tr>
-                  <th>Child</th>
-                  <th>Admission No.</th>
+                  <th>Student</th>
                   <th>Class</th>
-                  <th>Academic Structure</th>
-                  <th>Current Period</th>
+                  <th>Relationship</th>
                   <th>Gender</th>
                   <th>Age</th>
                   <th>Status</th>
-                  <th>Relationship</th>
-                  <th>Action</th>
+                  <th aria-label="Action" />
                 </tr>
               </thead>
 
               <tbody>
-                {filteredChildren.map((child) => {
-                  const age = child.student.age || ageFromDob(child.student.dateOfBirth);
+                {filteredRows.map((child) => {
+                  const age = calculateAge(child.student);
 
                   return (
-                    <tr key={child.student.id}>
+                    <tr key={child.id}>
                       <td>
-                        <strong>{child.student.fullName}</strong>
-                        <span>{child.student.parentPhone || child.student.parentEmail || "No parent contact"}</span>
+                        <button
+                          type="button"
+                          className="pp-table-student"
+                          onClick={() => openChild(child)}
+                        >
+                          <Avatar
+                            name={child.student.fullName}
+                            photo={child.photoUrl}
+                            primary={primary}
+                          />
+                          <span>
+                            <strong>{child.student.fullName}</strong>
+                            <small>
+                              {child.student.admissionNumber ||
+                                "No admission number"}
+                            </small>
+                          </span>
+                        </button>
                       </td>
-                      <td>{textOrDash(child.student.admissionNumber)}</td>
-                      <td>{child.className}</td>
-                      <td>{child.academicStructureName}</td>
-                      <td>{child.academicPeriodName}</td>
-                      <td>{textOrDash(child.student.gender)}</td>
-                      <td>{textOrDash(age)}</td>
-                      <td><Chip tone={child.student.status === "withdrawn" ? "red" : "green"}>{child.student.status || "active"}</Chip></td>
-                      <td>{child.relationship}</td>
                       <td>
-                        <button type="button" className="pch-table-btn" onClick={() => setSelectedStudentId(child.student.id || null)}>
+                        <strong>{child.className}</strong>
+                        <small>{child.organizationName}</small>
+                      </td>
+                      <td>{child.relationship}</td>
+                      <td>{child.student.gender || "Not set"}</td>
+                      <td>{age === null ? "Not set" : age}</td>
+                      <td>
+                        <Chip tone={statusTone(child.status)}>
+                          {statusLabel(child.status)}
+                        </Chip>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="pp-table-action"
+                          onClick={() => openChild(child)}
+                        >
                           View
                         </button>
                       </td>
@@ -604,10 +1091,14 @@ export default function Children() {
                   );
                 })}
 
-                {!filteredChildren.length && (
+                {!filteredRows.length && (
                   <tr>
-                    <td colSpan={10}>
-                      <EmptyCard text="No linked children were found under the selected filters." />
+                    <td colSpan={7}>
+                      <EmptyState
+                        icon="🧒"
+                        title="No children found"
+                        text="No linked children match the current filters."
+                      />
                     </td>
                   </tr>
                 )}
@@ -617,1040 +1108,1575 @@ export default function Children() {
         </section>
       )}
 
-      {viewMode === "cards" && (
-        <section className="pch-section">
-          <div className="pch-section-head">
-            <div>
-              <p>Parent Child Register</p>
-              <h3>Linked Children</h3>
-            </div>
-            <Chip tone="gray">{filteredChildren.length} child(ren)</Chip>
-          </div>
-
-          <div className="pch-list">
-            {filteredChildren.map((child) => {
-              const age = child.student.age || ageFromDob(child.student.dateOfBirth);
-
-              return (
-                <article key={child.student.id} className="pch-card">
-                  <div className="pch-card-top">
-                    <div className="pch-avatar">
-                      {child.student.photo ? (
-                        <img src={child.student.photo} alt={child.student.fullName} />
-                      ) : (
-                        child.student.fullName.slice(0, 1).toUpperCase()
-                      )}
-                    </div>
-
-                    <div className="pch-card-main">
-                      <h3>{child.student.fullName}</h3>
-                      <p>
-                        {child.student.admissionNumber || "No admission number"} · {child.className}
-                      </p>
-
-                      <div className="pch-chip-row">
-                        <Chip tone="blue">{child.relationship}</Chip>
-                        <Chip tone={child.student.status === "withdrawn" ? "red" : "green"}>{child.student.status || "active"}</Chip>
-                        <Chip tone="gray">{child.enrollmentStatus}</Chip>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pch-mini-grid">
-                    <MiniStat label="Class" value={child.className} />
-                    <MiniStat label="Structure" value={child.academicStructureName} />
-                    <MiniStat label="Period" value={child.academicPeriodName} />
-                    <MiniStat label="Age" value={textOrDash(age)} />
-                  </div>
-
-                  <div className="pch-action-row">
-                    <button type="button" onClick={() => setSelectedStudentId(child.student.id || null)}>
-                      View Profile
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-
-            {!filteredChildren.length && (
-              <EmptyCard text="No linked children were found under the selected filters." />
-            )}
-          </div>
+      {/* Summary */}
+      {viewMode === "summary" && (
+        <section className="pp-summary-grid">
+          <SummarySection
+            title="Children by Class"
+            subtitle="Class distribution"
+            items={classSummary}
+          />
+          <SummarySection
+            title="Relationship"
+            subtitle="Parent relationship"
+            items={relationshipSummary}
+          />
+          <SummarySection
+            title="Student Status"
+            subtitle="Current standing"
+            items={statusSummary}
+          />
         </section>
       )}
 
-      {selectedChild && (
-        <div className="pch-drawer-layer">
-          <button type="button" className="pch-drawer-overlay" aria-label="Close child profile" onClick={() => setSelectedStudentId(null)} />
+      {/* Filters sheet */}
+      {filterOpen && (
+        <div className="pp-layer">
+          <button
+            type="button"
+            className="pp-overlay"
+            aria-label="Close filters"
+            onClick={() => setFilterOpen(false)}
+          />
 
-          <aside className="pch-drawer">
-            <div className="pch-drawer-head">
+          <section className="pp-sheet">
+            <div className="pp-sheet-handle" />
+
+            <div className="pp-sheet-head">
               <div>
-                <p>Child Profile</p>
-                <h2>{selectedChild.student.fullName}</h2>
-                <span>{activeSchool?.name || "School"} · {activeBranch?.name || "Branch"}</span>
+                <p>My Children</p>
+                <h2>Filter children</h2>
               </div>
-              <button type="button" onClick={() => setSelectedStudentId(null)}>✕</button>
+              <button
+                type="button"
+                onClick={() => setFilterOpen(false)}
+                aria-label="Close filters"
+              >
+                ×
+              </button>
             </div>
 
-            <section className="pch-profile-top">
-              <div className="pch-profile-avatar">
-                {selectedChild.student.photo ? (
-                  <img src={selectedChild.student.photo} alt={selectedChild.student.fullName} />
-                ) : (
-                  selectedChild.student.fullName.slice(0, 1).toUpperCase()
-                )}
+            <div className="pp-form-grid">
+              <label>
+                <span>Class</span>
+                <select
+                  value={filterClassId}
+                  onChange={(event) => setFilterClassId(event.target.value)}
+                >
+                  <option value="all">All classes</option>
+                  {classes.map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                <span>Status</span>
+                <select
+                  value={filterStatus}
+                  onChange={(event) =>
+                    setFilterStatus(
+                      event.target.value as "all" | StudentStatus,
+                    )
+                  }
+                >
+                  <option value="all">All statuses</option>
+                  <option value="active">Active</option>
+                  <option value="graduated">Graduated</option>
+                  <option value="transferred">Transferred</option>
+                  <option value="withdrawn">Withdrawn</option>
+                </select>
+              </label>
+
+              <label>
+                <span>Relationship</span>
+                <select
+                  value={filterRelationship}
+                  onChange={(event) =>
+                    setFilterRelationship(event.target.value)
+                  }
+                >
+                  <option value="all">All relationships</option>
+                  {relationshipOptions.map((relationship) => (
+                    <option key={relationship} value={relationship}>
+                      {relationship}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="pp-sheet-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={clearFilters}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => setFilterOpen(false)}
+              >
+                Apply
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* More sheet */}
+      {moreOpen && (
+        <div className="pp-layer">
+          <button
+            type="button"
+            className="pp-overlay"
+            aria-label="Close more options"
+            onClick={() => setMoreOpen(false)}
+          />
+
+          <section className="pp-sheet compact">
+            <div className="pp-sheet-handle" />
+
+            <div className="pp-sheet-head">
+              <div>
+                <p>View options</p>
+                <h2>More</h2>
               </div>
+              <button
+                type="button"
+                onClick={() => setMoreOpen(false)}
+                aria-label="Close more options"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="pp-menu-list">
+              <button
+                type="button"
+                className={viewMode === "cards" ? "active" : ""}
+                onClick={() => {
+                  setViewMode("cards");
+                  setMoreOpen(false);
+                }}
+              >
+                <span>▦</span>
+                <div>
+                  <strong>Cards</strong>
+                  <small>Compact mobile-friendly child list</small>
+                </div>
+                <b>›</b>
+              </button>
+
+              <button
+                type="button"
+                className={viewMode === "table" ? "active" : ""}
+                onClick={() => {
+                  setViewMode("table");
+                  setMoreOpen(false);
+                }}
+              >
+                <span>☷</span>
+                <div>
+                  <strong>Table</strong>
+                  <small>Detailed desktop and tablet view</small>
+                </div>
+                <b>›</b>
+              </button>
+
+              <button
+                type="button"
+                className={viewMode === "summary" ? "active" : ""}
+                onClick={() => {
+                  setViewMode("summary");
+                  setMoreOpen(false);
+                }}
+              >
+                <span>◫</span>
+                <div>
+                  <strong>Summary</strong>
+                  <small>Class, relationship, and status breakdowns</small>
+                </div>
+                <b>›</b>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  setMoreOpen(false);
+                  await load();
+                  showToast("success", "Children refreshed.");
+                }}
+              >
+                <span>↻</span>
+                <div>
+                  <strong>Refresh</strong>
+                  <small>Reload linked children and their details</small>
+                </div>
+                <b>›</b>
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* Child details drawer */}
+      {selectedChild && (
+        <div className="pp-drawer-layer">
+          <button
+            type="button"
+            className="pp-drawer-overlay"
+            aria-label="Close child details"
+            onClick={() => setSelectedChild(null)}
+          />
+
+          <aside className="pp-drawer">
+            <div className="pp-drawer-head">
+              <div>
+                <p>My Child</p>
+                <h2>Student details</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedChild(null)}
+                aria-label="Close child details"
+              >
+                ×
+              </button>
+            </div>
+
+            <section className="pp-profile-card">
+              <Avatar
+                name={selectedChild.student.fullName}
+                photo={selectedChild.photoUrl}
+                primary={primary}
+                size="large"
+              />
 
               <div>
                 <h3>{selectedChild.student.fullName}</h3>
-                <p>{selectedChild.student.admissionNumber || "No admission number"}</p>
-                <div className="pch-chip-row">
-                  <Chip tone="blue">{selectedChild.className}</Chip>
-                  <Chip tone="gray">{selectedChild.relationship}</Chip>
+                <p>
+                  {selectedChild.className}
+                  {selectedChild.student.admissionNumber
+                    ? ` · ${selectedChild.student.admissionNumber}`
+                    : ""}
+                </p>
+                <div className="pp-chip-row">
+                  <Chip tone={statusTone(selectedChild.status)}>
+                    {statusLabel(selectedChild.status)}
+                  </Chip>
+                  <Chip tone="blue">{selectedChild.relationship}</Chip>
+                  {selectedChild.isPrimary && (
+                    <Chip tone="purple">Primary link</Chip>
+                  )}
                 </div>
               </div>
             </section>
 
-            <section className="pch-drawer-grid">
-              <MiniStat label="Gender" value={textOrDash(selectedChild.student.gender)} />
-              <MiniStat label="Age" value={textOrDash(selectedChild.student.age || ageFromDob(selectedChild.student.dateOfBirth))} />
-              <MiniStat label="Date of Birth" value={textOrDash(selectedChild.student.dateOfBirth)} />
-              <MiniStat label="Status" value={selectedChild.student.status || "active"} />
-              <MiniStat label="Class" value={selectedChild.className} />
-              <MiniStat label="Academic Structure" value={selectedChild.academicStructureName} />
-              <MiniStat label="Academic Period" value={selectedChild.academicPeriodName} />
-              <MiniStat label="Enrollment" value={selectedChild.enrollmentStatus} />
+            <section className="pp-detail-section">
+              <div className="pp-section-head">
+                <div>
+                  <p>School information</p>
+                  <h3>Academic profile</h3>
+                </div>
+              </div>
+
+              <div className="pp-detail-grid">
+                <article>
+                  <span>Class</span>
+                  <strong>{selectedChild.className}</strong>
+                </article>
+                <article>
+                  <span>Organization</span>
+                  <strong>{selectedChild.organizationName}</strong>
+                </article>
+                <article>
+                  <span>Admission number</span>
+                  <strong>
+                    {selectedChild.student.admissionNumber || "Not set"}
+                  </strong>
+                </article>
+                <article>
+                  <span>Enrollment</span>
+                  <strong>
+                    {selectedChild.enrollment
+                      ? statusLabel(selectedChild.enrollment.status)
+                      : "No active enrollment"}
+                  </strong>
+                </article>
+              </div>
             </section>
 
-            <section className="pch-drawer-section">
-              <h3>Contact & Guardian Information</h3>
-              <div className="pch-line-list">
+            <section className="pp-detail-section">
+              <div className="pp-section-head">
                 <div>
-                  <span>Parent Name</span>
-                  <strong>{selectedChild.student.parentName || parents[0]?.fullName || "-"}</strong>
+                  <p>Personal information</p>
+                  <h3>Student profile</h3>
+                </div>
+              </div>
+
+              <div className="pp-detail-list">
+                <div>
+                  <span>Gender</span>
+                  <strong>{selectedChild.student.gender || "Not set"}</strong>
                 </div>
                 <div>
-                  <span>Phone</span>
-                  <strong>{selectedChild.student.parentPhone || parents[0]?.phone || "-"}</strong>
+                  <span>Age</span>
+                  <strong>
+                    {calculateAge(selectedChild.student) ?? "Not set"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Date of birth</span>
+                  <strong>
+                    {formatDate(selectedChild.student.dateOfBirth)}
+                  </strong>
                 </div>
                 <div>
                   <span>Email</span>
-                  <strong>{selectedChild.student.parentEmail || parents[0]?.email || "-"}</strong>
-                </div>
-                <div>
-                  <span>Address</span>
-                  <strong>{selectedChild.student.address || parents[0]?.address || "-"}</strong>
+                  <strong>{selectedChild.student.email || "Not set"}</strong>
                 </div>
               </div>
             </section>
+
+            <section className="pp-readonly-note">
+              <span>🔒</span>
+              <div>
+                <strong>School-managed information</strong>
+                <p>
+                  This page is read-only. Contact the school if any student
+                  detail needs to be corrected.
+                </p>
+              </div>
+            </section>
           </aside>
+        </div>
+      )}
+
+      {toast && (
+        <div className={`pp-toast ${toast.tone}`}>
+          <span>
+            {toast.tone === "success"
+              ? "✓"
+              : toast.tone === "error"
+                ? "!"
+                : "i"}
+          </span>
+          <p>{toast.message}</p>
         </div>
       )}
     </main>
   );
 }
 
-// ======================================================
-// SMALL COMPONENTS
-// ======================================================
-
-function SummaryCard({
-  label,
-  value,
-  icon,
-  positive = false,
-  warning = false,
-}: {
-  label: string;
-  value: string | number;
-  icon: string;
-  positive?: boolean;
-  warning?: boolean;
-}) {
-  return (
-    <article className={`pch-summary-card ${positive ? "positive" : ""} ${warning ? "warning" : ""}`}>
-      <div className="pch-summary-icon">{icon}</div>
-      <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
-      </div>
-    </article>
-  );
-}
-
-function BreakdownSection({
-  title,
-  items,
-  tone,
-}: {
-  title: string;
-  items: Breakdown[];
-  tone: "green" | "blue" | "purple" | "orange";
-}) {
-  const total = items.reduce((sum, item) => sum + item.count, 0);
-
-  return (
-    <section className="pch-section">
-      <div className="pch-section-head">
-        <div>
-          <p>Analytical View</p>
-          <h3>{title}</h3>
-        </div>
-        <Chip tone="gray">{items.length} group(s)</Chip>
-      </div>
-
-      <div className="pch-breakdown-grid">
-        {items.map((item) => (
-          <article key={item.name} className="pch-breakdown-card">
-            <div className="pch-breakdown-top">
-              <strong>{item.name}</strong>
-              <Chip tone={tone}>{item.count}</Chip>
-            </div>
-
-            <div className="pch-bar-track">
-              <div style={{ width: `${total ? Math.round((item.count / total) * 100) : 0}%` }} />
-            </div>
-
-            <div className="pch-chip-row">
-              <Chip tone="gray">{item.count} child(ren)</Chip>
-              <Chip tone="gray">{total ? Math.round((item.count / total) * 100) : 0}%</Chip>
-            </div>
-          </article>
-        ))}
-
-        {!items.length && <EmptyCard text={`No ${title.toLowerCase()} available for the selected filters.`} />}
-      </div>
-    </section>
-  );
-}
-
-function Chip({ children, tone = "gray" }: { children: React.ReactNode; tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple" }) {
-  return <span className={`pch-chip ${tone}`}>{children}</span>;
-}
-
-function MiniStat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="pch-mini-stat">
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function EmptyCard({ text }: { text: string }) {
-  return (
-    <section className="pch-empty-card">
-      <div className="pch-empty-icon">🧒</div>
-      <h3>No children found</h3>
-      <p>{text}</p>
-    </section>
-  );
-}
-
-// ======================================================
+// ============================================================================
 // CSS
-// ======================================================
+// ============================================================================
 
 const css = `
-@keyframes pchSpin { to { transform: rotate(360deg); } }
+@keyframes ppSpin {
+  to { transform: rotate(360deg); }
+}
 
-.pch-page {
+.pp-page {
   min-height: 100dvh;
   width: 100%;
   max-width: 100%;
   min-width: 0;
   padding: 8px;
-  padding-bottom: max(28px, env(safe-area-inset-bottom));
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--pch-primary) 10%, transparent), transparent 34rem),
-    var(--bg, #f8fafc);
+  padding-bottom: max(32px, env(safe-area-inset-bottom));
+  overflow-x: hidden;
+  background: var(--bg, #f8fafc);
   color: var(--text, #0f172a);
   font-family: var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   font-size: var(--font-size, 16px);
-  overflow-x: hidden;
 }
 
-.pch-page *,
-.pch-page *::before,
-.pch-page *::after { box-sizing: border-box; }
+.pp-page *,
+.pp-page *::before,
+.pp-page *::after {
+  box-sizing: border-box;
+}
 
-.pch-page button,
-.pch-page input,
-.pch-page select {
+.pp-page button,
+.pp-page input,
+.pp-page select {
   font: inherit;
-  max-width: 100%;
 }
 
-.pch-page input,
-.pch-page select {
-  width: 100%;
-  min-height: 43px;
-  border: 1px solid var(--input-border, var(--border, rgba(148,163,184,.28)));
-  border-radius: 15px;
-  padding: 0 12px;
-  background: var(--input-bg, var(--surface, #fff));
-  color: var(--input-text, var(--text, #0f172a));
-  outline: none;
-  font-weight: 750;
-}
-
-.pch-page input:focus,
-.pch-page select:focus {
-  border-color: var(--pch-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--pch-primary) 12%, transparent);
-}
-
-.pch-state-card {
+.pp-state-card {
+  width: min(460px, 100%);
   min-height: min(420px, calc(100dvh - 32px));
+  margin: 0 auto;
   display: grid;
   place-items: center;
   align-content: center;
   gap: 10px;
-  width: min(460px, 100%);
-  margin: 0 auto;
-  padding: 22px;
+  padding: 24px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .22));
   border-radius: 28px;
   background: var(--card, var(--surface, #fff));
-  border: 1px solid var(--border, rgba(148,163,184,.22));
-  box-shadow: var(--shell-shadow, 0 24px 60px rgba(15,23,42,.08));
+  box-shadow: var(--shell-shadow, 0 24px 60px rgba(15, 23, 42, .08));
   text-align: center;
 }
 
-.pch-state-card h2 {
+.pp-state-card h2,
+.pp-state-card p {
   margin: 0;
-  color: var(--text, #0f172a);
-  font-size: clamp(18px, 5vw, 24px);
+}
+
+.pp-state-card h2 {
+  font-size: 22px;
   font-weight: 1000;
   letter-spacing: -.04em;
 }
 
-.pch-state-card p {
+.pp-state-card p {
   max-width: 34rem;
-  margin: 0;
   color: var(--muted, #64748b);
   font-size: 13px;
   line-height: 1.6;
 }
 
-.pch-spinner {
+.pp-spinner {
   width: 38px;
   height: 38px;
+  border: 4px solid color-mix(in srgb, var(--pp-primary) 18%, transparent);
+  border-top-color: var(--pp-primary);
   border-radius: 999px;
-  border: 4px solid color-mix(in srgb, var(--pch-primary) 18%, transparent);
-  border-top-color: var(--pch-primary);
-  animation: pchSpin .8s linear infinite;
+  animation: ppSpin .8s linear infinite;
 }
 
-.pch-hero {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--pch-primary) 16%, transparent), transparent 20rem),
-    linear-gradient(135deg, var(--card, var(--surface, #fff)), color-mix(in srgb, var(--pch-primary) 7%, var(--card, #fff)) 72%);
-  border: 1px solid var(--border, rgba(148,163,184,.22));
-  box-shadow: 0 18px 46px rgba(15,23,42,.07);
-  overflow: hidden;
+.pp-action-strip {
+  position: relative;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
+  gap: 7px;
+  width: 100%;
+  padding: 7px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .20));
+  border-radius: 20px;
+  background: var(--card, var(--surface, #fff));
+  box-shadow: 0 10px 26px rgba(15, 23, 42, .055);
 }
 
-.pch-hero-left {
+.pp-search-box {
   min-width: 0;
+  min-height: 44px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex: 1 1 auto;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--input-border, var(--border, rgba(148, 163, 184, .24)));
+  border-radius: 14px;
+  background: var(--input-bg, var(--surface, #fff));
+  color: var(--muted, #64748b);
 }
 
-.pch-hero-icon {
-  width: 48px;
-  height: 48px;
+.pp-search-box:focus-within {
+  border-color: var(--pp-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pp-primary) 12%, transparent);
+}
+
+.pp-search-box > span {
   flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 18px;
-  background: var(--pch-primary);
-  color: #fff;
-  box-shadow: 0 12px 26px color-mix(in srgb, var(--pch-primary) 28%, transparent);
-  font-size: 22px;
-}
-
-.pch-title-wrap { min-width: 0; }
-
-.pch-title-wrap p,
-.pch-title-wrap h2,
-.pch-title-wrap span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pch-title-wrap p {
-  margin: 0 0 2px;
-  color: var(--pch-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.pch-title-wrap h2 {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: clamp(20px, 5vw, 30px);
-  font-weight: 1000;
-  letter-spacing: -.06em;
+  font-size: 21px;
   line-height: 1;
 }
 
-.pch-title-wrap span {
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.pch-hero-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.pch-ghost-btn,
-.pch-table-btn,
-.pch-action-row button {
-  min-height: 42px;
-  border-radius: 999px;
-  padding: 0 14px;
-  font-weight: 950;
-  cursor: pointer;
-  border: 1px solid var(--border, rgba(148,163,184,.24));
-  background: var(--card, var(--surface, #fff));
-  color: var(--text, #0f172a);
-}
-
-.pch-context-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.pch-context-grid article {
+.pp-search-box input {
   min-width: 0;
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 12px;
-  border-radius: 22px;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--pch-primary) 10%, var(--card, var(--surface, #fff))), var(--card, var(--surface, #fff)) 70%);
-  border: 1px solid var(--border, rgba(148,163,184,.2));
-  box-shadow: 0 12px 28px rgba(15,23,42,.04);
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text, #0f172a);
+  font-weight: 760;
 }
 
-.pch-context-icon {
-  width: 42px;
-  height: 42px;
+.pp-search-box input::placeholder {
+  color: var(--muted, #94a3b8);
+}
+
+.pp-search-clear {
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted, #64748b) 12%, transparent);
+  color: var(--muted, #64748b);
+  cursor: pointer;
+}
+
+.pp-filter-button,
+.pp-more-button {
+  position: relative;
+  width: 44px;
+  height: 44px;
   display: grid;
   place-items: center;
-  border-radius: 16px;
-  background: var(--pch-primary);
-  color: #fff;
+  border-radius: 14px;
+  cursor: pointer;
   font-size: 20px;
-}
-
-.pch-context-grid article > div:last-child { min-width: 0; }
-
-.pch-context-grid span {
-  display: block;
-  color: var(--pch-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.pch-context-grid strong {
-  display: block;
-  margin-top: 3px;
-  color: var(--text, #0f172a);
-  font-size: 16px;
   font-weight: 1000;
-  letter-spacing: -.04em;
 }
 
-.pch-context-grid p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.45;
+.pp-filter-button {
+  border: 1px solid color-mix(in srgb, var(--pp-primary) 18%, var(--border, transparent));
+  background: color-mix(in srgb, var(--pp-primary) 9%, var(--card, #fff));
+  color: var(--pp-primary);
 }
 
-.pch-summary-grid {
+.pp-filter-button.active {
+  border-color: var(--pp-primary);
+  background: var(--pp-primary);
+  color: var(--pp-primary-text);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--pp-primary) 24%, transparent);
+}
+
+.pp-more-button {
+  border: 1px solid var(--border, rgba(148, 163, 184, .24));
+  background: var(--card, var(--surface, #fff));
+  color: var(--text, #0f172a);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, .05);
+}
+
+.pp-action-count {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 19px;
+  height: 19px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  place-items: center;
+  padding: 0 5px;
+  border: 2px solid var(--card, #fff);
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.pp-active-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
   margin-top: 8px;
 }
 
-.pch-summary-card,
-.pch-toolbar,
-.pch-filter-card,
-.pch-table-card,
-.pch-breakdown-card,
-.pch-card,
-.pch-empty-card {
-  background: var(--card, var(--surface, #fff));
-  border: 1px solid var(--border, rgba(148,163,184,.2));
-  box-shadow: 0 12px 28px rgba(15,23,42,.045);
-}
-
-.pch-summary-card {
-  min-width: 0;
-  display: flex;
+.pp-active-filters button {
+  min-height: 29px;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 22px;
-  overflow: hidden;
-}
-
-.pch-summary-card.positive { background: linear-gradient(135deg, rgba(34,197,94,.10), var(--card, var(--surface, #fff))); }
-.pch-summary-card.warning { background: linear-gradient(135deg, rgba(245,158,11,.10), var(--card, var(--surface, #fff))); }
-
-.pch-summary-icon {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--pch-primary) 12%, var(--surface, #fff));
-}
-
-.pch-summary-card div:last-child { min-width: 0; }
-
-.pch-summary-card strong,
-.pch-summary-card span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pch-summary-card strong {
-  color: var(--text, #0f172a);
-  font-size: 19px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.pch-summary-card span {
-  margin-top: 2px;
-  color: var(--muted, #64748b);
+  gap: 7px;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--pp-primary) 18%, var(--border, transparent));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pp-primary) 8%, var(--card, #fff));
+  color: var(--pp-primary);
   font-size: 11px;
-  font-weight: 850;
-}
-
-.pch-toolbar,
-.pch-filter-card,
-.pch-table-card {
-  margin-top: 10px;
-  padding: 10px;
-  border-radius: 24px;
-}
-
-.pch-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.pch-view-tabs {
-  display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  width: min(390px, 100%);
-  padding: 4px;
-  border-radius: 999px;
-  background: var(--shell-section-bg, color-mix(in srgb, var(--pch-primary) 7%, var(--surface, #fff)));
-  border: 1px solid var(--border, rgba(148,163,184,.18));
-}
-
-.pch-view-tabs button {
-  min-width: 0;
-  min-height: 35px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 9px;
-  background: transparent;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 950;
+  font-weight: 900;
   cursor: pointer;
 }
 
-.pch-view-tabs button.active {
-  background: var(--pch-primary);
-  color: #fff;
+.pp-active-filters button span {
+  font-size: 15px;
+  line-height: 1;
 }
 
-.pch-filter-card {
+.pp-content-section {
+  margin-top: 10px;
+}
+
+.pp-card-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
-.pch-section { margin-top: 16px; }
-
-.pch-section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.pch-section-head p {
-  margin: 0;
-  color: var(--pch-primary);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.pch-section-head h3 {
-  margin: 2px 0 0;
-  color: var(--text, #0f172a);
-  font-size: 19px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.pch-list,
-.pch-breakdown-grid {
-  display: grid;
-  gap: 10px;
-}
-
-.pch-card,
-.pch-breakdown-card,
-.pch-empty-card {
+.pp-child-card {
   min-width: 0;
-  border-radius: 24px;
-  padding: 13px;
+  padding: 10px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .20));
+  border-radius: 19px;
+  background: var(--card, var(--surface, #fff));
+  box-shadow: 0 9px 22px rgba(15, 23, 42, .045);
+  cursor: pointer;
   overflow: hidden;
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
 
-.pch-card {
-  background:
-    linear-gradient(135deg, var(--card, var(--surface, #fff)), color-mix(in srgb, var(--pch-primary) 4%, var(--card, #fff)));
+.pp-child-card:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--pp-primary) 34%, var(--border, transparent));
+  box-shadow: 0 13px 28px rgba(15, 23, 42, .07);
 }
 
-.pch-card-top,
-.pch-profile-top {
+.pp-child-main {
+  min-width: 0;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  gap: 9px;
 }
 
-.pch-avatar,
-.pch-profile-avatar {
-  width: 56px;
-  height: 56px;
+.pp-avatar {
+  width: 46px;
+  height: 46px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border-radius: 19px;
-  background: var(--pch-primary);
-  color: #fff;
-  font-size: 22px;
-  font-weight: 1000;
-  box-shadow: 0 12px 24px rgba(15,23,42,.12);
+  border: 1px solid transparent;
+  border-radius: 15px;
   overflow: hidden;
+  font-size: 18px;
+  font-weight: 1000;
+  box-shadow: 0 7px 18px rgba(15, 23, 42, .10);
 }
 
-.pch-profile-avatar {
-  width: 72px;
-  height: 72px;
+.pp-avatar.large {
+  width: 76px;
+  height: 76px;
   border-radius: 24px;
   font-size: 28px;
 }
 
-.pch-avatar img,
-.pch-profile-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.pp-child-copy {
+  min-width: 0;
+  flex: 1;
 }
 
-.pch-card-main { min-width: 0; flex: 1; }
-
-.pch-card-main h3,
-.pch-profile-top h3 {
-  margin: 0;
-  color: var(--text, #0f172a);
-  font-size: 18px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.pch-profile-top h3 { font-size: 22px; }
-
-.pch-card-main p,
-.pch-profile-top p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-  line-height: 1.4;
-}
-
-.pch-chip-row,
-.pch-action-row {
+.pp-name-line {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 7px;
-  flex-wrap: wrap;
-  margin-top: 10px;
 }
 
-.pch-chip {
-  max-width: 100%;
+.pp-name-line h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text, #0f172a);
+  font-size: 14px;
+  font-weight: 1000;
+  letter-spacing: -.025em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.pp-status-dot.green { color: #22c55e; background: #22c55e; }
+.pp-status-dot.red { color: #ef4444; background: #ef4444; }
+.pp-status-dot.blue { color: #3b82f6; background: #3b82f6; }
+.pp-status-dot.orange { color: #f59e0b; background: #f59e0b; }
+.pp-status-dot.gray { color: #94a3b8; background: #94a3b8; }
+
+.pp-child-copy > p {
+  min-width: 0;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  font-weight: 740;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 5px;
+}
+
+.pp-card-meta span {
+  min-height: 21px;
   display: inline-flex;
   align-items: center;
-  min-height: 25px;
-  padding: 4px 9px;
+  padding: 3px 7px;
   border-radius: 999px;
-  font-size: 11px;
-  font-weight: 950;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: color-mix(in srgb, var(--muted, #64748b) 9%, transparent);
+  color: var(--muted, #64748b);
+  font-size: 9px;
+  font-weight: 850;
   text-transform: capitalize;
 }
 
-.pch-chip.green { background: rgba(34,197,94,.14); color: #22c55e; }
-.pch-chip.red { background: rgba(239,68,68,.14); color: #ef4444; }
-.pch-chip.blue { background: rgba(59,130,246,.15); color: #60a5fa; }
-.pch-chip.gray { background: color-mix(in srgb, var(--muted, #64748b) 14%, transparent); color: var(--muted, #64748b); }
-.pch-chip.orange { background: rgba(245,158,11,.16); color: #f59e0b; }
-.pch-chip.purple { background: rgba(147,51,234,.15); color: #a855f7; }
-
-.pch-mini-grid,
-.pch-drawer-grid {
+.pp-row-more {
+  width: 31px;
+  height: 31px;
+  flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
-  margin-top: 10px;
+  place-items: center;
+  border: 1px solid var(--border, rgba(148, 163, 184, .18));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pp-primary) 7%, var(--card, #fff));
+  color: var(--pp-primary);
+  font-size: 20px;
+  font-weight: 1000;
+  cursor: pointer;
 }
 
-.pch-mini-stat {
+.pp-card-footer {
   min-width: 0;
-  padding: 9px;
-  border-radius: 17px;
-  background: color-mix(in srgb, var(--muted, #64748b) 9%, transparent);
-  border: 1px solid var(--border, rgba(148,163,184,.13));
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border, rgba(148, 163, 184, .13));
 }
 
-.pch-mini-stat strong,
-.pch-mini-stat span {
-  display: block;
+.pp-card-footer span,
+.pp-card-footer strong {
+  min-width: 0;
   overflow: hidden;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.pch-mini-stat strong {
-  color: var(--text, #0f172a);
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.pch-mini-stat span {
-  margin-top: 2px;
+.pp-card-footer span {
   color: var(--muted, #64748b);
+  font-weight: 760;
+}
+
+.pp-card-footer strong {
+  color: var(--pp-primary);
+  font-weight: 950;
+}
+
+.pp-chip {
+  max-width: 100%;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  overflow: hidden;
   font-size: 10px;
-  font-weight: 850;
+  font-weight: 950;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
 }
 
-.pch-breakdown-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
+.pp-chip.green { background: rgba(34, 197, 94, .13); color: #16a34a; }
+.pp-chip.red { background: rgba(239, 68, 68, .13); color: #dc2626; }
+.pp-chip.blue { background: rgba(59, 130, 246, .13); color: #2563eb; }
+.pp-chip.orange { background: rgba(245, 158, 11, .14); color: #d97706; }
+.pp-chip.purple { background: rgba(147, 51, 234, .13); color: #9333ea; }
+.pp-chip.gray {
+  background: color-mix(in srgb, var(--muted, #64748b) 12%, transparent);
+  color: var(--muted, #64748b);
 }
 
-.pch-breakdown-card strong {
-  min-width: 0;
-  display: block;
+.pp-empty {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  padding: 18px;
+  border: 1px dashed var(--border, rgba(148, 163, 184, .30));
+  border-radius: 21px;
+  background: var(--card, var(--surface, #fff));
+  text-align: center;
+}
+
+.pp-empty-icon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--pp-primary) 10%, var(--card, #fff));
+  font-size: 24px;
+}
+
+.pp-empty h3,
+.pp-empty p {
+  margin: 0;
+}
+
+.pp-empty h3 {
   color: var(--text, #0f172a);
   font-size: 16px;
   font-weight: 1000;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  letter-spacing: -.03em;
 }
 
-.pch-bar-track {
-  height: 8px;
-  margin-top: 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted, #64748b) 14%, transparent);
-  overflow: hidden;
+.pp-empty p {
+  max-width: 34rem;
+  color: var(--muted, #64748b);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
-.pch-bar-track div {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--pch-primary);
+.pp-table-card,
+.pp-summary-section {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .20));
+  border-radius: 21px;
+  background: var(--card, var(--surface, #fff));
+  box-shadow: 0 10px 25px rgba(15, 23, 42, .045);
 }
 
-.pch-table-scroll {
+.pp-section-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 9px;
+  margin-bottom: 9px;
+}
+
+.pp-section-head p,
+.pp-section-head h3 {
+  margin: 0;
+}
+
+.pp-section-head p {
+  color: var(--pp-primary);
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.pp-section-head h3 {
+  margin-top: 2px;
+  color: var(--text, #0f172a);
+  font-size: 17px;
+  font-weight: 1000;
+  letter-spacing: -.035em;
+}
+
+.pp-table-scroll {
   width: 100%;
-  max-width: 100%;
   overflow-x: auto;
-  border-radius: 18px;
-  border: 1px solid var(--border, rgba(148,163,184,.18));
+  border: 1px solid var(--border, rgba(148, 163, 184, .16));
+  border-radius: 16px;
 }
 
-.pch-table-scroll table {
+.pp-table-scroll table {
   width: 100%;
-  min-width: 1050px;
+  min-width: 800px;
   border-collapse: collapse;
   background: var(--card, var(--surface, #fff));
 }
 
-.pch-table-scroll th,
-.pch-table-scroll td {
-  padding: 10px;
-  border-bottom: 1px solid var(--border, rgba(148,163,184,.16));
-  text-align: left;
-  vertical-align: top;
+.pp-table-scroll th,
+.pp-table-scroll td {
+  padding: 9px;
+  border-bottom: 1px solid var(--border, rgba(148, 163, 184, .14));
   color: var(--text, #0f172a);
-  font-size: 13px;
+  text-align: left;
+  vertical-align: middle;
+  font-size: 12px;
 }
 
-.pch-table-scroll th {
+.pp-table-scroll th {
+  background: color-mix(in srgb, var(--pp-primary) 5%, var(--card, #fff));
   color: var(--muted, #64748b);
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 1000;
-  text-transform: uppercase;
   letter-spacing: .07em;
-  background: color-mix(in srgb, var(--pch-primary) 6%, var(--card, #fff));
+  text-transform: uppercase;
 }
 
-.pch-table-scroll td strong,
-.pch-table-scroll td span {
+.pp-table-scroll td > strong,
+.pp-table-scroll td > small {
   display: block;
 }
 
-.pch-table-scroll td span {
-  margin-top: 3px;
+.pp-table-scroll td > small {
+  margin-top: 2px;
   color: var(--muted, #64748b);
-  font-size: 11px;
+  font-size: 10px;
 }
 
-.pch-empty-card {
-  display: grid;
-  place-items: center;
-  align-content: center;
+.pp-table-student {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  min-height: 190px;
-  text-align: center;
-  border-style: dashed;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.pch-empty-icon {
-  width: 56px;
-  height: 56px;
+.pp-table-student .pp-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+.pp-table-student > span {
+  min-width: 0;
+}
+
+.pp-table-student strong,
+.pp-table-student small {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-table-student strong {
+  font-weight: 950;
+}
+
+.pp-table-student small {
+  margin-top: 2px;
+  color: var(--muted, #64748b);
+  font-size: 10px;
+}
+
+.pp-table-action {
+  min-height: 31px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--pp-primary) 22%, var(--border, transparent));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pp-primary) 8%, var(--card, #fff));
+  color: var(--pp-primary);
+  font-size: 10px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.pp-summary-grid {
   display: grid;
-  place-items: center;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--pch-primary) 12%, var(--surface, #fff));
-  font-size: 28px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
 }
 
-.pch-empty-card h3 {
-  margin: 0;
+.pp-summary-list {
+  display: grid;
+  gap: 7px;
+}
+
+.pp-summary-row {
+  padding: 10px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .16));
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--muted, #64748b) 4%, var(--card, #fff));
+}
+
+.pp-summary-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pp-summary-row-top strong {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text, #0f172a);
-  font-size: 18px;
+  font-size: 12px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-summary-row-top span {
+  flex: 0 0 auto;
+  color: var(--pp-primary);
+  font-size: 12px;
   font-weight: 1000;
 }
 
-.pch-empty-card p {
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
+.pp-progress-track {
+  height: 6px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted, #64748b) 12%, transparent);
 }
 
-.pch-drawer-layer {
+.pp-progress-track div {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--pp-primary);
+}
+
+.pp-summary-row small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted, #64748b);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.pp-layer,
+.pp-drawer-layer {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: 90;
 }
 
-.pch-drawer-overlay {
+.pp-overlay,
+.pp-drawer-overlay {
   position: absolute;
   inset: 0;
   border: 0;
-  background: rgba(15,23,42,.52);
+  background: rgba(15, 23, 42, .54);
+  backdrop-filter: blur(2px);
 }
 
-.pch-drawer {
+.pp-sheet {
   position: absolute;
   right: 0;
+  bottom: 0;
+  left: 0;
+  max-height: min(86dvh, 720px);
+  overflow-y: auto;
+  padding: 9px 12px max(14px, env(safe-area-inset-bottom));
+  border-radius: 25px 25px 0 0;
+  background: var(--card, var(--surface, #fff));
+  color: var(--text, #0f172a);
+  box-shadow: 0 -22px 64px rgba(15, 23, 42, .22);
+}
+
+.pp-sheet.compact {
+  max-height: min(78dvh, 580px);
+}
+
+.pp-sheet-handle {
+  width: 42px;
+  height: 4px;
+  margin: 0 auto 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted, #64748b) 36%, transparent);
+}
+
+.pp-sheet-head,
+.pp-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pp-sheet-head {
+  padding-bottom: 10px;
+}
+
+.pp-sheet-head p,
+.pp-sheet-head h2,
+.pp-drawer-head p,
+.pp-drawer-head h2 {
+  margin: 0;
+}
+
+.pp-sheet-head p,
+.pp-drawer-head p {
+  color: var(--pp-primary);
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.pp-sheet-head h2,
+.pp-drawer-head h2 {
+  margin-top: 2px;
+  color: var(--text, #0f172a);
+  font-size: 20px;
+  font-weight: 1000;
+  letter-spacing: -.045em;
+}
+
+.pp-sheet-head > button,
+.pp-drawer-head > button {
+  width: 35px;
+  height: 35px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border, rgba(148, 163, 184, .20));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted, #64748b) 7%, var(--card, #fff));
+  color: var(--text, #0f172a);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.pp-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.pp-form-grid label {
+  display: grid;
+  gap: 5px;
+}
+
+.pp-form-grid label > span {
+  color: var(--muted, #64748b);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.pp-form-grid select {
+  width: 100%;
+  min-height: 43px;
+  padding: 0 11px;
+  border: 1px solid var(--input-border, var(--border, rgba(148, 163, 184, .24)));
+  border-radius: 13px;
+  outline: 0;
+  background: var(--input-bg, var(--surface, #fff));
+  color: var(--input-text, var(--text, #0f172a));
+  font-weight: 800;
+}
+
+.pp-form-grid select:focus {
+  border-color: var(--pp-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pp-primary) 11%, transparent);
+}
+
+.pp-sheet-actions {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 12px;
+  padding-top: 9px;
+  background: var(--card, var(--surface, #fff));
+}
+
+.pp-sheet-actions button {
+  min-height: 43px;
+  border-radius: 13px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.pp-sheet-actions .secondary {
+  border: 1px solid var(--border, rgba(148, 163, 184, .24));
+  background: var(--card, var(--surface, #fff));
+  color: var(--text, #0f172a);
+}
+
+.pp-sheet-actions .primary {
+  border: 1px solid var(--pp-primary);
+  background: var(--pp-primary);
+  color: var(--pp-primary-text);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--pp-primary) 25%, transparent);
+}
+
+.pp-menu-list {
+  display: grid;
+  gap: 7px;
+}
+
+.pp-menu-list > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 9px;
+  min-height: 61px;
+  padding: 8px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .18));
+  border-radius: 16px;
+  background: var(--card, var(--surface, #fff));
+  color: var(--text, #0f172a);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pp-menu-list > button.active {
+  border-color: color-mix(in srgb, var(--pp-primary) 45%, var(--border, transparent));
+  background: color-mix(in srgb, var(--pp-primary) 8%, var(--card, #fff));
+}
+
+.pp-menu-list > button > span {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--pp-primary) 10%, var(--card, #fff));
+  color: var(--pp-primary);
+  font-size: 18px;
+}
+
+.pp-menu-list > button div {
+  min-width: 0;
+}
+
+.pp-menu-list > button strong,
+.pp-menu-list > button small {
+  display: block;
+}
+
+.pp-menu-list > button strong {
+  color: var(--text, #0f172a);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.pp-menu-list > button small {
+  margin-top: 2px;
+  color: var(--muted, #64748b);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.pp-menu-list > button > b {
+  color: var(--muted, #64748b);
+  font-size: 17px;
+}
+
+.pp-drawer {
+  position: absolute;
   top: 0;
+  right: 0;
   bottom: 0;
   width: min(94vw, 620px);
   max-width: 100vw;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 12px;
   background: var(--card, var(--surface, #fff));
   color: var(--text, #0f172a);
-  padding: 14px;
-  box-shadow: var(--shell-shadow, -24px 0 70px rgba(15,23,42,.22));
+  box-shadow: -24px 0 70px rgba(15, 23, 42, .22);
 }
 
-.pch-drawer-head {
+.pp-drawer-head {
   position: sticky;
   top: 0;
-  z-index: 2;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 0 12px;
+  z-index: 3;
+  padding: 3px 0 10px;
   background: var(--card, var(--surface, #fff));
 }
 
-.pch-drawer-head div { min-width: 0; }
-
-.pch-drawer-head p {
-  margin: 0;
-  color: var(--pch-primary);
-  font-size: 11px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
+.pp-profile-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .18));
+  border-radius: 21px;
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--pp-primary) 10%, var(--card, #fff)),
+      var(--card, #fff) 70%
+    );
 }
 
-.pch-drawer-head h2,
-.pch-drawer-head span {
+.pp-profile-card > div:last-child {
+  min-width: 0;
+}
+
+.pp-profile-card h3,
+.pp-profile-card p {
+  margin: 0;
+}
+
+.pp-profile-card h3 {
+  overflow: hidden;
+  color: var(--text, #0f172a);
+  font-size: 20px;
+  font-weight: 1000;
+  letter-spacing: -.045em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-profile-card p {
+  margin-top: 3px;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.pp-chip-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.pp-detail-section {
+  margin-top: 14px;
+}
+
+.pp-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.pp-detail-grid article {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .15));
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--muted, #64748b) 5%, var(--card, #fff));
+}
+
+.pp-detail-grid span,
+.pp-detail-grid strong {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.pch-drawer-head h2 {
-  margin: 2px 0 0;
-  color: var(--text, #0f172a);
-  font-size: 22px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.pch-drawer-head span {
-  margin-top: 3px;
+.pp-detail-grid span {
   color: var(--muted, #64748b);
+  font-size: 9px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.pp-detail-grid strong {
+  margin-top: 4px;
+  color: var(--text, #0f172a);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 950;
 }
 
-.pch-drawer-head button {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  border: 1px solid var(--border, rgba(148,163,184,.24));
-  border-radius: 15px;
-  background: var(--surface, #fff);
-  color: var(--text, #0f172a);
-  font-weight: 1000;
-  cursor: pointer;
+.pp-detail-list {
+  overflow: hidden;
+  border: 1px solid var(--border, rgba(148, 163, 184, .16));
+  border-radius: 17px;
 }
 
-.pch-drawer-section { margin-top: 16px; }
-
-.pch-drawer-section h3 {
-  margin: 0 0 10px;
-  color: var(--text, #0f172a);
-  font-size: 16px;
-  font-weight: 1000;
-}
-
-.pch-line-list {
+.pp-detail-list > div {
+  min-width: 0;
   display: grid;
-  gap: 7px;
-}
-
-.pch-line-list div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  grid-template-columns: minmax(110px, .65fr) minmax(0, 1fr);
+  gap: 10px;
   padding: 10px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--muted, #64748b) 9%, transparent);
-  border: 1px solid var(--border, rgba(148,163,184,.14));
+  border-bottom: 1px solid var(--border, rgba(148, 163, 184, .13));
 }
 
-.pch-line-list span {
+.pp-detail-list > div:last-child {
+  border-bottom: 0;
+}
+
+.pp-detail-list span {
   color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
+  font-size: 10px;
+  font-weight: 800;
 }
 
-.pch-line-list strong {
+.pp-detail-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--text, #0f172a);
-  font-size: 13px;
-  font-weight: 1000;
+  font-size: 11px;
+  font-weight: 950;
   text-align: right;
 }
 
-@media (min-width: 680px) {
-  .pch-page { padding: 12px; }
-  .pch-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .pch-filter-card { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .pch-context-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pp-readonly-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--pp-primary) 18%, var(--border, transparent));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--pp-primary) 7%, var(--card, #fff));
 }
 
-@media (min-width: 1040px) {
-  .pch-page { padding: 16px; }
-  .pch-summary-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .pch-list,
-  .pch-breakdown-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pp-readonly-note > span {
+  flex: 0 0 auto;
+  font-size: 18px;
 }
 
-@media (max-width: 520px) {
-  .pch-page { padding: 6px; }
-  .pch-hero { flex-direction: column; border-radius: 22px; padding: 10px; }
-  .pch-hero-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
-  .pch-ghost-btn { width: 100%; }
-  .pch-summary-grid { gap: 6px; }
-  .pch-summary-card { padding: 10px; border-radius: 19px; }
-  .pch-summary-card strong { font-size: 16px; }
-  .pch-toolbar { align-items: stretch; flex-direction: column; border-radius: 20px; }
-  .pch-view-tabs { width: 100%; }
-  .pch-card,
-  .pch-empty-card,
-  .pch-breakdown-card { border-radius: 20px; padding: 11px; }
-  .pch-avatar { width: 52px; height: 52px; flex-basis: 52px; }
-  .pch-mini-grid,
-  .pch-drawer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .pch-action-row { display: grid; grid-template-columns: minmax(0, 1fr); }
-  .pch-action-row button { width: 100%; }
-  .pch-drawer { width: min(96vw, 620px); padding: 12px; }
+.pp-readonly-note strong,
+.pp-readonly-note p {
+  display: block;
+  margin: 0;
+}
+
+.pp-readonly-note strong {
+  color: var(--text, #0f172a);
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.pp-readonly-note p {
+  margin-top: 3px;
+  color: var(--muted, #64748b);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.pp-toast {
+  position: fixed;
+  z-index: 120;
+  right: 12px;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  width: min(360px, calc(100vw - 24px));
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--border, rgba(148, 163, 184, .20));
+  border-radius: 15px;
+  background: var(--card, var(--surface, #fff));
+  box-shadow: 0 18px 48px rgba(15, 23, 42, .18);
+}
+
+.pp-toast > span {
+  width: 29px;
+  height: 29px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  font-weight: 1000;
+}
+
+.pp-toast.success > span {
+  background: rgba(34, 197, 94, .14);
+  color: #16a34a;
+}
+
+.pp-toast.error > span {
+  background: rgba(239, 68, 68, .14);
+  color: #dc2626;
+}
+
+.pp-toast.info > span {
+  background: rgba(59, 130, 246, .14);
+  color: #2563eb;
+}
+
+.pp-toast p {
+  margin: 0;
+  color: var(--text, #0f172a);
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1.4;
+}
+
+@media (min-width: 620px) {
+  .pp-page {
+    padding: 10px;
+  }
+
+  .pp-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pp-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pp-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .pp-summary-section {
+    margin-top: 10px;
+  }
+}
+
+@media (min-width: 980px) {
+  .pp-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .pp-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .pp-sheet {
+    right: 12px;
+    bottom: 12px;
+    left: auto;
+    width: min(520px, calc(100vw - 24px));
+    max-height: min(86dvh, 720px);
+    border-radius: 24px;
+  }
+}
+
+@media (max-width: 420px) {
+  .pp-page {
+    padding: 6px;
+  }
+
+  .pp-action-strip {
+    grid-template-columns: minmax(0, 1fr) 41px 41px;
+    gap: 5px;
+    padding: 5px;
+    border-radius: 17px;
+  }
+
+  .pp-filter-button,
+  .pp-more-button {
+    width: 41px;
+    height: 41px;
+    border-radius: 13px;
+  }
+
+  .pp-search-box {
+    min-height: 41px;
+    padding: 0 8px;
+    border-radius: 13px;
+  }
+
+  .pp-child-card {
+    padding: 8px;
+    border-radius: 17px;
+  }
+
+  .pp-avatar {
+    width: 43px;
+    height: 43px;
+    border-radius: 14px;
+  }
+
+  .pp-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pp-page *,
+  .pp-page *::before,
+  .pp-page *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
 }
 `;

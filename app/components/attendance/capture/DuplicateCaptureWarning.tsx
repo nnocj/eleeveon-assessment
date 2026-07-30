@@ -1,0 +1,5 @@
+"use client";
+import type { AttendanceCaptureEvent } from "../../../lib/attendance";
+export interface DuplicateCaptureWarningProps { duplicate: AttendanceCaptureEvent; onKeep?:()=>void; onReplace?:()=>void; onDismiss?:()=>void; }
+export function DuplicateCaptureWarning({duplicate,onKeep,onReplace,onDismiss}:DuplicateCaptureWarningProps){return <aside role="alert" style={{display:"grid",gap:8,padding:10,borderRadius:11,border:"1px solid var(--warning-border,rgba(217,119,6,.25))",background:"var(--warning-soft,rgba(217,119,6,.10))"}}><strong style={{fontSize:12}}>Possible duplicate capture</strong><span style={{fontSize:11,color:"var(--muted-foreground,#64748b)"}}>This person already has a capture at {new Date(duplicate.capturedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}.</span><div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{onKeep&&<button onClick={onKeep}>Keep both</button>}{onReplace&&<button onClick={onReplace}>Replace earlier</button>}{onDismiss&&<button onClick={onDismiss}>Dismiss</button>}</div></aside>}
+export default DuplicateCaptureWarning;

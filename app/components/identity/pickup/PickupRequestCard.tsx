@@ -1,0 +1,8 @@
+"use client";
+import type { PickupRequestView } from "../advanced-shared";
+import { AdvancedIdentityStyles, Avatar, StatusPill, formatIdentityDate } from "../advanced-shared";
+export function PickupRequestCard({request,primaryColor,onOpen,onApprove,onDeny,onRelease}:{request:PickupRequestView;primaryColor?:string;onOpen?:(v:PickupRequestView)=>void;onApprove?:(v:PickupRequestView)=>void;onDeny?:(v:PickupRequestView)=>void;onRelease?:(v:PickupRequestView)=>void}) {
+ const pending=["pending","requested"].includes(String(request.status));
+ return <article className="ai-card"><AdvancedIdentityStyles primaryColor={primaryColor}/><div style={{display:"flex",gap:10}}><Avatar name={request.studentName} photoUrl={request.studentPhotoUrl}/><span style={{display:"grid",flex:1}}><strong style={{fontSize:13}}>{request.studentName}</strong><small style={{fontSize:9,opacity:.6}}>Collector: {request.collectorName||"Unknown"}{request.collectorRelationship?` · ${request.collectorRelationship}`:""}</small><small style={{fontSize:9,opacity:.6}}>{formatIdentityDate(request.requestedAt)}</small></span><StatusPill status={request.status}/></div>{request.denialReason?<p style={{fontSize:10,color:"#b62f25"}}>{request.denialReason}</p>:null}<div className="ai-actions" style={{marginTop:10}}>{onOpen?<button onClick={()=>onOpen(request)}>Details</button>:null}{pending&&onApprove?<button className="primary" onClick={()=>onApprove(request)}>Approve</button>:null}{pending&&onDeny?<button className="danger" onClick={()=>onDeny(request)}>Deny</button>:null}{String(request.status)==="approved"&&onRelease?<button className="primary" onClick={()=>onRelease(request)}>Release student</button>:null}</div></article>
+}
+export default PickupRequestCard;

@@ -165,10 +165,10 @@ export default function CalendarOverview() {
 
       for (const branch of ownedBranches) {
         try {
-          const branchEvents = await listCalendarEvents({ accountId, schoolId: Number(branch.schoolId), branchId: Number(branch.id) });
+          const branchEvents = await listCalendarEvents({ accountId, schoolId: String(branch.schoolId), branchId: String(branch.id) });
           allEvents.push(...(branchEvents as AnyRow[]));
 
-          const branchConflicts = await listOpenScheduleConflicts({ accountId, schoolId: Number(branch.schoolId), branchId: Number(branch.id) });
+          const branchConflicts = await listOpenScheduleConflicts({ accountId, schoolId: String(branch.schoolId), branchId: String(branch.id) });
           allConflicts.push(...(branchConflicts as AnyRow[]));
         } catch (error) {
           console.warn("Failed to load owner branch overview", branch, error);
@@ -189,8 +189,8 @@ export default function CalendarOverview() {
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
     return events.filter((event) => {
-      if (schoolId !== "all" && Number(event.schoolId) !== Number(schoolId)) return false;
-      if (branchId !== "all" && Number(event.branchId) !== Number(branchId)) return false;
+      if (schoolId !== "all" && String(event.schoolId) !== schoolId) return false;
+      if (branchId !== "all" && String(event.branchId) !== branchId) return false;
       if (eventType !== "all" && String(event.eventType) !== eventType) return false;
       if (!q) return true;
       return `${event.title} ${event.description} ${event.location} ${event.eventType}`.toLowerCase().includes(q);

@@ -1,4 +1,4 @@
-"use client";
+//"use client";
 
 /**
  * app/teacher/modules/ReportRemarks.tsx
@@ -26,7 +26,7 @@
  * - Bottom sheet filters and More menu.
  * - Compact student rows with inline remark editor.
  */
-
+/*
 import React, { useEffect, useMemo, useState } from "react";
 
 import { useAccount } from "../../context/account-context";
@@ -1514,3 +1514,4 @@ const css = `
 }
 `;
 
+*/

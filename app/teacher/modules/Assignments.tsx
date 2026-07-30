@@ -1,4 +1,4 @@
-"use client";
+/*"use client";
 
 import { DexieCrudPage, type CrudField } from "../../components/role-portals/CrudToolkit";
 
@@ -26,3 +26,4 @@ export default function Assignments() {
     />
   );
 }
+*/

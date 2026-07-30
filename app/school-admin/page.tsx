@@ -38,12 +38,12 @@ import { useActiveBranch } from "../context/active-branch-context";
 
 import Schooladmindashboard from "./modules/Schooladmindashboard";
 import Branches from "./modules/Branches";
-import Schoolusers from "./modules/Schoolusers";
+//import Schoolusers from "./modules/Schoolusers";
 import SchoolFinanceOverview from "./modules/SchoolFinanceOverview";
 import SchoolBranchFunding from "./modules/SchoolBranchFunding";
 import SchoolBranchFinanceMonitor from "./modules/SchoolBranchFinanceMonitor";
 import SchoolFinanceApprovals from "./modules/SchoolFinanceApprovals";
-import SchoolPaymentsOverview from "./modules/SchoolPaymentsOverview";
+//import SchoolPaymentsOverview from "./modules/SchoolPaymentsOverview";
 import Announcements from "./modules/Announcements";
 import Messages from "./modules/Messages";
 import SchoolCalendar from "./modules/SchoolCalendar";
@@ -338,10 +338,10 @@ export const NAV_SECTIONS: RoleNavSection[] = [
 const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   schoolAdminDashboard: SchoolAdminDashboardRoute,
   branches: Branches,
-  schoolUsers: Schoolusers,
+  //schoolUsers: Schoolusers,
 
   schoolFinanceOverview: SchoolFinanceOverview,
-  schoolPaymentsOverview: SchoolPaymentsOverview,
+  //schoolPaymentsOverview: SchoolPaymentsOverview,
   schoolBranchFunding: SchoolBranchFunding,
   schoolBranchFinanceMonitor: SchoolBranchFinanceMonitor,
   schoolFinanceApprovals: SchoolFinanceApprovals,

@@ -52,6 +52,7 @@ import type {
   StudentParent,
   ClassTeacher,
   StudentEnrollment,
+  StudentAttendanceSummary,
   Subject,
   Teacher,
 } from "../../../../lib/db/db";
@@ -204,6 +205,7 @@ export interface ReportEngineDataset {
   gradeRules: GradeRule[];
 
   attendance: Attendance[];
+  studentAttendanceSummaries: StudentAttendanceSummary[];
 
   computedResults: import("../../../../lib/db/db").ComputedResult[];
   reportCards: ReportCard[];
