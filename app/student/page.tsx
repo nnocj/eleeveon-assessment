@@ -21,7 +21,7 @@ import RolePortalShell from "../components/role-portals/RolePortalShell";
 import { STUDENT_ROLES } from "../lib/auth/roleRedirect";
 
 import Studentdashboard from "./modules/Studentdashboard";
-import MyAttendance from "./modules/MyAttendance";
+//import MyAttendance from "./modules/MyAttendance";
 import Myresults from "./modules/Myresults";
 import MyReport from "./modules/MyReport";
 import MyCumulativeRecords from "./modules/MyCumulativeRecords";
@@ -77,7 +77,7 @@ function StudentDashboardRoute({ navigate }: RouteProps) {
 
 const ROUTES = {
   studentDashboard: StudentDashboardRoute,
-  myAttendance: MyAttendance,
+  //myAttendance: MyAttendance,
   myResults: Myresults,
   myCumulativeRecords: MyCumulativeRecords,
   myReport: MyReport,
