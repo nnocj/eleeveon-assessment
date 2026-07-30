@@ -1,6 +1,13 @@
 {
   "files.associations": {
+    "app/globals.css": "tailwindcss",
     "*.css": "tailwindcss"
   },
-  "css.lint.unknownAtRules": "ignore"
+  "tailwindCSS.experimental.configFile": "./app/globals.css",
+  "css.validate": false,
+  "css.lint.unknownAtRules": "ignore",
+  "scss.validate": false,
+  "scss.lint.unknownAtRules": "ignore",
+  "less.validate": false,
+  "less.lint.unknownAtRules": "ignore"
 }
