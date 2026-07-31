@@ -1,5 +1,5 @@
 import { db } from "@/app/lib/db"; // adjust path
-import { createLocal } from "@/app/lib/db/localCrud"; // adjust path
+import { createLocal } from "../sync/syncUtils"; // adjust path
 import type { SeedEntityName, SeedStore } from "./types";
 
 export const eleeveonSeedStore:SeedStore={
