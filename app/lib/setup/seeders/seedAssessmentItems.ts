@@ -1,0 +1,1 @@
+import type { SeedContext, SeedDefinition } from "../types";import { mustId,upsertSeed } from "../seedUtils";export async function seedAssessmentItems(ctx:SeedContext,defs:SeedDefinition[]){for(const d of defs)await upsertSeed(ctx,"assessmentStructureItems",d,{...d,key:undefined,assessmentStructureId:mustId(ctx,"assessmentStructures",d.assessmentStructureKey)});}

@@ -1,0 +1,4 @@
+import { buildWebsiteRenderModel } from "../core/websiteEngine";
+import type { ResolveWebsiteDataArgs, WebsiteSettingsDraft } from "../types";
+function publicSafe(value:any):any{ if(Array.isArray(value))return value.map(publicSafe); if(value&&typeof value==='object'){ const out:any={}; for(const [k,v] of Object.entries(value)){ if(k==='raw'||k==='localObjectUrl'||k==='previewDataUrl'||k==='thumbnailDataUrl'||k==='blob')continue; out[k]=publicSafe(v); } return out; } return value; }
+export async function buildPublicWebsiteSnapshot(args:ResolveWebsiteDataArgs & {draft:WebsiteSettingsDraft}){ const model=await buildWebsiteRenderModel(args); return publicSafe({schemaVersion:1,templateKey:model.template.key,templateVersion:model.template.version,draft:model.draft,data:model.data,publishedAt:Date.now()}); }

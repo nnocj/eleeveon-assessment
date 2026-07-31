@@ -46,6 +46,7 @@ import { useSettings } from "../context/settings-context";
 import { useActiveMembership } from "../context/active-membership-context";
 import { db, type School, type Branch, type Student, type Teacher, type Parent } from "../lib/db/db";
 import { createLocal, updateLocal, softDeleteLocal, listActiveLocal } from "../lib/sync/syncUtils";
+import { seedBranchFoundation, type SeedStore, type SetupTemplateCode } from "../lib/setup";
 import {
   MediaOwners,
   MediaFieldKeys,
@@ -74,6 +75,8 @@ type ToastTone = "success" | "error" | "info";
 type BranchFilter = "all" | "active" | "inactive" | "no_contact" | "no_school";
 type CameraField = "logo" | "photo" | "bannerImage";
 type PeopleLayer = "students" | "teachers" | "parents";
+
+type BranchSetupMode = "none" | SetupTemplateCode;
 
 type BranchCreateDefaults = {
   latitude?: number;
@@ -119,6 +122,12 @@ type FormState = {
   bannerImage: string;
   bannerImageMediaId?: string;
   active: boolean;
+
+  // Foundational academic setup is only applied during branch creation.
+  setupMode: BranchSetupMode;
+  academicYearName: string;
+  academicYearStart: string;
+  academicYearEnd: string;
 };
 
 type BranchView = {
@@ -143,6 +152,32 @@ type OpenWorkspaceSession = {
 };
 
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
+
+const BRANCH_SETUP_OPTIONS: Array<{
+  value: BranchSetupMode;
+  label: string;
+  note: string;
+}> = [
+  { value: "none", label: "No automatic setup", note: "Create only the branch record." },
+  { value: "ghana-early-childhood-v1", label: "Early Childhood", note: "Nursery and kindergarten foundation." },
+  { value: "ghana-primary-v1", label: "Primary School", note: "Primary classes, subjects, curriculum and assessment foundation." },
+  { value: "ghana-jhs-v1", label: "Junior High School", note: "JHS classes, subjects, curriculum and assessment foundation." },
+  { value: "ghana-basic-school-v1", label: "Basic School", note: "Primary and JHS foundational setup." },
+  { value: "ghana-shs-v1", label: "Senior High School", note: "SHS core foundational setup." },
+  { value: "ghana-full-school-v1", label: "Full School", note: "Early childhood, primary, JHS and SHS foundation." },
+];
+
+function defaultAcademicYear() {
+  const now = new Date();
+  const startYear = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  return {
+    name: `${startYear}/${startYear + 1}`,
+    start: `${startYear}-09-01`,
+    end: `${startYear + 1}-08-31`,
+  };
+}
+
+const initialAcademicYear = defaultAcademicYear();
 
 function safeStorageRead(key: string) {
   if (typeof window === "undefined") return null;
@@ -195,6 +230,10 @@ const emptyForm: FormState = {
   bannerImage: "",
   bannerImageMediaId: undefined,
   active: true,
+  setupMode: "ghana-basic-school-v1",
+  academicYearName: initialAcademicYear.name,
+  academicYearStart: initialAcademicYear.start,
+  academicYearEnd: initialAcademicYear.end,
 };
 
 const idOf = (v: any) => {
@@ -205,6 +244,19 @@ const idOf = (v: any) => {
 const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
 const safeLower = (v: any) => String(v || "").toLowerCase().trim();
 const tableSafe = (name: string) => (db as any)[name];
+
+const branchSetupStore: SeedStore = {
+  async create(table, value) {
+    return (await createLocal(table as any, value as any)) as any;
+  },
+  async findOne(table, query) {
+    const rows = (await tableSafe(table)?.toArray?.()) || [];
+    return rows.find((row: any) =>
+      !row?.isDeleted &&
+      Object.entries(query).every(([key, value]) => row?.[key] === value),
+    ) as any;
+  },
+};
 
 const cleanText = (v: any) => String(v || "").trim();
 const branchName = (row?: Partial<Branch>) => cleanText((row as any)?.name) || "Unnamed branch";
@@ -891,6 +943,10 @@ export default function OwnerBranchesPage() {
       bannerImage: mediaPreviewUrls[mediaKey(id, "bannerImage")] || safeRecordMediaValue(s.bannerImage) || "",
       bannerImageMediaId: s.bannerImageMediaId ? String(s.bannerImageMediaId) : undefined,
       active: s.active !== false,
+      setupMode: "none",
+      academicYearName: initialAcademicYear.name,
+      academicYearStart: initialAcademicYear.start,
+      academicYearEnd: initialAcademicYear.end,
     });
     setModalOpen(true);
   };
@@ -902,6 +958,14 @@ export default function OwnerBranchesPage() {
     if (!form.schoolId) return "Select the school this branch belongs to.";
     if (!schools.some((school: any) => sameId(school.id, form.schoolId))) return "Selected school does not belong to this owner account.";
     if (!form.name.trim()) return "Enter branch name.";
+
+    if (!form.id && form.setupMode !== "none") {
+      if (!form.academicYearName.trim()) return "Enter the academic year name for automatic setup.";
+      if (!form.academicYearStart) return "Select the academic year start date.";
+      if (!form.academicYearEnd) return "Select the academic year end date.";
+      if (new Date(form.academicYearEnd).getTime() <= new Date(form.academicYearStart).getTime())
+        return "Academic year end date must be after its start date.";
+    }
 
     const hasLatitude = form.latitude.trim() !== "";
     const hasLongitude = form.longitude.trim() !== "";
@@ -1035,10 +1099,37 @@ export default function OwnerBranchesPage() {
           )
       );
 
+      let setupMessage = "";
+      if (!form.id && form.setupMode !== "none") {
+        const setupResult = await seedBranchFoundation({
+          store: branchSetupStore,
+          accountId: selectedAccountId,
+          schoolId: form.schoolId,
+          branchId: savedBranchId,
+          templateCode: form.setupMode,
+          academicYearName: form.academicYearName.trim(),
+          academicYearStart: form.academicYearStart,
+          academicYearEnd: form.academicYearEnd,
+        });
+
+        const createdCount = Object.values(setupResult.counts).reduce(
+          (total, count) => total + count.created,
+          0,
+        );
+        const reusedCount = Object.values(setupResult.counts).reduce(
+          (total, count) => total + count.reused,
+          0,
+        );
+        setupMessage = ` Academic foundation ready: ${createdCount} created${reusedCount ? `, ${reusedCount} reused` : ""}.`;
+      }
+
       mediaSessionKeyRef.current = createBranchMediaSessionKey();
       setModalOpen(false);
       await load();
-      showToast("success", form.id ? "Branch changes saved." : "Branch created and saved locally.");
+      showToast(
+        "success",
+        form.id ? "Branch changes saved." : `Branch created and saved locally.${setupMessage}`,
+      );
     } catch (error: any) {
       console.error("Failed to save branch:", error);
       showToast("error", error?.message || "Failed to save branch.");
@@ -1613,6 +1704,66 @@ function BranchModal({
           </div>
         </section>
 
+        {!form.id && (
+          <section className="ba-form-section">
+            <h3>Foundational Setup</h3>
+            <p className="ba-section-note">
+              Choose the kind of school operated by this branch. Eleeveon will create the foundational academic records after the branch receives its permanent ID.
+            </p>
+            <div className="ba-form">
+              <label className="wide">
+                <span>School Setup Template</span>
+                <select
+                  value={form.setupMode}
+                  onChange={(e) => updateForm({ setupMode: e.target.value as BranchSetupMode })}
+                >
+                  {BRANCH_SETUP_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small className="ba-media-hint">
+                  {BRANCH_SETUP_OPTIONS.find((option) => option.value === form.setupMode)?.note}
+                </small>
+              </label>
+
+              {form.setupMode !== "none" && (
+                <>
+                  <label>
+                    <span>Academic Year</span>
+                    <input
+                      value={form.academicYearName}
+                      onChange={(e) => updateForm({ academicYearName: e.target.value })}
+                      placeholder="2026/2027"
+                    />
+                  </label>
+                  <label>
+                    <span>Year Starts</span>
+                    <input
+                      type="date"
+                      value={form.academicYearStart}
+                      onChange={(e) => updateForm({ academicYearStart: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Year Ends</span>
+                    <input
+                      type="date"
+                      value={form.academicYearEnd}
+                      onChange={(e) => updateForm({ academicYearEnd: e.target.value })}
+                    />
+                  </label>
+                  <div className="wide ba-setup-preview">
+                    <strong>Records created automatically</strong>
+                    <span>Organizations · Academic structures · Academic periods · Curriculum · Pathways · Subjects · Curriculum subjects · Classes · Class subjects · Prerequisites · Assessment structures and items · Grading systems and rules · Assessment applicability</span>
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+        )}
+
         <section className="ba-form-section">
           <h3>Branch Location</h3>
           <div className="ba-form">
@@ -1654,7 +1805,7 @@ function BranchModal({
 
         <div className="ba-modal-actions">
           <button type="button" onClick={() => setModalOpen(false)}>Cancel</button>
-          <button type="submit" disabled={saving}>{saving ? "Saving..." : form.id ? "Save Changes" : "Add Branch"}</button>
+          <button type="submit" disabled={saving}>{saving ? (form.id ? "Saving..." : form.setupMode === "none" ? "Creating..." : "Creating & Setting Up...") : form.id ? "Save Changes" : form.setupMode === "none" ? "Add Branch" : "Create & Set Up Branch"}</button>
         </div>
       </form>
     </div>
@@ -1866,6 +2017,10 @@ const css = `
 .ba-media-hint { color: var(--muted,#64748b); font-size: 11px; font-weight: 750; line-height: 1.4; }
 .ba-form .wide { grid-column: 1 / -1; }
 .ba-form-section { padding: 12px 0; border-top: 1px solid var(--border,rgba(0,0,0,.08)); } .ba-form-section:first-of-type { border-top: 0; padding-top: 0; }
+.ba-section-note { margin: -4px 0 12px; color: var(--ba-muted); font-size: .82rem; line-height: 1.45; }
+.ba-setup-preview { padding: 12px; border: 1px dashed color-mix(in srgb, var(--ba-primary) 38%, var(--ba-border)); border-radius: 14px; background: color-mix(in srgb, var(--ba-primary) 6%, var(--ba-card)); display: grid; gap: 5px; }
+.ba-setup-preview strong { font-size: .82rem; color: var(--ba-text); }
+.ba-setup-preview span { color: var(--ba-muted); font-size: .76rem; line-height: 1.45; }
 .ba-form-section h3 { margin: 0 0 10px; color: var(--text,#111827); font-size: 14px; font-weight: 1000; letter-spacing: -.03em; }
 .ba-page textarea { min-height: 92px; padding: 12px; resize: vertical; line-height: 1.55; }
 .ba-media-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }

@@ -1,0 +1,1 @@
+import type { SeedContext, SeedDefinition } from "../types";import { mustId,upsertSeed } from "../seedUtils";export async function seedCurriculumPathways(ctx:SeedContext,defs:SeedDefinition[]){for(const d of defs)await upsertSeed(ctx,"curriculumPathways",d,{...d,key:undefined,curriculumId:mustId(ctx,"curriculums",d.curriculumKey)});}

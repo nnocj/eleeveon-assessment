@@ -1,0 +1,1 @@
+import type { SeedContext, SeedDefinition } from "../types";import { mustId,upsertSeed } from "../seedUtils";export async function seedGradeRules(ctx:SeedContext,defs:SeedDefinition[]){for(const d of defs)await upsertSeed(ctx,"gradeRules",d,{...d,key:undefined,gradingSystemId:mustId(ctx,"gradingSystems",d.gradingSystemKey)});}
