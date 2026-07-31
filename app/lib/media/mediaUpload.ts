@@ -48,7 +48,28 @@ import {
 
 /**
  * Media asset IDs are permanent UUID strings.
+ *
+ * Portal Highlight media uses the same generic mediaAssets/mediaBlobs pipeline
+ * as every other owner. These exported constants keep ownerTable and fieldKey
+ * values consistent across the highlight editor, carousel and upload queue.
  */
+export const PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE = "portalHighlights" as const;
+
+export const PORTAL_HIGHLIGHT_MEDIA_FIELDS = {
+  media: "media",
+  poster: "posterMedia",
+  thumbnail: "thumbnailMedia",
+} as const;
+
+export type PortalHighlightMediaField =
+  (typeof PORTAL_HIGHLIGHT_MEDIA_FIELDS)[keyof typeof PORTAL_HIGHLIGHT_MEDIA_FIELDS];
+
+export type PortalHighlightMediaUploadInput = {
+  mediaAssetId?: string | null;
+  posterMediaAssetId?: string | null;
+  thumbnailMediaAssetId?: string | null;
+};
+
 const queued =
   new Set<string>();
 
@@ -977,4 +998,139 @@ export async function retryFailedMediaUploads(
     queued:
       queuedCount,
   };
+}
+
+/**
+ * Queue one or more media assets that belong to a Portal Highlight.
+ *
+ * The function intentionally accepts only media asset IDs. Ownership metadata
+ * is written when the media asset is created, while this module remains focused
+ * on remote upload scheduling.
+ */
+export function schedulePortalHighlightMediaUploads(
+  input: PortalHighlightMediaUploadInput,
+  delayMs = 1200,
+) {
+  const ids = [
+    input.mediaAssetId,
+    input.posterMediaAssetId,
+    input.thumbnailMediaAssetId,
+  ]
+    .map((value) => optionalString(value))
+    .filter((value): value is string => Boolean(value));
+
+  const uniqueIds = Array.from(new Set(ids));
+
+  uniqueIds.forEach((assetId, index) => {
+    scheduleMediaUpload(assetId, Math.max(250, delayMs + index * 75));
+  });
+
+  return {
+    queued: uniqueIds.length,
+    assetIds: uniqueIds,
+  };
+}
+
+/**
+ * Upload Portal Highlight media immediately and return one combined result.
+ * This is useful for explicit "Upload now" actions while normal saves should
+ * generally use schedulePortalHighlightMediaUploads(...).
+ */
+export async function uploadPortalHighlightMediaNow(
+  input: PortalHighlightMediaUploadInput,
+): Promise<MediaUploadBatchResult> {
+  const ids = [
+    input.mediaAssetId,
+    input.posterMediaAssetId,
+    input.thumbnailMediaAssetId,
+  ]
+    .map((value) => optionalString(value))
+    .filter((value): value is string => Boolean(value));
+
+  const uniqueIds = Array.from(new Set(ids));
+
+  let uploaded = 0;
+  let failed = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  for (const assetId of uniqueIds) {
+    try {
+      const result = await uploadMediaAsset(assetId);
+
+      if ("uploaded" in result && result.uploaded) {
+        uploaded += 1;
+      } else {
+        skipped += 1;
+      }
+    } catch (error: any) {
+      failed += 1;
+      errors.push(error?.message || String(error));
+    }
+  }
+
+  return {
+    uploaded,
+    failed,
+    skipped,
+    errors,
+  };
+}
+
+
+export type WebsiteMediaUploadInput = {
+  assetIds: Array<string | null | undefined>;
+};
+
+/** Queue website media through the same generic uploader used by all modules. */
+export function scheduleWebsiteMediaUploads(
+  input: WebsiteMediaUploadInput,
+  delayMs = 1200,
+) {
+  const ids = input.assetIds
+    .map((value) => optionalString(value))
+    .filter((value): value is string => Boolean(value));
+
+  const uniqueIds = Array.from(new Set(ids));
+
+  uniqueIds.forEach((assetId, index) => {
+    scheduleMediaUpload(assetId, Math.max(250, delayMs + index * 75));
+  });
+
+  return {
+    queued: uniqueIds.length,
+    assetIds: uniqueIds,
+  };
+}
+
+/** Upload website media immediately for explicit publish/upload actions. */
+export async function uploadWebsiteMediaNow(
+  input: WebsiteMediaUploadInput,
+): Promise<MediaUploadBatchResult> {
+  const ids = input.assetIds
+    .map((value) => optionalString(value))
+    .filter((value): value is string => Boolean(value));
+
+  const uniqueIds = Array.from(new Set(ids));
+  let uploaded = 0;
+  let failed = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  for (const assetId of uniqueIds) {
+    try {
+      const result = await uploadMediaAsset(assetId);
+
+      if ("uploaded" in result && result.uploaded) {
+        uploaded += 1;
+      } else {
+        skipped += 1;
+      }
+    } catch (error: any) {
+      failed += 1;
+      errors.push(error?.message || String(error));
+    }
+  }
+
+  return { uploaded, failed, skipped, errors };
 }

@@ -136,6 +136,7 @@ import CumulativeReportBook from "./reports/components/CumulativeReportBook";
 import CumulativeTranscriptCard from "./reports/components/CumulativeTranscriptCard";
 import BroadsheetCard from "./reports/components/BroadsheetCard";
 import CredentialDesignSettings from "./identity/CredentialDesignSettings";
+import WebsiteSettingsSheet from "./website/settings/WebsiteSettingsSheet";
 
 import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
@@ -229,6 +230,7 @@ type SettingsSection =
   | "reportMedia"
   | "reportTemplates"
   | "identityCredentials"
+  | "website"
   | "gallery";
 
 type ImageField =
@@ -4472,6 +4474,14 @@ export default function Branchsettings() {
         tone: reportTemplateForm.active ? "green" : "gray",
       },
       {
+        key: "website" as SettingsSection,
+        icon: "🌐",
+        title: "School Website",
+        subtitle: "Template, domain and publishing",
+        detail: "Public website identity, SEO, analytics and status",
+        tone: "blue",
+      },
+      {
         key: "identityCredentials" as SettingsSection,
         icon: "▣",
         title: "Identity Credential Design",
@@ -4868,6 +4878,29 @@ export default function Branchsettings() {
         />
       )}
 
+      {sectionOpen === "website" && (
+        <WebsiteSettingsSheet
+          accountId={selectedAccountId}
+          schoolId={selectedSchoolId}
+          branchId={selectedBranchId}
+          schoolName={
+            schoolForm.name ||
+            school?.name ||
+            activeSchool?.name ||
+            "School Website"
+          }
+          branchName={
+            branchForm.name ||
+            branch?.name ||
+            activeBranch?.name ||
+            "Main Campus"
+          }
+          primaryColor={String(primary)}
+          onSaved={load}
+          onClose={() => setSectionOpen(null)}
+        />
+      )}
+
       {sectionOpen === "identityCredentials" && (
         <CredentialDesignSettings
           accountId={selectedAccountId}
@@ -5240,6 +5273,12 @@ function MoreSheet({
       icon: "🧾",
       label: "Report Card Template",
       note: "Template, visibility, labels and report fields",
+    },
+    {
+      key: "website",
+      icon: "🌐",
+      label: "School Website",
+      note: "Template, domain, SEO and publishing",
     },
     {
       key: "identityCredentials",

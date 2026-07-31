@@ -53,12 +53,15 @@ import {
   findExactOwnerFieldMediaAsset,
   mediaIdentityMatches,
   resolveMediaAssetUrl,
+  PORTAL_HIGHLIGHT_MEDIA_FIELDS,
+  PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE,
+  type PortalHighlightMediaField,
 } from "./mediaAssetResolver";
 import { scheduleMediaUpload } from "./mediaUpload";
 
 export type MediaKind = "image" | "document" | "video" | "audio" | "other";
 export type MediaUploadStatus = "local" | "queued" | "uploading" | "uploaded" | "failed";
-export type MediaVariant = "avatar" | "cover" | "logo" | "signature" | "gallery" | "receipt" | "attachment";
+export type MediaVariant = "avatar" | "cover" | "hero" | "poster" | "thumbnail" | "logo" | "signature" | "gallery" | "receipt" | "attachment";
 
 export type MediaOwnerTable =
   | "schools"
@@ -83,6 +86,13 @@ export type MediaOwnerTable =
   | "staffPaymentRecords"
   | "announcements"
   | "messages"
+  | "portalHighlights"
+  | "websiteSettings"
+  | "websitePages"
+  | "websiteSections"
+  | "websiteNavigationItems"
+  | "websiteForms"
+  | "websiteTemplates"
   | "schoolBranchSettings"
   | string;
 
@@ -116,6 +126,13 @@ export const MediaOwners = {
   STAFF_PAYMENT_RECORDS: "staffPaymentRecords",
   ANNOUNCEMENTS: "announcements",
   MESSAGES: "messages",
+  PORTAL_HIGHLIGHTS: PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE,
+  WEBSITE_SETTINGS: "websiteSettings",
+  WEBSITE_PAGES: "websitePages",
+  WEBSITE_SECTIONS: "websiteSections",
+  WEBSITE_NAVIGATION_ITEMS: "websiteNavigationItems",
+  WEBSITE_FORMS: "websiteForms",
+  WEBSITE_TEMPLATES: "websiteTemplates",
   SCHOOL_BRANCH_SETTINGS: "schoolBranchSettings",
 } as const;
 
@@ -134,6 +151,17 @@ export const MediaFieldKeys = {
   RECEIPT: "receipt",
   ATTACHMENT: "attachment",
   GALLERY: "gallery",
+  PORTAL_HIGHLIGHT_MEDIA: PORTAL_HIGHLIGHT_MEDIA_FIELDS.media,
+  PORTAL_HIGHLIGHT_POSTER: PORTAL_HIGHLIGHT_MEDIA_FIELDS.poster,
+  PORTAL_HIGHLIGHT_THUMBNAIL: PORTAL_HIGHLIGHT_MEDIA_FIELDS.thumbnail,
+  HERO: "hero",
+  HERO_BACKGROUND: "heroBackground",
+  SECTION_IMAGE: "sectionImage",
+  PAGE_BANNER: "pageBanner",
+  FAVICON: "favicon",
+  OPEN_GRAPH_IMAGE: "openGraphImage",
+  FOOTER_LOGO: "footerLogo",
+  WEBSITE_GALLERY: "websiteGallery",
 } as const;
 
 export type KnownMediaFieldKey = (typeof MediaFieldKeys)[keyof typeof MediaFieldKeys];
@@ -210,6 +238,36 @@ const IMAGE_PRESETS: Record<MediaVariant, ImageCompressionOptions> = {
     thumbnailMaxWidth: 96,
     thumbnailMaxHeight: 96,
     thumbnailQuality: 0.58,
+    thumbnailMimeType: "image/webp",
+  },
+  hero: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    quality: 0.72,
+    mimeType: "image/webp",
+    thumbnailMaxWidth: 480,
+    thumbnailMaxHeight: 270,
+    thumbnailQuality: 0.58,
+    thumbnailMimeType: "image/webp",
+  },
+  poster: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    quality: 0.72,
+    mimeType: "image/webp",
+    thumbnailMaxWidth: 480,
+    thumbnailMaxHeight: 270,
+    thumbnailQuality: 0.58,
+    thumbnailMimeType: "image/webp",
+  },
+  thumbnail: {
+    maxWidth: 640,
+    maxHeight: 360,
+    quality: 0.66,
+    mimeType: "image/webp",
+    thumbnailMaxWidth: 320,
+    thumbnailMaxHeight: 180,
+    thumbnailQuality: 0.56,
     thumbnailMimeType: "image/webp",
   },
   cover: {
@@ -529,7 +587,10 @@ export function getImageCompressionOptions(variant: MediaVariant = "attachment",
 
 export function guessVariantFromField(fieldKey: string): MediaVariant {
   const key = String(fieldKey || "").toLowerCase();
-  if (key.includes("cover") || key.includes("banner") || key.includes("hero") || key.includes("background")) return "cover";
+  if (key.includes("poster")) return "poster";
+  if (key.includes("thumbnail")) return "thumbnail";
+  if (key.includes("hero") || key === PORTAL_HIGHLIGHT_MEDIA_FIELDS.media.toLowerCase()) return "hero";
+  if (key.includes("cover") || key.includes("banner") || key.includes("background")) return "cover";
   if (key.includes("logo")) return "logo";
   if (key.includes("signature")) return "signature";
   if (key.includes("receipt") || key.includes("proof")) return "receipt";
@@ -1487,6 +1548,197 @@ export async function commitMediaAssetsToOwner(params: {
   }
 
   return committed;
+}
+
+
+export type SavePortalHighlightMediaOptions = {
+  accountId: string;
+  schoolId?: string | null;
+  branchId?: string | null;
+  highlightId?: string | null;
+  ownerTempKey?: string | null;
+  deviceId?: string | null;
+  createdBy?: string | number | null;
+  replaceExisting?: boolean;
+};
+
+export type SavedPortalHighlightMedia = {
+  fieldKey: PortalHighlightMediaField;
+  assetId: string;
+  previewUrl: string;
+  mimeType: string;
+  kind: MediaKind;
+  result: SavedMediaAssetResult;
+};
+
+function portalHighlightSaveOptions(
+  options: SavePortalHighlightMediaOptions,
+  fieldKey: PortalHighlightMediaField,
+  variant: MediaVariant,
+): SaveMediaAssetOptions {
+  return {
+    accountId: options.accountId,
+    schoolId: options.schoolId,
+    branchId: options.branchId,
+    ownerTable: MediaOwners.PORTAL_HIGHLIGHTS,
+    ownerId: options.highlightId,
+    ownerTempKey: options.ownerTempKey,
+    deviceId: options.deviceId,
+    fieldKey,
+    variant,
+    createdBy: options.createdBy,
+    replaceExisting: options.replaceExisting !== false,
+  };
+}
+
+/**
+ * Saves the primary image or video used by one Portal Highlight.
+ *
+ * Images use the wide hero compression preset. Videos remain unmodified and
+ * are stored through the generic file path so their original quality is kept.
+ */
+export async function savePortalHighlightMedia(
+  file: File,
+  options: SavePortalHighlightMediaOptions,
+): Promise<SavedPortalHighlightMedia> {
+  if (!file) throw new Error("No Portal Highlight media file was selected.");
+
+  const kind = getMediaKind(file);
+  if (kind !== "image" && kind !== "video") {
+    throw new Error("Portal Highlights support image and video files only.");
+  }
+
+  const saveOptions = portalHighlightSaveOptions(
+    options,
+    PORTAL_HIGHLIGHT_MEDIA_FIELDS.media,
+    kind === "image" ? "hero" : "attachment",
+  );
+
+  const result =
+    kind === "image"
+      ? await saveImageAsset(file, saveOptions)
+      : await saveGenericFileAsset(file, {
+          ...saveOptions,
+          maxOriginalBytes: 80 * 1024 * 1024,
+        });
+
+  return {
+    fieldKey: PORTAL_HIGHLIGHT_MEDIA_FIELDS.media,
+    assetId: result.assetId,
+    previewUrl: result.previewUrl,
+    mimeType: result.mimeType,
+    kind,
+    result,
+  };
+}
+
+/** Saves an optional still image displayed before or while a video loads. */
+export async function savePortalHighlightPoster(
+  file: File,
+  options: SavePortalHighlightMediaOptions,
+): Promise<SavedPortalHighlightMedia> {
+  if (!file?.type?.startsWith("image/")) {
+    throw new Error("A Portal Highlight video poster must be an image.");
+  }
+
+  const result = await saveImageAsset(
+    file,
+    portalHighlightSaveOptions(
+      options,
+      PORTAL_HIGHLIGHT_MEDIA_FIELDS.poster,
+      "poster",
+    ),
+  );
+
+  return {
+    fieldKey: PORTAL_HIGHLIGHT_MEDIA_FIELDS.poster,
+    assetId: result.assetId,
+    previewUrl: result.previewUrl,
+    mimeType: result.mimeType,
+    kind: "image",
+    result,
+  };
+}
+
+/** Saves an optional compact image used in editors, lists and loading states. */
+export async function savePortalHighlightThumbnail(
+  file: File,
+  options: SavePortalHighlightMediaOptions,
+): Promise<SavedPortalHighlightMedia> {
+  if (!file?.type?.startsWith("image/")) {
+    throw new Error("A Portal Highlight thumbnail must be an image.");
+  }
+
+  const result = await saveImageAsset(
+    file,
+    portalHighlightSaveOptions(
+      options,
+      PORTAL_HIGHLIGHT_MEDIA_FIELDS.thumbnail,
+      "thumbnail",
+    ),
+  );
+
+  return {
+    fieldKey: PORTAL_HIGHLIGHT_MEDIA_FIELDS.thumbnail,
+    assetId: result.assetId,
+    previewUrl: result.previewUrl,
+    mimeType: result.mimeType,
+    kind: "image",
+    result,
+  };
+}
+
+/**
+ * Commits all media references after the PortalHighlight record receives its
+ * permanent ID. Missing optional poster/thumbnail IDs are ignored.
+ */
+export async function commitPortalHighlightMedia(params: {
+  accountId: string;
+  highlightId: string;
+  ownerTempKey?: string | null;
+  mediaAssetId?: string | null;
+  posterMediaAssetId?: string | null;
+  thumbnailMediaAssetId?: string | null;
+}) {
+  return commitMediaAssetsToOwner({
+    accountId: params.accountId,
+    ownerTable: MediaOwners.PORTAL_HIGHLIGHTS,
+    ownerId: params.highlightId,
+    ownerTempKey: params.ownerTempKey,
+    assets: [
+      {
+        assetId: params.mediaAssetId,
+        fieldKey: PORTAL_HIGHLIGHT_MEDIA_FIELDS.media,
+      },
+      {
+        assetId: params.posterMediaAssetId,
+        fieldKey: PORTAL_HIGHLIGHT_MEDIA_FIELDS.poster,
+      },
+      {
+        assetId: params.thumbnailMediaAssetId,
+        fieldKey: PORTAL_HIGHLIGHT_MEDIA_FIELDS.thumbnail,
+      },
+    ],
+  });
+}
+
+/** Removes every media field belonging to a Portal Highlight. */
+export async function softDeletePortalHighlightMedia(params: {
+  accountId?: string;
+  highlightId?: string | null;
+  ownerTempKey?: string | null;
+}) {
+  await Promise.all(
+    Object.values(PORTAL_HIGHLIGHT_MEDIA_FIELDS).map((fieldKey) =>
+      softDeleteOwnerFieldAssets({
+        accountId: params.accountId,
+        ownerTable: MediaOwners.PORTAL_HIGHLIGHTS,
+        ownerId: params.highlightId,
+        ownerTempKey: params.ownerTempKey,
+        fieldKey,
+      }),
+    ),
+  );
 }
 
 export function revokeMediaObjectUrl(url?: string) {

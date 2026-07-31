@@ -461,6 +461,78 @@ export type NotificationPriority =
   | "high"
   | "urgent";
 
+// ======================================================
+// PORTAL HOME / SCHOOL EXPERIENCE
+// ======================================================
+
+export type PortalHighlightMediaType = "image" | "video";
+
+export type PortalHighlightAudience =
+  | "all"
+  | "branch_admin"
+  | "admin"
+  | "teacher"
+  | "student"
+  | "parent"
+  | "accountant";
+
+export type PortalHighlightActionType =
+  | "none"
+  | "portal_route"
+  | "external_url"
+  | "announcement"
+  | "calendar_event";
+
+export type PortalHighlightTransition =
+  | "fade"
+  | "slide"
+  | "crossfade";
+
+export type PortalHighlightStatus =
+  | "draft"
+  | "scheduled"
+  | "published"
+  | "expired"
+  | "archived";
+
+// ======================================================
+// PUBLIC SCHOOL WEBSITE / TEMPLATE SYSTEM
+// ======================================================
+
+export type WebsiteStatus = "draft" | "published" | "unpublished" | "archived";
+export type WebsitePageStatus = "draft" | "published" | "hidden" | "archived";
+export type WebsiteSectionStatus = "draft" | "published" | "hidden" | "archived";
+export type WebsiteDomainType = "eleeveon_subdomain" | "custom";
+export type WebsiteDomainStatus =
+  | "pending"
+  | "verifying"
+  | "verified"
+  | "active"
+  | "failed"
+  | "disabled";
+export type WebsiteSslStatus =
+  | "pending"
+  | "provisioning"
+  | "active"
+  | "failed"
+  | "expired";
+export type WebsiteSectionSourceType =
+  | "manual"
+  | "school"
+  | "branches"
+  | "programs"
+  | "subjects"
+  | "organizations"
+  | "teachers"
+  | "announcements"
+  | "calendar_events"
+  | "portal_highlights"
+  | "media_gallery"
+  | "custom";
+export type WebsiteNavigationTarget = "page" | "section" | "external_url" | "portal_login";
+export type WebsiteFormType = "contact" | "admissions_enquiry" | "newsletter" | "custom";
+export type WebsiteSubmissionStatus = "new" | "reviewing" | "responded" | "closed" | "spam";
+
 export type MediaAssetKind =
   | "image"
   | "document"
@@ -3127,6 +3199,251 @@ export interface StaffPaymentRecord extends BaseSync, MoneyFields {
 // 7) ANNOUNCEMENTS & MESSAGING TABLES
 // ======================================================
 
+/**
+ * A branch-managed story, notice, celebration or campaign shown on portal homes.
+ *
+ * Media bytes remain in mediaAssets/mediaBlobs. This record stores only media
+ * references, presentation rules, scheduling, audience and navigation metadata.
+ */
+export interface PortalHighlight extends BaseSync {
+  schoolId: string;
+  branchId: string;
+
+  title: string;
+  subtitle?: string | null;
+  description?: string | null;
+  eyebrow?: string | null;
+
+  mediaType: PortalHighlightMediaType;
+  mediaAssetId?: string | null;
+  posterMediaAssetId?: string | null;
+  fallbackImageUrl?: string | null;
+
+  audiences: PortalHighlightAudience[];
+  targetClassIds?: string[];
+  targetOrganizationIds?: string[];
+
+  actionType: PortalHighlightActionType;
+  actionLabel?: string | null;
+  actionValue?: string | null;
+  openActionInNewTab?: boolean;
+
+  displayOrder: number;
+  durationSeconds: number;
+  transition?: PortalHighlightTransition;
+
+  startAt?: number | null;
+  endAt?: number | null;
+
+  status: PortalHighlightStatus;
+  active: boolean;
+
+  createdByUserId?: string | null;
+  updatedByUserId?: string | null;
+  publishedAt?: number | null;
+  archivedAt?: number | null;
+
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * One public website configuration per school. Templates consume resolved data
+ * and never query Dexie directly. Website-specific content remains separate from
+ * operational records, while source-driven sections may safely reuse them.
+ */
+export interface WebsiteSetting extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+
+  siteName?: string | null;
+  tagline?: string | null;
+  description?: string | null;
+
+  templateKey: string;
+  templateVersion?: string | null;
+  theme?: Record<string, unknown>;
+  templateSettings?: Record<string, unknown>;
+
+  eleeveonSlug: string;
+  primaryDomainId?: string | null;
+
+  status: WebsiteStatus;
+  homePageId?: string | null;
+  defaultLanguage?: string | null;
+  supportedLanguages?: string[];
+
+  faviconMediaAssetId?: string | null;
+  socialPreviewMediaAssetId?: string | null;
+
+  seoTitle?: string | null;
+  seoDescription?: string | null;
+  seoKeywords?: string[];
+  searchEngineIndexing?: boolean;
+
+  analyticsProvider?: string | null;
+  analyticsTrackingId?: string | null;
+
+  publishedAt?: number | null;
+  unpublishedAt?: number | null;
+  lastPublishedRevisionId?: string | null;
+  createdByUserId?: string | null;
+  updatedByUserId?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsitePage extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+
+  title: string;
+  slug: string;
+  pageType: string;
+  status: WebsitePageStatus;
+  displayOrder: number;
+  parentPageId?: string | null;
+
+  seoTitle?: string | null;
+  seoDescription?: string | null;
+  seoKeywords?: string[];
+  socialPreviewMediaAssetId?: string | null;
+
+  showInNavigation?: boolean;
+  navigationLabel?: string | null;
+  publishedAt?: number | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsiteSection extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+  pageId: string;
+
+  sectionKey: string;
+  sectionType: string;
+  variant?: string | null;
+  status: WebsiteSectionStatus;
+  displayOrder: number;
+
+  sourceType: WebsiteSectionSourceType;
+  sourceId?: string | null;
+  sourceFilters?: Record<string, unknown>;
+
+  heading?: string | null;
+  subheading?: string | null;
+  body?: string | null;
+  content?: Record<string, unknown>;
+  settings?: Record<string, unknown>;
+
+  primaryMediaAssetId?: string | null;
+  backgroundMediaAssetId?: string | null;
+  mediaAssetIds?: string[];
+
+  active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsiteNavigationItem extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+
+  location: "header" | "footer" | "utility" | "mobile" | string;
+  parentItemId?: string | null;
+  label: string;
+  targetType: WebsiteNavigationTarget;
+  pageId?: string | null;
+  sectionId?: string | null;
+  url?: string | null;
+  openInNewTab?: boolean;
+  displayOrder: number;
+  active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsiteDomain extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+
+  hostname: string;
+  domainType: WebsiteDomainType;
+  status: WebsiteDomainStatus;
+  sslStatus: WebsiteSslStatus;
+
+  isPrimary: boolean;
+  redirectToPrimary: boolean;
+  verificationToken?: string | null;
+  verificationMethod?: "dns_txt" | "dns_cname" | "http" | string | null;
+  verificationRecordName?: string | null;
+  verificationRecordValue?: string | null;
+  verifiedAt?: number | null;
+  sslIssuedAt?: number | null;
+  sslExpiresAt?: number | null;
+  lastCheckedAt?: number | null;
+  failureReason?: string | null;
+  active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsiteDomainAlias extends BaseSync {
+  schoolId: string;
+  websiteSettingId: string;
+  sourceHostname: string;
+  targetHostname: string;
+  redirectStatusCode: 301 | 302 | 307 | 308;
+  active: boolean;
+  expiresAt?: number | null;
+}
+
+export interface WebsiteForm extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+  pageId?: string | null;
+  sectionId?: string | null;
+  name: string;
+  formType: WebsiteFormType;
+  fields: Array<Record<string, unknown>>;
+  successMessage?: string | null;
+  notificationEmails?: string[];
+  active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsiteFormSubmission extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+  formId: string;
+  status: WebsiteSubmissionStatus;
+  submittedAt: number;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  payload: Record<string, unknown>;
+  sourceUrl?: string | null;
+  userAgent?: string | null;
+  ipHash?: string | null;
+  assignedToUserId?: string | null;
+  respondedAt?: number | null;
+  note?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WebsiteRevision extends BaseSync {
+  schoolId: string;
+  websiteSettingId: string;
+  revisionNumber: number;
+  status: "draft" | "published" | "superseded" | "restored";
+  snapshot: Record<string, unknown>;
+  createdByUserId?: string | null;
+  publishedAt?: number | null;
+  restoredFromRevisionId?: string | null;
+  note?: string | null;
+}
+
 export interface Announcement extends BaseSync {
   schoolId: string;
   branchId: string;
@@ -3992,6 +4309,36 @@ export const APP_DB_STORES_V1: Record<string, string> = {
       staffPaymentRecords:
         "id,accountId,schoolId,branchId,teacherId,staffUserId,payrollRunId,payrollItemId,status,method,provider,referenceNumber,receiptNumber,providerReference,date,paidAt,updatedAt",
 
+      portalHighlights:
+        "id,accountId,schoolId,branchId,status,active,mediaType,displayOrder,startAt,endAt,publishedAt,updatedAt,isDeleted,synced,[accountId+schoolId+branchId],[branchId+active+displayOrder],[branchId+status+startAt]",
+
+      websiteSettings:
+        "id,accountId,schoolId,branchId,eleeveonSlug,templateKey,status,primaryDomainId,homePageId,publishedAt,isDeleted,updatedAt,synced,&[accountId+eleeveonSlug],[schoolId+status]",
+
+      websitePages:
+        "id,accountId,schoolId,branchId,websiteSettingId,slug,pageType,status,displayOrder,parentPageId,showInNavigation,publishedAt,isDeleted,updatedAt,synced,&[websiteSettingId+slug],[websiteSettingId+status+displayOrder]",
+
+      websiteSections:
+        "id,accountId,schoolId,branchId,websiteSettingId,pageId,sectionKey,sectionType,sourceType,sourceId,status,displayOrder,active,isDeleted,updatedAt,synced,[pageId+status+displayOrder],[websiteSettingId+sectionType]",
+
+      websiteNavigationItems:
+        "id,accountId,schoolId,branchId,websiteSettingId,location,parentItemId,targetType,pageId,sectionId,displayOrder,active,isDeleted,updatedAt,synced,[websiteSettingId+location+active+displayOrder]",
+
+      websiteDomains:
+        "id,accountId,schoolId,branchId,websiteSettingId,&hostname,domainType,status,sslStatus,isPrimary,redirectToPrimary,verifiedAt,active,isDeleted,updatedAt,synced,[websiteSettingId+isPrimary],[schoolId+status]",
+
+      websiteDomainAliases:
+        "id,accountId,schoolId,websiteSettingId,&sourceHostname,targetHostname,active,expiresAt,isDeleted,updatedAt,synced,[websiteSettingId+active]",
+
+      websiteForms:
+        "id,accountId,schoolId,branchId,websiteSettingId,pageId,sectionId,formType,active,isDeleted,updatedAt,synced,[websiteSettingId+formType+active]",
+
+      websiteFormSubmissions:
+        "id,accountId,schoolId,branchId,websiteSettingId,formId,status,submittedAt,email,phone,assignedToUserId,isDeleted,updatedAt,synced,[formId+status+submittedAt],[schoolId+status+submittedAt]",
+
+      websiteRevisions:
+        "id,accountId,schoolId,websiteSettingId,revisionNumber,status,publishedAt,createdAt,isDeleted,updatedAt,synced,&[websiteSettingId+revisionNumber],[websiteSettingId+status]",
+
       announcements:
         "id,accountId,schoolId,branchId,audience,classId,organizationId,published,publishAt,expiresAt,createdBy,updatedAt",
 
@@ -4238,6 +4585,19 @@ export class EleeveonDatabase extends Dexie {
   payrollRuns!: Table<PayrollRun>;
   payrollItems!: Table<PayrollItem>;
   staffPaymentRecords!: Table<StaffPaymentRecord>;
+
+  portalHighlights!: Table<PortalHighlight, string>;
+
+  websiteSettings!: Table<WebsiteSetting, string>;
+  websitePages!: Table<WebsitePage, string>;
+  websiteSections!: Table<WebsiteSection, string>;
+  websiteNavigationItems!: Table<WebsiteNavigationItem, string>;
+  websiteDomains!: Table<WebsiteDomain, string>;
+  websiteDomainAliases!: Table<WebsiteDomainAlias, string>;
+  websiteForms!: Table<WebsiteForm, string>;
+  websiteFormSubmissions!: Table<WebsiteFormSubmission, string>;
+  websiteRevisions!: Table<WebsiteRevision, string>;
+
 
   announcements!: Table<Announcement>;
   announcementRecipients!: Table<AnnouncementRecipient>;

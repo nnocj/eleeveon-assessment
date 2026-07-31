@@ -6,6 +6,12 @@
  * ID contract:
  * - mediaAssets.id is a permanent UUID string;
  * - mediaBlobs.id remains a local numeric auto-increment key.
+ *
+ * Website support:
+ * - website settings/pages/sections/navigation/forms/templates use the same
+ *   permanent owner identity contract as every other media consumer;
+ * - missing website owner records are reported but never auto-deleted, because
+ *   an offline-first sync may restore the owner later.
  */
 
 import { db } from "../db";
@@ -13,6 +19,7 @@ import { SYNC_STATUS_VALUE } from "../sync/syncConfig";
 import {
   buildMediaIdentityKey,
   mediaAssetSortNewestFirst,
+  WEBSITE_MEDIA_OWNER_TABLES,
 } from "./mediaAssetResolver";
 import {
   clearMediaObjectUrlCache,
@@ -26,7 +33,8 @@ export type MediaRepairIssueType =
   | "orphaned-blob"
   | "missing-blob"
   | "stale-object-url"
-  | "old-mixed-image";
+  | "old-mixed-image"
+  | "missing-website-owner";
 
 export type MediaRepairIssue = {
   type: MediaRepairIssueType;
@@ -49,6 +57,7 @@ export type MediaRepairReport = {
   accountId: string;
   scannedAssets: number;
   scannedBlobs: number;
+  websiteAssetsScanned: number;
   issues: MediaRepairIssue[];
   repaired: number;
   generatedAt: number;
@@ -77,6 +86,58 @@ function numericBlobId(value: unknown) {
   return Number.isFinite(number)
     ? number
     : undefined;
+}
+
+
+const WEBSITE_OWNER_TABLE_SET = new Set<string>(
+  Object.values(WEBSITE_MEDIA_OWNER_TABLES),
+);
+
+function isWebsiteOwnerTable(value: unknown): boolean {
+  return WEBSITE_OWNER_TABLE_SET.has(
+    String(value ?? "").trim(),
+  );
+}
+
+async function websiteOwnerExists(asset: any): Promise<boolean> {
+  const ownerTable =
+    String(asset?.ownerTable ?? "").trim();
+
+  const ownerId =
+    String(asset?.ownerId ?? "").trim();
+
+  /**
+   * Temporary website media is valid before its page, section or settings
+   * record is finalized. Do not report it as orphaned.
+   */
+  if (
+    !isWebsiteOwnerTable(ownerTable) ||
+    !ownerId ||
+    String(asset?.ownerTempKey ?? "").trim()
+  ) {
+    return true;
+  }
+
+  const table =
+    (db as any)[ownerTable];
+
+  if (
+    !table ||
+    typeof table.get !== "function"
+  ) {
+    return false;
+  }
+
+  const owner =
+    await table
+      .get(ownerId)
+      .catch(() => undefined);
+
+  return Boolean(
+    owner &&
+    !owner.isDeleted &&
+    owner.active !== false,
+  );
 }
 
 export async function inspectMediaIntegrity(
@@ -220,6 +281,26 @@ export async function inspectMediaIntegrity(
           `Media asset ${id || "(unknown)"} points to missing blob ${localBlobId}.`,
       });
     }
+
+    /**
+     * Website media must continue to point to a live website settings, page,
+     * section, navigation item, form or template record. This is inspection
+     * only: repairMediaIntegrity deliberately does not delete these assets,
+     * because a website record may be restored by a later sync.
+     */
+    if (
+      active(asset) &&
+      isWebsiteOwnerTable(asset.ownerTable) &&
+      !(await websiteOwnerExists(asset))
+    ) {
+      issues.push({
+        type: "missing-website-owner",
+        assetIds:
+          id ? [id] : undefined,
+        message:
+          `Website media asset ${id || "(unknown)"} points to a missing or inactive ${String(asset.ownerTable || "website")} record.`,
+      });
+    }
   }
 
   for (
@@ -343,6 +424,13 @@ export async function inspectMediaIntegrity(
       assets.length,
     scannedBlobs:
       blobs.length,
+    websiteAssetsScanned:
+      assets.filter(
+        (asset: any) =>
+          isWebsiteOwnerTable(
+            asset.ownerTable,
+          ),
+      ).length,
     issues,
     repaired: 0,
     generatedAt:

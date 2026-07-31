@@ -135,6 +135,17 @@ export const ALL_KNOWN_DEXIE_TABLES = [
 
   "schoolBranchSettings",
 
+  // Public school website and template system
+  "websiteSettings",
+  "websitePages",
+  "websiteSections",
+  "websiteNavigationItems",
+  "websiteDomains",
+  "websiteDomainAliases",
+  "websiteForms",
+  "websiteFormSubmissions",
+  "websiteRevisions",
+
   "mediaAssets",
   "mediaBlobs",
 
@@ -311,6 +322,19 @@ export const LOCAL_FIRST_SYNC_TABLES = [
 
   // Settings
   "schoolBranchSettings",
+
+  // Public school website and template system
+  // Records are lightweight, offline-first metadata/content. Website media files
+  // continue to sync through mediaAssets while mediaBlobs remains local-only.
+  "websiteSettings",
+  "websitePages",
+  "websiteSections",
+  "websiteNavigationItems",
+  "websiteDomains",
+  "websiteDomainAliases",
+  "websiteForms",
+  "websiteFormSubmissions",
+  "websiteRevisions",
 
   // Safe media metadata only
   "mediaAssets",
