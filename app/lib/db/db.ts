@@ -767,6 +767,7 @@ export type SubscriptionStatus =
 
 export type BillingCycle =
   | "monthly"
+  | "termly"
   | "yearly"
   | "manual"
   | string;
@@ -814,6 +815,43 @@ export interface LocalUserSession {
   updatedAt?: string;
 }
 
+export type SubscriptionPlanFeatureKey =
+  | "offlineSync"
+  | "cloudBackup"
+  | "reports"
+  | "finance"
+  | "attendance"
+  | "identityCards"
+  | "identitySafety"
+  | "transport"
+  | "schoolWebsites"
+  | "communications"
+  | "calendarScheduling"
+  | "parentPortal"
+  | "studentPortal"
+  | "teacherPortal"
+  | "advancedAnalytics"
+  | "apiAccess"
+  | string;
+
+export type SubscriptionPlanFeatureFlags = Partial<
+  Record<SubscriptionPlanFeatureKey, boolean>
+>;
+
+export interface SubscriptionPlanMetadata {
+  featureFlags?: SubscriptionPlanFeatureFlags;
+  featureSchemaVersion?: number;
+  featureKeys?: SubscriptionPlanFeatureKey[];
+
+  notes?: string | null;
+  displayOrder?: number | null;
+  badge?: string | null;
+  recommended?: boolean;
+  trialDays?: number | null;
+
+  [key: string]: unknown;
+}
+
 export interface LocalSubscriptionPlan {
   id: string;
   name: string;
@@ -822,6 +860,7 @@ export interface LocalSubscriptionPlan {
 
   currency?: string;
   priceMonthly: number;
+  priceTermly: number;
   priceYearly: number;
 
   maxSchools?: number | null;
@@ -831,23 +870,45 @@ export interface LocalSubscriptionPlan {
   maxTeachers?: number | null;
   maxStorageMb?: number | null;
 
+  /**
+   * Backward-compatible dedicated capability flags.
+   *
+   * Older rows may not contain every field. Newer capabilities are also
+   * represented through `features` and `metadata.featureFlags`.
+   */
   offlineSync?: boolean;
   cloudBackup?: boolean;
   reports?: boolean;
   finance?: boolean;
+
+  attendance?: boolean;
+  identityCards?: boolean;
+  identitySafety?: boolean;
+  transport?: boolean;
+  schoolWebsites?: boolean;
+  communications?: boolean;
+  calendarScheduling?: boolean;
+
   parentPortal?: boolean;
   studentPortal?: boolean;
   teacherPortal?: boolean;
   advancedAnalytics?: boolean;
   apiAccess?: boolean;
 
-  features?: string[];
-  metadata?: any;
+  /**
+   * Extensible capability representation.
+   *
+   * `features` contains enabled feature keys while `metadata.featureFlags`
+   * preserves explicit true/false values for every supported capability.
+   */
+  features?: SubscriptionPlanFeatureKey[];
+  metadata?: SubscriptionPlanMetadata | null;
 
   active?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
+
 
 export interface LocalAccountSubscription {
   id: string;
@@ -4418,7 +4479,7 @@ export const APP_DB_STORES_V1: Record<string, string> = {
         "id,accountId,userId,deviceId,expiresAt,revokedAt,updatedAt",
 
       subscriptionPlans:
-        "id,code,active,priceMonthly,priceYearly,updatedAt",
+        "id,code,active,priceMonthly,priceTermly,priceYearly,updatedAt",
 
       accountSubscriptions:
         "id,accountId,planId,status,billingCycle,currentPeriodEnd,nextBillingDate,updatedAt",

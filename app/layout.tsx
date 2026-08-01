@@ -15,8 +15,11 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
+import "./globals.css";
+
 import Providers from "./providers";
 import GlobalBrandingRuntime from "./components/GlobalBrandingRuntime";
+
 
 export const metadata: Metadata = {
   title: "Eleeveon School Management",

@@ -2,21 +2,18 @@
 
 /**
  * app/developer/modules/DeveloperPlans.tsx
- * ---------------------------------------------------------
- * DEVELOPER SUBSCRIPTION PLANS
- * ---------------------------------------------------------
- * Mobile-first SaaS plan manager for the developer portal.
+ * --------------------------------------------------------------------------
+ * Eleeveon subscription plan manager.
  *
- * Features:
- * - Card / table / charts view switching
- * - Search and filters
- * - Plan pricing analytics
- * - Feature coverage analytics
- * - Safe API normalization for different backend response shapes
- * - Mobile-first, responsive, professional UI
- *
- * Requires:
- * npm install recharts
+ * Rebuilt to follow the compact Students/Branch Settings interaction pattern:
+ * - compact Search + Add + Filter + More toolbar;
+ * - mobile-first cards, table and analytics views;
+ * - plan editor opens as a responsive sheet;
+ * - server-authoritative save flow followed by a fresh reload;
+ * - old top-level billing fields remain supported;
+ * - newer platform capabilities are persisted in both `features` and
+ *   `metadata.featureFlags`, so they remain available even before every feature
+ *   receives a dedicated backend column.
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -24,9 +21,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -37,17 +31,42 @@ import { apiClient } from "../../lib/api/apiClient";
 import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
 
-// ======================================================
-// TYPES
-// ======================================================
-
 type Props = {
   navigate?: (key: string) => void;
 };
 
 type ViewMode = "cards" | "table" | "analytics";
-type BillingPreview = "monthly" | "yearly";
-type Tone = "green" | "blue" | "purple" | "orange" | "red" | "gray";
+type BillingPreview = "monthly" | "termly" | "yearly";
+type ToastTone = "success" | "error" | "info";
+
+type FeatureKey =
+  | "offlineSync"
+  | "cloudBackup"
+  | "reports"
+  | "finance"
+  | "attendance"
+  | "identityCards"
+  | "identitySafety"
+  | "transport"
+  | "schoolWebsites"
+  | "communications"
+  | "calendarScheduling"
+  | "parentPortal"
+  | "studentPortal"
+  | "teacherPortal"
+  | "advancedAnalytics"
+  | "apiAccess";
+
+type PlanFeatureDefinition = {
+  key: FeatureKey;
+  label: string;
+  description: string;
+  icon: string;
+  group: "Core" | "People" | "Operations" | "Growth";
+  legacyTopLevel?: boolean;
+};
+
+type PlanFeatureFlags = Record<FeatureKey, boolean>;
 
 type PlanRow = {
   id: string;
@@ -57,6 +76,7 @@ type PlanRow = {
 
   currency?: string;
   priceMonthly?: number;
+  priceTermly?: number;
   priceYearly?: number;
 
   maxSchools?: number | null;
@@ -70,14 +90,25 @@ type PlanRow = {
   cloudBackup?: boolean;
   reports?: boolean;
   finance?: boolean;
+
+  attendance?: boolean;
+  identityCards?: boolean;
+  identitySafety?: boolean;
+  transport?: boolean;
+  schoolWebsites?: boolean;
+  communications?: boolean;
+  calendarScheduling?: boolean;
+
   parentPortal?: boolean;
   studentPortal?: boolean;
   teacherPortal?: boolean;
   advancedAnalytics?: boolean;
   apiAccess?: boolean;
 
-  active?: boolean;
+  features?: string[] | null;
+  metadata?: Record<string, any> | null;
 
+  active?: boolean;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -85,20 +116,10 @@ type PlanRow = {
 type SubscriptionRow = {
   id: string;
   accountId: string;
-  planId?: string;
-  status: string;
-  billingCycle?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  plan?: PlanRow;
-};
-
-type ChartRow = {
-  label: string;
-  value: number;
-  monthly?: number;
-  yearly?: number;
-  subscriptions?: number;
+  planId?: string | null;
+  status?: string | null;
+  billingCycle?: string | null;
+  plan?: PlanRow | null;
 };
 
 type PlanFormState = {
@@ -108,28 +129,162 @@ type PlanFormState = {
   description: string;
   currency: string;
   priceMonthly: string;
+  priceTermly: string;
   priceYearly: string;
+
   maxSchools: string;
   maxBranches: string;
   maxUsers: string;
   maxStudents: string;
   maxTeachers: string;
   maxStorageMb: string;
-  offlineSync: boolean;
-  cloudBackup: boolean;
-  reports: boolean;
-  finance: boolean;
-  parentPortal: boolean;
-  studentPortal: boolean;
-  teacherPortal: boolean;
-  advancedAnalytics: boolean;
-  apiAccess: boolean;
+
+  features: PlanFeatureFlags;
   active: boolean;
 };
 
-// ======================================================
-// CONSTANTS
-// ======================================================
+const FEATURE_DEFINITIONS: PlanFeatureDefinition[] = [
+  {
+    key: "offlineSync",
+    label: "Offline-first sync",
+    description: "Local-first records with protected synchronization.",
+    icon: "↻",
+    group: "Core",
+    legacyTopLevel: true,
+  },
+  {
+    key: "cloudBackup",
+    label: "Cloud backup",
+    description: "Cloud recovery, restore and backup tools.",
+    icon: "☁",
+    group: "Core",
+    legacyTopLevel: true,
+  },
+  {
+    key: "reports",
+    label: "Assessments & reports",
+    description: "Assessment entry, report cards, broadsheets and templates.",
+    icon: "▦",
+    group: "Core",
+    legacyTopLevel: true,
+  },
+  {
+    key: "finance",
+    label: "Finance",
+    description: "Fees, payments, income, expenses and payroll.",
+    icon: "₵",
+    group: "Core",
+    legacyTopLevel: true,
+  },
+  {
+    key: "attendance",
+    label: "Attendance",
+    description: "Student and staff attendance workflows.",
+    icon: "✓",
+    group: "Operations",
+  },
+  {
+    key: "identityCards",
+    label: "ID cards & passes",
+    description: "Student, staff, parent and visitor identity cards.",
+    icon: "▣",
+    group: "Operations",
+  },
+  {
+    key: "identitySafety",
+    label: "Identity & safety",
+    description: "Pickup, visitors, access points and emergency roll calls.",
+    icon: "◇",
+    group: "Operations",
+  },
+  {
+    key: "transport",
+    label: "School transport",
+    description: "Vehicles, routes, stops, assignments and journeys.",
+    icon: "▰",
+    group: "Operations",
+  },
+  {
+    key: "schoolWebsites",
+    label: "School websites",
+    description: "Template-based public websites and custom domains.",
+    icon: "↗",
+    group: "Growth",
+  },
+  {
+    key: "communications",
+    label: "Communication",
+    description: "Announcements, messaging and delivery logs.",
+    icon: "✉",
+    group: "Growth",
+  },
+  {
+    key: "calendarScheduling",
+    label: "Calendar & scheduling",
+    description: "Events, timetables, resources and conflict checks.",
+    icon: "□",
+    group: "Growth",
+  },
+  {
+    key: "parentPortal",
+    label: "Parent portal",
+    description: "Children, reports, fees and communication.",
+    icon: "P",
+    group: "People",
+    legacyTopLevel: true,
+  },
+  {
+    key: "studentPortal",
+    label: "Student portal",
+    description: "Results, reports, attendance and learning records.",
+    icon: "S",
+    group: "People",
+    legacyTopLevel: true,
+  },
+  {
+    key: "teacherPortal",
+    label: "Teacher portal",
+    description: "Classes, attendance, assessment and timetable tools.",
+    icon: "T",
+    group: "People",
+    legacyTopLevel: true,
+  },
+  {
+    key: "advancedAnalytics",
+    label: "Advanced analytics",
+    description: "Charts, trends, insights and performance views.",
+    icon: "⌁",
+    group: "Growth",
+    legacyTopLevel: true,
+  },
+  {
+    key: "apiAccess",
+    label: "API access",
+    description: "External integrations and developer APIs.",
+    icon: "{ }",
+    group: "Growth",
+    legacyTopLevel: true,
+  },
+];
+
+const DEFAULT_FEATURES: PlanFeatureFlags = {
+  offlineSync: true,
+  cloudBackup: true,
+  reports: true,
+  finance: true,
+  attendance: true,
+  identityCards: true,
+  identitySafety: true,
+  transport: true,
+  schoolWebsites: true,
+  communications: true,
+  calendarScheduling: true,
+  parentPortal: true,
+  studentPortal: true,
+  teacherPortal: true,
+  advancedAnalytics: true,
+  apiAccess: false,
+};
 
 const EMPTY_FORM: PlanFormState = {
   name: "",
@@ -137,6 +292,7 @@ const EMPTY_FORM: PlanFormState = {
   description: "",
   currency: "GHS",
   priceMonthly: "0",
+  priceTermly: "0",
   priceYearly: "0",
   maxSchools: "",
   maxBranches: "",
@@ -144,105 +300,9 @@ const EMPTY_FORM: PlanFormState = {
   maxStudents: "",
   maxTeachers: "",
   maxStorageMb: "",
-  offlineSync: true,
-  cloudBackup: false,
-  reports: true,
-  finance: false,
-  parentPortal: false,
-  studentPortal: false,
-  teacherPortal: true,
-  advancedAnalytics: false,
-  apiAccess: false,
+  features: { ...DEFAULT_FEATURES },
   active: true,
 };
-
-const FEATURE_FIELDS: {
-  key: keyof PlanFormState;
-  planKey: keyof PlanRow;
-  label: string;
-  description: string;
-  icon: string;
-}[] = [
-  {
-    key: "offlineSync",
-    planKey: "offlineSync",
-    label: "Offline Sync",
-    description: "PWA local-first data sync.",
-    icon: "🔄",
-  },
-  {
-    key: "cloudBackup",
-    planKey: "cloudBackup",
-    label: "Cloud Backup",
-    description: "Cloud recovery and backup tools.",
-    icon: "☁️",
-  },
-  {
-    key: "reports",
-    planKey: "reports",
-    label: "Reports",
-    description: "Assessment reports and report cards.",
-    icon: "📊",
-  },
-  {
-    key: "finance",
-    planKey: "finance",
-    label: "Finance",
-    description: "Fees, payments, income and expenses.",
-    icon: "💰",
-  },
-  {
-    key: "parentPortal",
-    planKey: "parentPortal",
-    label: "Parent Portal",
-    description: "Parent access to reports and records.",
-    icon: "👨‍👩‍👧",
-  },
-  {
-    key: "studentPortal",
-    planKey: "studentPortal",
-    label: "Student Portal",
-    description: "Student access to learning records.",
-    icon: "🎓",
-  },
-  {
-    key: "teacherPortal",
-    planKey: "teacherPortal",
-    label: "Teacher Portal",
-    description: "Teacher assessments and class tools.",
-    icon: "👩‍🏫",
-  },
-  {
-    key: "advancedAnalytics",
-    planKey: "advancedAnalytics",
-    label: "Advanced Analytics",
-    description: "Charts, insights and performance views.",
-    icon: "📈",
-  },
-  {
-    key: "apiAccess",
-    planKey: "apiAccess",
-    label: "API Access",
-    description: "External integrations and APIs.",
-    icon: "🔌",
-  },
-];
-
-const chartColors = [
-  "var(--dev-primary)",
-  "#0f172a",
-  "#16a34a",
-  "#f97316",
-  "#7c3aed",
-  "#dc2626",
-  "#0891b2",
-  "#64748b",
-  "#ca8a04",
-];
-
-// ======================================================
-// HELPERS
-// ======================================================
 
 const toArray = <T,>(value: any, keys: string[] = []): T[] => {
   if (Array.isArray(value)) return value as T[];
@@ -257,19 +317,15 @@ const toArray = <T,>(value: any, keys: string[] = []): T[] => {
   if (Array.isArray(value.results)) return value.results as T[];
   if (Array.isArray(value.records)) return value.records as T[];
   if (Array.isArray(value.rows)) return value.rows as T[];
-
   return [];
 };
 
-const numberOrNull = (value: string) => {
-  if (value.trim() === "") return null;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-};
+const cleanText = (value: unknown) => String(value ?? "").trim();
 
-const intValue = (value: string) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? Math.max(0, Math.round(num)) : 0;
+const numberOrNull = (value: string) => {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : null;
 };
 
 const money = (amount: number, currency = "GHS") =>
@@ -291,16 +347,66 @@ const dateText = (value?: string | null) => {
   if (Number.isNaN(date.getTime())) return "Not set";
 
   return new Intl.DateTimeFormat("en-GH", {
-    year: "numeric",
-    month: "short",
     day: "2-digit",
+    month: "short",
+    year: "numeric",
   }).format(date);
 };
 
-const safeTime = (value?: string | null) => {
-  if (!value) return 0;
-  const time = new Date(value).getTime();
-  return Number.isFinite(time) ? time : 0;
+const featureArray = (plan: PlanRow) =>
+  Array.isArray(plan.features)
+    ? plan.features.map((value) => cleanText(value)).filter(Boolean)
+    : [];
+
+const featureFlagFromPlan = (plan: PlanRow, key: FeatureKey): boolean => {
+  const topLevel = plan[key as keyof PlanRow];
+  if (typeof topLevel === "boolean") return topLevel;
+
+  const metadataFlags =
+    plan.metadata &&
+    typeof plan.metadata === "object" &&
+    plan.metadata.featureFlags &&
+    typeof plan.metadata.featureFlags === "object"
+      ? plan.metadata.featureFlags
+      : {};
+
+  if (typeof metadataFlags[key] === "boolean") {
+    return metadataFlags[key];
+  }
+
+  return featureArray(plan).includes(key);
+};
+
+const allFeatureFlagsFromPlan = (plan: PlanRow): PlanFeatureFlags =>
+  FEATURE_DEFINITIONS.reduce(
+    (flags, feature) => {
+      flags[feature.key] = featureFlagFromPlan(plan, feature.key);
+      return flags;
+    },
+    { ...DEFAULT_FEATURES },
+  );
+
+const normalizePlan = (value: any): PlanRow | null => {
+  const row = value?.plan || value?.data || value;
+  if (!row || typeof row !== "object") return null;
+
+  const id = cleanText(row.id || row.localId);
+  if (!id) return null;
+
+  return {
+    ...row,
+    id,
+    name: cleanText(row.name),
+    code: cleanText(row.code),
+    currency: cleanText(row.currency) || "GHS",
+    priceMonthly: Number(row.priceMonthly || 0),
+    priceTermly: Number(row.priceTermly || 0),
+    priceYearly: Number(row.priceYearly || 0),
+    active: row.active !== false,
+    features: Array.isArray(row.features) ? row.features : [],
+    metadata:
+      row.metadata && typeof row.metadata === "object" ? row.metadata : {},
+  };
 };
 
 const planToForm = (plan: PlanRow): PlanFormState => ({
@@ -310,6 +416,7 @@ const planToForm = (plan: PlanRow): PlanFormState => ({
   description: plan.description || "",
   currency: plan.currency || "GHS",
   priceMonthly: String(plan.priceMonthly ?? 0),
+  priceTermly: String(plan.priceTermly ?? 0),
   priceYearly: String(plan.priceYearly ?? 0),
   maxSchools: plan.maxSchools == null ? "" : String(plan.maxSchools),
   maxBranches: plan.maxBranches == null ? "" : String(plan.maxBranches),
@@ -317,61 +424,139 @@ const planToForm = (plan: PlanRow): PlanFormState => ({
   maxStudents: plan.maxStudents == null ? "" : String(plan.maxStudents),
   maxTeachers: plan.maxTeachers == null ? "" : String(plan.maxTeachers),
   maxStorageMb: plan.maxStorageMb == null ? "" : String(plan.maxStorageMb),
-  offlineSync: plan.offlineSync ?? true,
-  cloudBackup: plan.cloudBackup ?? false,
-  reports: plan.reports ?? true,
-  finance: plan.finance ?? false,
-  parentPortal: plan.parentPortal ?? false,
-  studentPortal: plan.studentPortal ?? false,
-  teacherPortal: plan.teacherPortal ?? true,
-  advancedAnalytics: plan.advancedAnalytics ?? false,
-  apiAccess: plan.apiAccess ?? false,
-  active: plan.active ?? true,
+  features: allFeatureFlagsFromPlan(plan),
+  active: plan.active !== false,
 });
 
-const formToPayload = (form: PlanFormState) => ({
-  name: form.name.trim(),
-  code: form.code.trim().toLowerCase().replace(/\s+/g, "_"),
-  description: form.description.trim() || null,
-  currency: form.currency.trim() || "GHS",
-  priceMonthly: intValue(form.priceMonthly),
-  priceYearly: intValue(form.priceYearly),
-  maxSchools: numberOrNull(form.maxSchools),
-  maxBranches: numberOrNull(form.maxBranches),
-  maxUsers: numberOrNull(form.maxUsers),
-  maxStudents: numberOrNull(form.maxStudents),
-  maxTeachers: numberOrNull(form.maxTeachers),
-  maxStorageMb: numberOrNull(form.maxStorageMb),
-  offlineSync: form.offlineSync,
-  cloudBackup: form.cloudBackup,
-  reports: form.reports,
-  finance: form.finance,
-  parentPortal: form.parentPortal,
-  studentPortal: form.studentPortal,
-  teacherPortal: form.teacherPortal,
-  advancedAnalytics: form.advancedAnalytics,
-  apiAccess: form.apiAccess,
-  active: form.active,
-});
+const formToPayload = (form: PlanFormState) => {
+  const enabledFeatures = FEATURE_DEFINITIONS.filter(
+    (feature) => form.features[feature.key],
+  ).map((feature) => feature.key);
+
+  const topLevelFlags = FEATURE_DEFINITIONS.reduce<Record<string, boolean>>(
+    (result, feature) => {
+      result[feature.key] = form.features[feature.key];
+      return result;
+    },
+    {},
+  );
+
+  return {
+    name: cleanText(form.name),
+    code: cleanText(form.code).toLowerCase().replace(/[^a-z0-9]+/g, "_"),
+    description: cleanText(form.description) || null,
+    currency: cleanText(form.currency) || "GHS",
+    priceMonthly: numberOrNull(form.priceMonthly) ?? 0,
+    priceTermly: numberOrNull(form.priceTermly) ?? 0,
+    priceYearly: numberOrNull(form.priceYearly) ?? 0,
+    maxSchools: numberOrNull(form.maxSchools),
+    maxBranches: numberOrNull(form.maxBranches),
+    maxUsers: numberOrNull(form.maxUsers),
+    maxStudents: numberOrNull(form.maxStudents),
+    maxTeachers: numberOrNull(form.maxTeachers),
+    maxStorageMb: numberOrNull(form.maxStorageMb),
+
+    ...topLevelFlags,
+
+    features: enabledFeatures,
+    metadata: {
+      featureFlags: { ...form.features },
+      featureSchemaVersion: 2,
+      featureKeys: enabledFeatures,
+    },
+
+    active: form.active,
+  };
+};
 
 const countEnabledFeatures = (plan: PlanRow) =>
-  FEATURE_FIELDS.filter((field) => Boolean(plan[field.planKey])).length;
+  FEATURE_DEFINITIONS.filter((feature) =>
+    featureFlagFromPlan(plan, feature.key),
+  ).length;
 
-const planUsageCount = (plan: PlanRow, subscriptions: SubscriptionRow[]) =>
-  subscriptions.filter((subscription) => subscription.planId === plan.id || subscription.plan?.id === plan.id).length;
+function readableTextColor(color: string) {
+  const value = cleanText(color);
+  if (!value.startsWith("#")) return "#fff";
 
-// ======================================================
-// COMPONENT
-// ======================================================
+  let hex = value.slice(1);
+  if (hex.length === 3) {
+    hex = hex
+      .split("")
+      .map((character) => character + character)
+      .join("");
+  }
+
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return "#fff";
+
+  const number = Number.parseInt(hex, 16);
+  const red = (number >> 16) & 255;
+  const green = (number >> 8) & 255;
+  const blue = number & 255;
+  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
+  return brightness > 155 ? "#111827" : "#ffffff";
+}
+
+function FeatureDot({
+  enabled,
+  primary,
+}: {
+  enabled: boolean;
+  primary: string;
+}) {
+  return (
+    <span
+      className="dp-feature-dot"
+      style={{
+        background: enabled ? primary : "var(--dp-muted-dot)",
+      }}
+      aria-label={enabled ? "Included" : "Not included"}
+    />
+  );
+}
+
+function EmptyState({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <section className="dp-empty">
+      <div className="dp-empty-icon">◇</div>
+      <h3>{title}</h3>
+      <p>{description}</p>
+    </section>
+  );
+}
+
+function Toast({
+  tone,
+  children,
+  onClose,
+}: {
+  tone: ToastTone;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div className={`dp-toast ${tone}`}>
+      <span>{children}</span>
+      <button type="button" onClick={onClose} aria-label="Close message">
+        ×
+      </button>
+    </div>
+  );
+}
 
 export default function DeveloperPlans({ navigate }: Props) {
+  void navigate;
+
   const { accountId, authenticated, loading: accountLoading } = useAccount();
   const { settings } = useSettings();
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
-
-  const [viewMode, setViewMode] = useState<ViewMode>("cards");
-  const [billingPreview, setBillingPreview] = useState<BillingPreview>("monthly");
+  const primaryText = readableTextColor(primary);
 
   const [plans, setPlans] = useState<PlanRow[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
@@ -379,38 +564,58 @@ export default function DeveloperPlans({ navigate }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [busyPlanId, setBusyPlanId] = useState("");
+
+  const [message, setMessage] = useState<{
+    tone: ToastTone;
+    text: string;
+  } | null>(null);
 
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("all");
-  const [feature, setFeature] = useState("all");
-  const [currency, setCurrency] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [featureFilter, setFeatureFilter] = useState<"all" | FeatureKey>("all");
+  const [currencyFilter, setCurrencyFilter] = useState("all");
 
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const [billingPreview, setBillingPreview] =
+    useState<BillingPreview>("monthly");
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
-  const [form, setForm] = useState<PlanFormState>(EMPTY_FORM);
-
-  // ======================================================
-  // LOAD
-  // ======================================================
+  const [form, setForm] = useState<PlanFormState>({
+    ...EMPTY_FORM,
+    features: { ...EMPTY_FORM.features },
+  });
 
   const load = async (silent = false) => {
     try {
       silent ? setRefreshing(true) : setLoading(true);
-      setError("");
-      setNotice("");
 
       const [plansResponse, subscriptionsResponse] = await Promise.all([
-        apiClient<any>("/billing/plans?includeInactive=true").catch(() => []),
+        apiClient<any>("/billing/plans/manage?includeInactive=true"),
         apiClient<any>("/billing/subscriptions").catch(() => []),
       ]);
 
-      setPlans(toArray<PlanRow>(plansResponse, ["plans", "subscriptionPlans"]));
+      const nextPlans = toArray<any>(plansResponse, [
+        "plans",
+        "subscriptionPlans",
+      ])
+        .map(normalizePlan)
+        .filter(Boolean) as PlanRow[];
+
+      setPlans(nextPlans);
       setSubscriptions(
-        toArray<SubscriptionRow>(subscriptionsResponse, ["subscriptions", "accountSubscriptions"])
+        toArray<SubscriptionRow>(subscriptionsResponse, [
+          "subscriptions",
+          "accountSubscriptions",
+        ]),
       );
-    } catch (err: any) {
-      setError(err?.message || "Could not load subscription plans.");
+    } catch (error: any) {
+      setMessage({
+        tone: "error",
+        text: error?.message || "Could not load subscription plans.",
+      });
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -425,17 +630,16 @@ export default function DeveloperPlans({ navigate }: Props) {
       return;
     }
 
-    load();
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountLoading, authenticated, accountId]);
 
-  // ======================================================
-  // FILTERS + DERIVED
-  // ======================================================
-
   const currencies = useMemo(
-    () => Array.from(new Set(plans.map((plan) => plan.currency || "GHS"))).sort(),
-    [plans]
+    () =>
+      Array.from(
+        new Set(plans.map((plan) => plan.currency || "GHS").filter(Boolean)),
+      ).sort(),
+    [plans],
   );
 
   const filteredPlans = useMemo(() => {
@@ -443,23 +647,34 @@ export default function DeveloperPlans({ navigate }: Props) {
 
     return plans
       .filter((plan) => {
-        const haystack = `${plan.name || ""} ${plan.code || ""} ${
-          plan.description || ""
-        }`.toLowerCase();
+        const searchText = [
+          plan.name,
+          plan.code,
+          plan.description,
+          ...featureArray(plan),
+        ]
+          .join(" ")
+          .toLowerCase();
 
-        const statusOk =
-          status === "all" ||
-          (status === "active" && plan.active !== false) ||
-          (status === "inactive" && plan.active === false);
+        const matchesStatus =
+          statusFilter === "all" ||
+          (statusFilter === "active" && plan.active !== false) ||
+          (statusFilter === "inactive" && plan.active === false);
 
-        const featureOk =
-          feature === "all" ||
-          Boolean(plan[feature as keyof PlanRow]);
+        const matchesFeature =
+          featureFilter === "all" ||
+          featureFlagFromPlan(plan, featureFilter);
 
-        const currencyOk = currency === "all" || (plan.currency || "GHS") === currency;
-        const searchOk = !term || haystack.includes(term);
+        const matchesCurrency =
+          currencyFilter === "all" ||
+          (plan.currency || "GHS") === currencyFilter;
 
-        return statusOk && featureOk && currencyOk && searchOk;
+        return (
+          matchesStatus &&
+          matchesFeature &&
+          matchesCurrency &&
+          (!term || searchText.includes(term))
+        );
       })
       .sort((a, b) => {
         if ((a.active !== false) !== (b.active !== false)) {
@@ -468,90 +683,90 @@ export default function DeveloperPlans({ navigate }: Props) {
 
         return Number(a.priceMonthly || 0) - Number(b.priceMonthly || 0);
       });
-  }, [plans, query, status, feature, currency]);
+  }, [plans, query, statusFilter, featureFilter, currencyFilter]);
 
-  const activePlans = useMemo(() => plans.filter((plan) => plan.active !== false), [plans]);
-  const inactivePlans = useMemo(() => plans.filter((plan) => plan.active === false), [plans]);
-
-  const freePlans = useMemo(
-    () =>
-      plans.filter(
-        (plan) => Number(plan.priceMonthly || 0) === 0 && Number(plan.priceYearly || 0) === 0
-      ),
-    [plans]
+  const activePlans = useMemo(
+    () => plans.filter((plan) => plan.active !== false),
+    [plans],
   );
 
-  const paidPlans = useMemo(() => plans.filter((plan) => !freePlans.includes(plan)), [plans, freePlans]);
+  const paidPlans = useMemo(
+    () =>
+      plans.filter(
+        (plan) =>
+          Number(plan.priceMonthly || 0) > 0 ||
+          Number(plan.priceTermly || 0) > 0 ||
+          Number(plan.priceYearly || 0) > 0,
+      ),
+    [plans],
+  );
 
   const averageMonthly = useMemo(() => {
     if (!paidPlans.length) return 0;
     return Math.round(
-      paidPlans.reduce((sum, plan) => sum + Number(plan.priceMonthly || 0), 0) / paidPlans.length
+      paidPlans.reduce(
+        (total, plan) => total + Number(plan.priceMonthly || 0),
+        0,
+      ) / paidPlans.length,
     );
   }, [paidPlans]);
 
-  const totalPotentialMonthly = useMemo(() => {
-    return subscriptions
-      .filter((sub) => ["active", "trial"].includes(String(sub.status || "").toLowerCase()))
-      .reduce((sum, sub) => {
-        const plan = sub.plan || plans.find((item) => item.id === sub.planId);
-        return sum + Number(plan?.priceMonthly || 0);
-      }, 0);
-  }, [subscriptions, plans]);
+  const potentialMrr = useMemo(
+    () =>
+      subscriptions
+        .filter((subscription) =>
+          ["active", "trial"].includes(
+            cleanText(subscription.status).toLowerCase(),
+          ),
+        )
+        .reduce((total, subscription) => {
+          const plan =
+            subscription.plan ||
+            plans.find((item) => item.id === subscription.planId);
+          return total + Number(plan?.priceMonthly || 0);
+        }, 0),
+    [plans, subscriptions],
+  );
 
-  // ======================================================
-  // CHART DATA
-  // ======================================================
+  const activeFilterCount = [
+    statusFilter !== "all",
+    featureFilter !== "all",
+    currencyFilter !== "all",
+  ].filter(Boolean).length;
 
-  const pricingChart = useMemo<ChartRow[]>(() => {
-    return [...plans]
-      .sort((a, b) => Number(a.priceMonthly || 0) - Number(b.priceMonthly || 0))
-      .map((plan) => ({
+  const featureCoverage = useMemo(
+    () =>
+      FEATURE_DEFINITIONS.map((feature) => ({
+        label: feature.label,
+        value: plans.filter((plan) =>
+          featureFlagFromPlan(plan, feature.key),
+        ).length,
+      })).sort((a, b) => b.value - a.value),
+    [plans],
+  );
+
+  const pricingChart = useMemo(
+    () =>
+      filteredPlans.map((plan) => ({
         label: plan.name || plan.code,
         monthly: Number(plan.priceMonthly || 0),
+        termly: Number(plan.priceTermly || 0),
         yearly: Number(plan.priceYearly || 0),
-        value: Number(plan.priceMonthly || 0),
-      }));
-  }, [plans]);
-
-  const usageChart = useMemo<ChartRow[]>(() => {
-    return plans
-      .map((plan) => ({
-        label: plan.name || plan.code,
-        subscriptions: planUsageCount(plan, subscriptions),
-        value: planUsageCount(plan, subscriptions),
-      }))
-      .sort((a, b) => b.value - a.value);
-  }, [plans, subscriptions]);
-
-  const featureCoverageChart = useMemo<ChartRow[]>(() => {
-    return FEATURE_FIELDS.map((field) => ({
-      label: field.label,
-      value: plans.filter((plan) => Boolean(plan[field.planKey])).length,
-    })).sort((a, b) => b.value - a.value);
-  }, [plans]);
-
-  const statusChart = useMemo<ChartRow[]>(() => {
-    return [
-      { label: "Active", value: activePlans.length },
-      { label: "Inactive", value: inactivePlans.length },
-    ];
-  }, [activePlans.length, inactivePlans.length]);
-
-  // ======================================================
-  // MUTATIONS
-  // ======================================================
+      })),
+    [filteredPlans],
+  );
 
   const openCreate = () => {
-    setError("");
-    setNotice("");
-    setForm(EMPTY_FORM);
+    setMessage(null);
+    setForm({
+      ...EMPTY_FORM,
+      features: { ...EMPTY_FORM.features },
+    });
     setFormOpen(true);
   };
 
   const openEdit = (plan: PlanRow) => {
-    setError("");
-    setNotice("");
+    setMessage(null);
     setForm(planToForm(plan));
     setFormOpen(true);
   };
@@ -559,7 +774,16 @@ export default function DeveloperPlans({ navigate }: Props) {
   const closeForm = () => {
     if (saving) return;
     setFormOpen(false);
-    setForm(EMPTY_FORM);
+  };
+
+  const updateFeature = (key: FeatureKey, value: boolean) => {
+    setForm((current) => ({
+      ...current,
+      features: {
+        ...current.features,
+        [key]: value,
+      },
+    }));
   };
 
   const savePlan = async (event: React.FormEvent) => {
@@ -568,89 +792,107 @@ export default function DeveloperPlans({ navigate }: Props) {
     const payload = formToPayload(form);
 
     if (!payload.name || !payload.code) {
-      setError("Plan name and code are required.");
+      setMessage({
+        tone: "error",
+        text: "Plan name and code are required.",
+      });
       return;
     }
 
     try {
       setSaving(true);
-      setError("");
-      setNotice("");
+      setMessage(null);
 
-      if (form.id) {
-        const updated = await apiClient<any>(`/billing/plans/${form.id}`, {
-          method: "PATCH",
-          body: JSON.stringify(payload),
-        });
+      const response = form.id
+        ? await apiClient<any>(`/billing/plans/${form.id}`, {
+            method: "PATCH",
+            body: payload,
+          })
+        : await apiClient<any>("/billing/plans", {
+            method: "POST",
+            body: payload,
+          });
 
-        const nextPlan = updated?.plan || updated?.data || updated;
+      const saved = normalizePlan(response);
 
-        setPlans((current) =>
-          current.map((plan) =>
-            plan.id === form.id ? { ...plan, ...(nextPlan || payload) } : plan
-          )
-        );
-
-        setNotice("Plan updated successfully.");
-      } else {
-        const created = await apiClient<any>("/billing/plans", {
-          method: "POST",
-          body: JSON.stringify(payload),
-        });
-
-        const nextPlan = created?.plan || created?.data || created;
-
-        if (nextPlan?.id) {
-          setPlans((current) => [nextPlan as PlanRow, ...current]);
-        } else {
-          await load(true);
-        }
-
-        setNotice("Plan created successfully.");
+      if (form.id && saved && saved.id !== form.id) {
+        throw new Error("The server returned a different plan after update.");
       }
 
-      closeForm();
-    } catch (err: any) {
-      setError(err?.message || "Could not save the plan.");
+      if (!form.id && !saved?.id) {
+        // Some endpoints return only `{ ok: true }`; reload is still authoritative.
+        await load(true);
+      } else {
+        await load(true);
+      }
+
+      setFormOpen(false);
+      setMessage({
+        tone: "success",
+        text: form.id
+          ? "Subscription plan updated successfully."
+          : "Subscription plan created successfully.",
+      });
+    } catch (error: any) {
+      setMessage({
+        tone: "error",
+        text: error?.message || "Could not save the subscription plan.",
+      });
     } finally {
       setSaving(false);
     }
   };
 
   const togglePlan = async (plan: PlanRow) => {
-    try {
-      setError("");
-      setNotice("");
+    const nextActive = plan.active === false;
 
-      const nextActive = !(plan.active !== false);
+    try {
+      setBusyPlanId(plan.id);
+      setMessage(null);
 
       await apiClient<any>(`/billing/plans/${plan.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ active: nextActive }),
+        body: { active: nextActive },
       });
 
-      setPlans((current) =>
-        current.map((item) => (item.id === plan.id ? { ...item, active: nextActive } : item))
-      );
+      await load(true);
 
-      setNotice(nextActive ? "Plan activated." : "Plan deactivated.");
-    } catch (err: any) {
-      setError(err?.message || "Could not update plan status.");
+      setMessage({
+        tone: "success",
+        text: nextActive ? "Plan activated." : "Plan deactivated.",
+      });
+    } catch (error: any) {
+      setMessage({
+        tone: "error",
+        text: error?.message || "Could not update plan status.",
+      });
+    } finally {
+      setBusyPlanId("");
     }
   };
 
-  // ======================================================
-  // STATES
-  // ======================================================
+  const resetFilters = () => {
+    setStatusFilter("all");
+    setFeatureFilter("all");
+    setCurrencyFilter("all");
+  };
 
   if (loading || accountLoading) {
     return (
-      <main className="devplans-page" style={{ "--dev-primary": primary } as React.CSSProperties}>
+      <main
+        className="dp-page"
+        style={
+          {
+            "--dp-primary": primary,
+            "--dp-primary-text": primaryText,
+          } as React.CSSProperties
+        }
+      >
         <style>{css}</style>
-        <section className="devplans-state">
-          <div className="devplans-spinner" />
-          <h2>Loading subscription plans...</h2>
-          <p>Preparing packages, pricing, feature limits and plan analytics.</p>
+        <section className="dp-loading">
+          <span className="dp-spinner" />
+          <h2>Loading subscription plans</h2>
+          <p>Preparing prices, limits and platform capabilities.</p>
         </section>
       </main>
     );
@@ -658,1528 +900,1769 @@ export default function DeveloperPlans({ navigate }: Props) {
 
   if (!authenticated || !accountId) {
     return (
-      <main className="devplans-page" style={{ "--dev-primary": primary } as React.CSSProperties}>
+      <main className="dp-page">
         <style>{css}</style>
-        <section className="devplans-state">
-          <h2>Developer access required</h2>
-          <p>Sign in with a developer account to manage platform subscription plans.</p>
-        </section>
+        <EmptyState
+          title="Developer access required"
+          description="Sign in with a developer workspace to manage platform plans."
+        />
       </main>
     );
   }
 
-  // ======================================================
-  // UI
-  // ======================================================
-
   return (
-    <main className="devplans-page" style={{ "--dev-primary": primary } as React.CSSProperties}>
+    <main
+      className="dp-page"
+      style={
+        {
+          "--dp-primary": primary,
+          "--dp-primary-text": primaryText,
+        } as React.CSSProperties
+      }
+    >
       <style>{css}</style>
 
-      <section className="devplans-hero">
-        <div>
-          <span className="devplans-eyebrow">SaaS control</span>
-          <h1>Subscription Packs</h1>
-          <p>
-            Create, compare and monitor plan packages for schools using Eleeveon. Switch between
-            mobile cards, desktop tables and pricing analytics.
-          </p>
-        </div>
-
-        <div className="devplans-hero-actions">
-          <div className="devplans-switch" role="tablist" aria-label="Plan view">
-            <button
-              type="button"
-              className={viewMode === "cards" ? "active" : ""}
-              onClick={() => setViewMode("cards")}
-            >
-              Cards
-            </button>
-            <button
-              type="button"
-              className={viewMode === "table" ? "active" : ""}
-              onClick={() => setViewMode("table")}
-            >
-              Table
-            </button>
-            <button
-              type="button"
-              className={viewMode === "analytics" ? "active" : ""}
-              onClick={() => setViewMode("analytics")}
-            >
-              Charts
-            </button>
-          </div>
-
-          <button type="button" className="devplans-white-btn" onClick={openCreate}>
-            Add Plan
-          </button>
-
-          <button
-            type="button"
-            className="devplans-glass-btn"
-            onClick={() => load(true)}
-            disabled={refreshing}
-          >
-            {refreshing ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-      </section>
-
-      {(error || notice) && (
-        <section className={`devplans-alert ${error ? "error" : "success"}`}>
-          {error || notice}
-        </section>
-      )}
-
-      <section className="devplans-stat-grid">
-        <StatCard label="Plans" value={plans.length} detail={`${activePlans.length} active`} icon="📦" />
-        <StatCard label="Paid Packs" value={paidPlans.length} detail={`${freePlans.length} free/trial`} icon="💳" />
-        <StatCard label="Average Price" value={money(averageMonthly)} detail="Average monthly paid pack" icon="📈" />
-        <StatCard label="Potential MRR" value={money(totalPotentialMonthly)} detail="From active/trial subscriptions" icon="💰" />
-      </section>
-
-      <section className="devplans-toolbar">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search plan name, code or description..."
-        />
-
-        <select value={status} onChange={(event) => setStatus(event.target.value)}>
-          <option value="all">All statuses</option>
-          <option value="active">Active only</option>
-          <option value="inactive">Inactive only</option>
-        </select>
-
-        <select value={feature} onChange={(event) => setFeature(event.target.value)}>
-          <option value="all">All features</option>
-          {FEATURE_FIELDS.map((item) => (
-            <option key={item.planKey} value={item.planKey}>
-              Has {item.label}
-            </option>
-          ))}
-        </select>
-
-        <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
-          <option value="all">All currencies</option>
-          {currencies.map((item) => (
-            <option key={item} value={item}>
-              {item}
-            </option>
-          ))}
-        </select>
-
-        <select
-          value={billingPreview}
-          onChange={(event) => setBillingPreview(event.target.value as BillingPreview)}
+      {message ? (
+        <Toast
+          tone={message.tone}
+          onClose={() => setMessage(null)}
         >
-          <option value="monthly">Monthly preview</option>
-          <option value="yearly">Yearly preview</option>
-        </select>
+          {message.text}
+        </Toast>
+      ) : null}
+
+      <section className="dp-toolbar">
+        <label className="dp-search">
+          <span>⌕</span>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search plans..."
+          />
+        </label>
 
         <button
           type="button"
-          onClick={() => {
-            setQuery("");
-            setStatus("all");
-            setFeature("all");
-            setCurrency("all");
-            setBillingPreview("monthly");
-          }}
+          className="dp-primary-action"
+          onClick={openCreate}
+          aria-label="Add subscription plan"
         >
-          Reset
+          +
+        </button>
+
+        <button
+          type="button"
+          className={`dp-icon-action ${activeFilterCount ? "active" : ""}`}
+          onClick={() => setFilterOpen(true)}
+          aria-label="Filter plans"
+        >
+          <span>≡</span>
+          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
+        </button>
+
+        <button
+          type="button"
+          className="dp-icon-action"
+          onClick={() => setMoreOpen(true)}
+          aria-label="More plan options"
+        >
+          ⋯
         </button>
       </section>
 
-      {viewMode === "analytics" ? (
-        <AnalyticsView
-          pricingChart={pricingChart}
-          usageChart={usageChart}
-          featureCoverageChart={featureCoverageChart}
-          statusChart={statusChart}
-        />
-      ) : viewMode === "table" ? (
-        <TableView
-          plans={filteredPlans}
-          subscriptions={subscriptions}
-          billingPreview={billingPreview}
-          onEdit={openEdit}
-          onToggle={togglePlan}
-        />
-      ) : (
-        <CardsView
-          plans={filteredPlans}
-          subscriptions={subscriptions}
-          billingPreview={billingPreview}
-          onEdit={openEdit}
-          onToggle={togglePlan}
-          navigate={navigate}
-        />
-      )}
+      <section className="dp-summary-grid">
+        <article>
+          <span>Plans</span>
+          <strong>{plans.length}</strong>
+          <small>{activePlans.length} active</small>
+        </article>
+        <article>
+          <span>Paid plans</span>
+          <strong>{paidPlans.length}</strong>
+          <small>{plans.length - paidPlans.length} free or trial</small>
+        </article>
+        <article>
+          <span>Average monthly</span>
+          <strong>{money(averageMonthly)}</strong>
+          <small>Across paid plans</small>
+        </article>
+        <article>
+          <span>Potential MRR</span>
+          <strong>{money(potentialMrr)}</strong>
+          <small>Active and trial subscriptions</small>
+        </article>
+      </section>
 
-      {formOpen && (
-        <PlanModal
-          form={form}
-          setForm={setForm}
-          saving={saving}
-          onClose={closeForm}
-          onSubmit={savePlan}
-        />
-      )}
+      {viewMode === "cards" ? (
+        filteredPlans.length ? (
+          <section className="dp-card-grid">
+            {filteredPlans.map((plan) => {
+              const enabled = FEATURE_DEFINITIONS.filter((feature) =>
+                featureFlagFromPlan(plan, feature.key),
+              );
+
+              const price =
+                billingPreview === "monthly"
+                  ? Number(plan.priceMonthly || 0)
+                  : billingPreview === "termly"
+                    ? Number(plan.priceTermly || 0)
+                    : Number(plan.priceYearly || 0);
+
+              return (
+                <article
+                  key={plan.id}
+                  className={`dp-plan-card ${
+                    plan.active === false ? "inactive" : ""
+                  }`}
+                >
+                  <header>
+                    <div className="dp-plan-mark">
+                      {String(plan.name || "P")
+                        .slice(0, 1)
+                        .toUpperCase()}
+                    </div>
+                    <div className="dp-plan-heading">
+                      <div className="dp-plan-title-row">
+                        <h3>{plan.name || "Untitled plan"}</h3>
+                        <span
+                          className={`dp-status-dot ${
+                            plan.active === false ? "inactive" : ""
+                          }`}
+                          title={plan.active === false ? "Inactive" : "Active"}
+                        />
+                      </div>
+                      <p>{plan.code || "no_code"}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="dp-card-more"
+                      onClick={() => openEdit(plan)}
+                      aria-label={`Edit ${plan.name}`}
+                    >
+                      ⋯
+                    </button>
+                  </header>
+
+                  <div className="dp-price-row">
+                    <strong>{money(price, plan.currency || "GHS")}</strong>
+                    <span>
+                      /{billingPreview === "monthly"
+                        ? "month"
+                        : billingPreview === "termly"
+                          ? "4 months"
+                          : "year"}
+                    </span>
+                  </div>
+
+                  <p className="dp-description">
+                    {plan.description || "No plan description has been added."}
+                  </p>
+
+                  <div className="dp-limit-row">
+                    <span>
+                      <b>{plan.maxStudents ?? "∞"}</b>
+                      students
+                    </span>
+                    <span>
+                      <b>{plan.maxBranches ?? "∞"}</b>
+                      branches
+                    </span>
+                    <span>
+                      <b>{plan.maxStorageMb ?? "∞"}</b>
+                      MB
+                    </span>
+                  </div>
+
+                  <div className="dp-feature-summary">
+                    <span>
+                      {enabled.slice(0, 5).map((feature) => (
+                        <i key={feature.key} title={feature.label}>
+                          {feature.icon}
+                        </i>
+                      ))}
+                    </span>
+                    <small>
+                      {enabled.length}/{FEATURE_DEFINITIONS.length} capabilities
+                    </small>
+                  </div>
+
+                  <footer>
+                    <span>{dateText(plan.updatedAt)}</span>
+                    <div>
+                      <button
+                        type="button"
+                        className="dp-secondary-button"
+                        onClick={() => openEdit(plan)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="dp-secondary-button"
+                        disabled={busyPlanId === plan.id}
+                        onClick={() => void togglePlan(plan)}
+                      >
+                        {busyPlanId === plan.id
+                          ? "Saving..."
+                          : plan.active === false
+                            ? "Activate"
+                            : "Deactivate"}
+                      </button>
+                    </div>
+                  </footer>
+                </article>
+              );
+            })}
+          </section>
+        ) : (
+          <EmptyState
+            title="No plans found"
+            description="Adjust the search or filters, or create a new subscription plan."
+          />
+        )
+      ) : null}
+
+      {viewMode === "table" ? (
+        <section className="dp-table-card">
+          <div className="dp-table-title">Plans ({filteredPlans.length})</div>
+          <div className="dp-table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Plan</th>
+                  <th>Monthly</th>
+                  <th>Termly</th>
+                  <th>Yearly</th>
+                  <th>Students</th>
+                  <th>Capabilities</th>
+                  <th>Status</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {filteredPlans.map((plan) => (
+                  <tr key={plan.id}>
+                    <td>
+                      <strong>{plan.name}</strong>
+                      <small>{plan.code}</small>
+                    </td>
+                    <td>{money(Number(plan.priceMonthly || 0), plan.currency)}</td>
+                    <td>{money(Number(plan.priceTermly || 0), plan.currency)}</td>
+                    <td>{money(Number(plan.priceYearly || 0), plan.currency)}</td>
+                    <td>{plan.maxStudents ?? "Unlimited"}</td>
+                    <td>
+                      {countEnabledFeatures(plan)}/{FEATURE_DEFINITIONS.length}
+                    </td>
+                    <td>
+                      <span className="dp-inline-status">
+                        <i
+                          className={
+                            plan.active === false ? "inactive" : "active"
+                          }
+                        />
+                        {plan.active === false ? "Inactive" : "Active"}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="dp-table-action"
+                        onClick={() => openEdit(plan)}
+                      >
+                        Edit
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {viewMode === "analytics" ? (
+        <section className="dp-analytics-grid">
+          <article className="dp-chart-card">
+            <header>
+              <div>
+                <h3>Plan pricing</h3>
+                <p>Monthly and yearly price comparison.</p>
+              </div>
+            </header>
+            <div className="dp-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={pricingChart}>
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    vertical={false}
+                    opacity={0.2}
+                  />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 11 }}
+                    interval={0}
+                    angle={-18}
+                    height={58}
+                  />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <Tooltip />
+                  <Bar
+                    dataKey="monthly"
+                    fill="var(--dp-primary)"
+                    radius={[5, 5, 0, 0]}
+                  />
+                  <Bar
+                    dataKey="termly"
+                    fill="#0f766e"
+                    radius={[5, 5, 0, 0]}
+                  />
+                  <Bar
+                    dataKey="yearly"
+                    fill="#64748b"
+                    radius={[5, 5, 0, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </article>
+
+          <article className="dp-chart-card">
+            <header>
+              <div>
+                <h3>Capability coverage</h3>
+                <p>How many plans include each platform capability.</p>
+              </div>
+            </header>
+            <div className="dp-coverage-list">
+              {featureCoverage.map((item) => (
+                <div key={item.label}>
+                  <span>{item.label}</span>
+                  <div>
+                    <i
+                      style={{
+                        width: `${
+                          plans.length
+                            ? Math.max(4, (item.value / plans.length) * 100)
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <b>{item.value}</b>
+                </div>
+              ))}
+            </div>
+          </article>
+        </section>
+      ) : null}
+
+      {filterOpen ? (
+        <div
+          className="dp-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setFilterOpen(false);
+          }}
+        >
+          <section className="dp-sheet dp-small-sheet">
+            <header className="dp-sheet-header">
+              <div>
+                <h2>Filter plans</h2>
+                <p>Narrow the list without changing saved data.</p>
+              </div>
+              <button type="button" onClick={() => setFilterOpen(false)}>
+                ×
+              </button>
+            </header>
+
+            <div className="dp-sheet-body">
+              <label className="dp-field">
+                <span>Status</span>
+                <select
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value)}
+                >
+                  <option value="all">All statuses</option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </label>
+
+              <label className="dp-field">
+                <span>Capability</span>
+                <select
+                  value={featureFilter}
+                  onChange={(event) =>
+                    setFeatureFilter(event.target.value as "all" | FeatureKey)
+                  }
+                >
+                  <option value="all">All capabilities</option>
+                  {FEATURE_DEFINITIONS.map((feature) => (
+                    <option key={feature.key} value={feature.key}>
+                      {feature.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="dp-field">
+                <span>Currency</span>
+                <select
+                  value={currencyFilter}
+                  onChange={(event) => setCurrencyFilter(event.target.value)}
+                >
+                  <option value="all">All currencies</option>
+                  {currencies.map((currency) => (
+                    <option key={currency} value={currency}>
+                      {currency}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <footer className="dp-sheet-footer">
+              <button
+                type="button"
+                className="dp-secondary-button"
+                onClick={resetFilters}
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                className="dp-primary-button"
+                onClick={() => setFilterOpen(false)}
+              >
+                Apply
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {moreOpen ? (
+        <div
+          className="dp-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setMoreOpen(false);
+          }}
+        >
+          <section className="dp-sheet dp-small-sheet">
+            <header className="dp-sheet-header">
+              <div>
+                <h2>Plan options</h2>
+                <p>Change view or refresh server data.</p>
+              </div>
+              <button type="button" onClick={() => setMoreOpen(false)}>
+                ×
+              </button>
+            </header>
+
+            <div className="dp-option-list">
+              {(["cards", "table", "analytics"] as ViewMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={viewMode === mode ? "active" : ""}
+                  onClick={() => {
+                    setViewMode(mode);
+                    setMoreOpen(false);
+                  }}
+                >
+                  <span>
+                    {mode === "cards"
+                      ? "▦"
+                      : mode === "table"
+                        ? "☷"
+                        : "⌁"}
+                  </span>
+                  <div>
+                    <strong>
+                      {mode === "cards"
+                        ? "Cards"
+                        : mode === "table"
+                          ? "Table"
+                          : "Analytics"}
+                    </strong>
+                    <small>
+                      {mode === "cards"
+                        ? "Compact plan cards"
+                        : mode === "table"
+                          ? "Dense comparison table"
+                          : "Pricing and coverage insights"}
+                    </small>
+                  </div>
+                  <i>{viewMode === mode ? "✓" : ""}</i>
+                </button>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setBillingPreview((current) =>
+                    current === "monthly"
+                      ? "termly"
+                      : current === "termly"
+                        ? "yearly"
+                        : "monthly",
+                  );
+                  setMoreOpen(false);
+                }}
+              >
+                <span>₵</span>
+                <div>
+                  <strong>
+                    Show{" "}
+                    {billingPreview === "monthly"
+                      ? "termly"
+                      : billingPreview === "termly"
+                        ? "yearly"
+                        : "monthly"} prices
+                  </strong>
+                  <small>Changes only the card price preview.</small>
+                </div>
+                <i />
+              </button>
+
+              <button
+                type="button"
+                disabled={refreshing}
+                onClick={() => {
+                  void load(true);
+                  setMoreOpen(false);
+                }}
+              >
+                <span>↻</span>
+                <div>
+                  <strong>{refreshing ? "Refreshing..." : "Refresh data"}</strong>
+                  <small>Reload plans and subscriptions from the server.</small>
+                </div>
+                <i />
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {formOpen ? (
+        <div
+          className="dp-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeForm();
+          }}
+        >
+          <form className="dp-sheet dp-editor-sheet" onSubmit={savePlan}>
+            <header className="dp-sheet-header">
+              <div>
+                <h2>{form.id ? "Edit plan" : "Create plan"}</h2>
+                <p>
+                  Pricing, limits and the complete Eleeveon capability package.
+                </p>
+              </div>
+              <button type="button" onClick={closeForm} disabled={saving}>
+                ×
+              </button>
+            </header>
+
+            <div className="dp-sheet-body dp-editor-body">
+              <section className="dp-form-section">
+                <div className="dp-section-title">
+                  <h3>Plan identity</h3>
+                  <p>Public name, internal code and description.</p>
+                </div>
+
+                <div className="dp-field-grid">
+                  <label className="dp-field">
+                    <span>Plan name *</span>
+                    <input
+                      value={form.name}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          name: event.target.value,
+                        }))
+                      }
+                      placeholder="Complete"
+                      required
+                    />
+                  </label>
+
+                  <label className="dp-field">
+                    <span>Plan code *</span>
+                    <input
+                      value={form.code}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          code: event.target.value,
+                        }))
+                      }
+                      placeholder="complete"
+                      required
+                    />
+                  </label>
+
+                  <label className="dp-field dp-field-wide">
+                    <span>Description</span>
+                    <textarea
+                      value={form.description}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          description: event.target.value,
+                        }))
+                      }
+                      placeholder="Describe who this plan is for."
+                      rows={3}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="dp-form-section">
+                <div className="dp-section-title">
+                  <h3>Pricing</h3>
+                  <p>Monthly, four-month termly and yearly prices shown to customers.</p>
+                </div>
+
+                <div className="dp-field-grid dp-three-columns">
+                  <label className="dp-field">
+                    <span>Currency</span>
+                    <input
+                      value={form.currency}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          currency: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="GHS"
+                    />
+                  </label>
+
+                  <label className="dp-field">
+                    <span>Monthly price</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={form.priceMonthly}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          priceMonthly: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="dp-field">
+                    <span>Termly price (4 months)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={form.priceTermly}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          priceTermly: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="dp-field">
+                    <span>Yearly price</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={form.priceYearly}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          priceYearly: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="dp-form-section">
+                <div className="dp-section-title">
+                  <h3>Usage limits</h3>
+                  <p>Leave a field blank for no configured limit.</p>
+                </div>
+
+                <div className="dp-field-grid dp-three-columns">
+                  {[
+                    ["maxSchools", "Schools"],
+                    ["maxBranches", "Branches"],
+                    ["maxUsers", "Users"],
+                    ["maxStudents", "Students"],
+                    ["maxTeachers", "Teachers"],
+                    ["maxStorageMb", "Storage (MB)"],
+                  ].map(([key, label]) => (
+                    <label className="dp-field" key={key}>
+                      <span>{label}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={form[key as keyof PlanFormState] as string}
+                        onChange={(event) =>
+                          setForm((current) => ({
+                            ...current,
+                            [key]: event.target.value,
+                          }))
+                        }
+                        placeholder="Unlimited"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section className="dp-form-section">
+                <div className="dp-section-title dp-feature-heading">
+                  <div>
+                    <h3>Platform capabilities</h3>
+                    <p>
+                      Includes websites, ID cards, attendance, safety and the
+                      wider system.
+                    </p>
+                  </div>
+                  <span>
+                    {
+                      FEATURE_DEFINITIONS.filter(
+                        (feature) => form.features[feature.key],
+                      ).length
+                    }
+                    /{FEATURE_DEFINITIONS.length}
+                  </span>
+                </div>
+
+                {(["Core", "People", "Operations", "Growth"] as const).map(
+                  (group) => (
+                    <div className="dp-feature-group" key={group}>
+                      <h4>{group}</h4>
+                      <div className="dp-feature-grid">
+                        {FEATURE_DEFINITIONS.filter(
+                          (feature) => feature.group === group,
+                        ).map((feature) => {
+                          const enabled = form.features[feature.key];
+
+                          return (
+                            <button
+                              key={feature.key}
+                              type="button"
+                              className={`dp-feature-option ${
+                                enabled ? "enabled" : ""
+                              }`}
+                              onClick={() =>
+                                updateFeature(feature.key, !enabled)
+                              }
+                            >
+                              <span className="dp-feature-icon">
+                                {feature.icon}
+                              </span>
+                              <span className="dp-feature-copy">
+                                <strong>{feature.label}</strong>
+                                <small>{feature.description}</small>
+                              </span>
+                              <span
+                                className={`dp-toggle ${
+                                  enabled ? "enabled" : ""
+                                }`}
+                              >
+                                <i />
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ),
+                )}
+              </section>
+
+              <section className="dp-form-section dp-status-section">
+                <div>
+                  <h3>Plan availability</h3>
+                  <p>
+                    Inactive plans remain available for history but cannot be
+                    newly selected.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={`dp-toggle dp-large-toggle ${
+                    form.active ? "enabled" : ""
+                  }`}
+                  onClick={() =>
+                    setForm((current) => ({
+                      ...current,
+                      active: !current.active,
+                    }))
+                  }
+                  aria-label={form.active ? "Deactivate plan" : "Activate plan"}
+                >
+                  <i />
+                </button>
+              </section>
+            </div>
+
+            <footer className="dp-sheet-footer">
+              <button
+                type="button"
+                className="dp-secondary-button"
+                onClick={closeForm}
+                disabled={saving}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="dp-primary-button"
+                disabled={saving}
+              >
+                {saving
+                  ? "Saving..."
+                  : form.id
+                    ? "Save changes"
+                    : "Create plan"}
+              </button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
     </main>
   );
 }
 
-// ======================================================
-// VIEWS
-// ======================================================
-
-function CardsView({
-  plans,
-  subscriptions,
-  billingPreview,
-  onEdit,
-  onToggle,
-  navigate,
-}: {
-  plans: PlanRow[];
-  subscriptions: SubscriptionRow[];
-  billingPreview: BillingPreview;
-  onEdit: (plan: PlanRow) => void;
-  onToggle: (plan: PlanRow) => void;
-  navigate?: (key: string) => void;
-}) {
-  return (
-    <section className="devplans-card-grid">
-      {plans.map((plan) => {
-        const price =
-          billingPreview === "yearly"
-            ? Number(plan.priceYearly || 0)
-            : Number(plan.priceMonthly || 0);
-
-        const usage = planUsageCount(plan, subscriptions);
-        const featureCount = countEnabledFeatures(plan);
-
-        return (
-          <article key={plan.id} className={`devplans-plan-card ${plan.active === false ? "inactive" : ""}`}>
-            <div className="devplans-plan-top">
-              <span className="devplans-plan-icon">📦</span>
-              <Chip tone={plan.active === false ? "gray" : "green"}>
-                {plan.active === false ? "Inactive" : "Active"}
-              </Chip>
-            </div>
-
-            <h2>{plan.name || "Unnamed plan"}</h2>
-            <p>{plan.description || "No description added yet."}</p>
-
-            <div className="devplans-price">
-              <strong>{money(price, plan.currency || "GHS")}</strong>
-              <span>/{billingPreview === "yearly" ? "year" : "month"}</span>
-            </div>
-
-            <div className="devplans-mini-grid">
-              <span>
-                <b>Code</b>
-                {plan.code}
-              </span>
-              <span>
-                <b>Usage</b>
-                {usage} subscriptions
-              </span>
-              <span>
-                <b>Features</b>
-                {featureCount}/{FEATURE_FIELDS.length}
-              </span>
-            </div>
-
-            <div className="devplans-feature-pills">
-              {FEATURE_FIELDS.filter((field) => Boolean(plan[field.planKey]))
-                .slice(0, 5)
-                .map((field) => (
-                  <span key={field.planKey}>
-                    {field.icon} {field.label}
-                  </span>
-                ))}
-
-              {featureCount > 5 && <span>+{featureCount - 5} more</span>}
-              {!featureCount && <span>No features enabled</span>}
-            </div>
-
-            <div className="devplans-actions">
-              <button type="button" onClick={() => onEdit(plan)}>
-                Edit
-              </button>
-              <button type="button" onClick={() => onToggle(plan)}>
-                {plan.active === false ? "Activate" : "Deactivate"}
-              </button>
-              <button type="button" onClick={() => navigate?.("subscriptions")}>
-                Usage
-              </button>
-            </div>
-          </article>
-        );
-      })}
-
-      {!plans.length && <Empty text="No plans match your filters." />}
-    </section>
-  );
-}
-
-function TableView({
-  plans,
-  subscriptions,
-  billingPreview,
-  onEdit,
-  onToggle,
-}: {
-  plans: PlanRow[];
-  subscriptions: SubscriptionRow[];
-  billingPreview: BillingPreview;
-  onEdit: (plan: PlanRow) => void;
-  onToggle: (plan: PlanRow) => void;
-}) {
-  return (
-    <section className="devplans-table-card">
-      <div className="devplans-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Plan</th>
-              <th>Code</th>
-              <th>Price</th>
-              <th>Limits</th>
-              <th>Features</th>
-              <th>Usage</th>
-              <th>Status</th>
-              <th>Updated</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-
-          <tbody>
-            {plans.map((plan) => (
-              <tr key={plan.id}>
-                <td>
-                  <strong>{plan.name}</strong>
-                  <small>{plan.description || "No description"}</small>
-                </td>
-                <td>{plan.code}</td>
-                <td>
-                  {money(
-                    billingPreview === "yearly"
-                      ? Number(plan.priceYearly || 0)
-                      : Number(plan.priceMonthly || 0),
-                    plan.currency || "GHS"
-                  )}
-                </td>
-                <td>
-                  {[
-                    plan.maxSchools != null ? `${plan.maxSchools} schools` : null,
-                    plan.maxBranches != null ? `${plan.maxBranches} branches` : null,
-                    plan.maxUsers != null ? `${plan.maxUsers} users` : null,
-                    plan.maxStudents != null ? `${plan.maxStudents} students` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || "Unlimited / not set"}
-                </td>
-                <td>{countEnabledFeatures(plan)}/{FEATURE_FIELDS.length}</td>
-                <td>{planUsageCount(plan, subscriptions)}</td>
-                <td>
-                  <Chip tone={plan.active === false ? "gray" : "green"}>
-                    {plan.active === false ? "Inactive" : "Active"}
-                  </Chip>
-                </td>
-                <td>{dateText(plan.updatedAt || plan.createdAt)}</td>
-                <td>
-                  <div className="devplans-table-actions">
-                    <button type="button" onClick={() => onEdit(plan)}>
-                      Edit
-                    </button>
-                    <button type="button" onClick={() => onToggle(plan)}>
-                      {plan.active === false ? "Activate" : "Deactivate"}
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {!plans.length && <Empty text="No plans match your filters." />}
-    </section>
-  );
-}
-
-function AnalyticsView({
-  pricingChart,
-  usageChart,
-  featureCoverageChart,
-  statusChart,
-}: {
-  pricingChart: ChartRow[];
-  usageChart: ChartRow[];
-  featureCoverageChart: ChartRow[];
-  statusChart: ChartRow[];
-}) {
-  return (
-    <section className="devplans-chart-grid">
-      <ChartCard
-        title="Plan pricing comparison"
-        description="Monthly and yearly price levels across your SaaS packages."
-      >
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={pricingChart}>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              fontSize={11}
-              tickFormatter={(value) => compactNumber(Number(value))}
-            />
-            <Tooltip formatter={(value) => money(Number(value))} />
-            <Bar dataKey="monthly" name="Monthly" fill="var(--dev-primary)" radius={[12, 12, 0, 0]} />
-            <Bar dataKey="yearly" name="Yearly" fill="#0f172a" radius={[12, 12, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </ChartCard>
-
-      <ChartCard
-        title="Plan adoption"
-        description="Subscriptions currently linked to each package."
-      >
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={usageChart} layout="vertical">
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-            <XAxis type="number" tickLine={false} axisLine={false} fontSize={11} allowDecimals={false} />
-            <YAxis type="category" dataKey="label" tickLine={false} axisLine={false} fontSize={11} width={96} />
-            <Tooltip />
-            <Bar dataKey="subscriptions" name="Subscriptions" fill="var(--dev-primary)" radius={[0, 12, 12, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </ChartCard>
-
-      <ChartCard
-        title="Feature coverage"
-        description="How many packages include each platform feature."
-      >
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={featureCoverageChart} layout="vertical">
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-            <XAxis type="number" tickLine={false} axisLine={false} fontSize={11} allowDecimals={false} />
-            <YAxis type="category" dataKey="label" tickLine={false} axisLine={false} fontSize={11} width={118} />
-            <Tooltip />
-            <Bar dataKey="value" name="Plans" fill="var(--dev-primary)" radius={[0, 12, 12, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </ChartCard>
-
-      <ChartCard title="Plan status" description="Active versus inactive packages.">
-        <ResponsiveContainer width="100%" height={280}>
-          <PieChart>
-            <Tooltip />
-            <Pie
-              data={statusChart}
-              dataKey="value"
-              nameKey="label"
-              innerRadius={62}
-              outerRadius={96}
-              paddingAngle={3}
-            >
-              {statusChart.map((_, index) => (
-                <Cell key={index} fill={chartColors[index % chartColors.length]} />
-              ))}
-            </Pie>
-          </PieChart>
-        </ResponsiveContainer>
-
-        <Legend rows={statusChart} />
-      </ChartCard>
-    </section>
-  );
-}
-
-// ======================================================
-// MODAL
-// ======================================================
-
-function PlanModal({
-  form,
-  setForm,
-  saving,
-  onClose,
-  onSubmit,
-}: {
-  form: PlanFormState;
-  setForm: React.Dispatch<React.SetStateAction<PlanFormState>>;
-  saving: boolean;
-  onClose: () => void;
-  onSubmit: (event: React.FormEvent) => void;
-}) {
-  const setField = <K extends keyof PlanFormState>(key: K, value: PlanFormState[K]) => {
-    setForm((current) => ({ ...current, [key]: value }));
-  };
-
-  return (
-    <div className="devplans-modal-backdrop" role="dialog" aria-modal="true">
-      <form className="devplans-modal" onSubmit={onSubmit}>
-        <div className="devplans-modal-head">
-          <div>
-            <h2>{form.id ? "Edit Subscription Pack" : "Create Subscription Pack"}</h2>
-            <p>Configure pricing, limits and feature access for this plan.</p>
-          </div>
-
-          <button type="button" onClick={onClose} disabled={saving} aria-label="Close">
-            ✕
-          </button>
-        </div>
-
-        <div className="devplans-form-grid">
-          <label>
-            Plan name
-            <input
-              value={form.name}
-              onChange={(event) => setField("name", event.target.value)}
-              placeholder="Starter"
-              required
-            />
-          </label>
-
-          <label>
-            Plan code
-            <input
-              value={form.code}
-              onChange={(event) => setField("code", event.target.value)}
-              placeholder="starter"
-              required
-            />
-          </label>
-
-          <label className="wide">
-            Description
-            <textarea
-              value={form.description}
-              onChange={(event) => setField("description", event.target.value)}
-              placeholder="Best for small schools starting with digital records."
-              rows={3}
-            />
-          </label>
-
-          <label>
-            Currency
-            <input
-              value={form.currency}
-              onChange={(event) => setField("currency", event.target.value.toUpperCase())}
-              placeholder="GHS"
-            />
-          </label>
-
-          <label>
-            Monthly price
-            <input
-              type="number"
-              min="0"
-              value={form.priceMonthly}
-              onChange={(event) => setField("priceMonthly", event.target.value)}
-            />
-          </label>
-
-          <label>
-            Yearly price
-            <input
-              type="number"
-              min="0"
-              value={form.priceYearly}
-              onChange={(event) => setField("priceYearly", event.target.value)}
-            />
-          </label>
-
-          <label>
-            Max schools
-            <input
-              type="number"
-              min="0"
-              value={form.maxSchools}
-              onChange={(event) => setField("maxSchools", event.target.value)}
-              placeholder="Unlimited"
-            />
-          </label>
-
-          <label>
-            Max branches
-            <input
-              type="number"
-              min="0"
-              value={form.maxBranches}
-              onChange={(event) => setField("maxBranches", event.target.value)}
-              placeholder="Unlimited"
-            />
-          </label>
-
-          <label>
-            Max users
-            <input
-              type="number"
-              min="0"
-              value={form.maxUsers}
-              onChange={(event) => setField("maxUsers", event.target.value)}
-              placeholder="Unlimited"
-            />
-          </label>
-
-          <label>
-            Max students
-            <input
-              type="number"
-              min="0"
-              value={form.maxStudents}
-              onChange={(event) => setField("maxStudents", event.target.value)}
-              placeholder="Unlimited"
-            />
-          </label>
-
-          <label>
-            Max teachers
-            <input
-              type="number"
-              min="0"
-              value={form.maxTeachers}
-              onChange={(event) => setField("maxTeachers", event.target.value)}
-              placeholder="Unlimited"
-            />
-          </label>
-
-          <label>
-            Storage MB
-            <input
-              type="number"
-              min="0"
-              value={form.maxStorageMb}
-              onChange={(event) => setField("maxStorageMb", event.target.value)}
-              placeholder="Unlimited"
-            />
-          </label>
-        </div>
-
-        <section className="devplans-feature-editor">
-          <h3>Feature access</h3>
-
-          <div>
-            {FEATURE_FIELDS.map((item) => (
-              <label key={item.key} className="devplans-feature-toggle">
-                <input
-                  type="checkbox"
-                  checked={Boolean(form[item.key])}
-                  onChange={(event) => setField(item.key, event.target.checked as any)}
-                />
-
-                <span>
-                  <b>
-                    {item.icon} {item.label}
-                  </b>
-                  <small>{item.description}</small>
-                </span>
-              </label>
-            ))}
-
-            <label className="devplans-feature-toggle important">
-              <input
-                type="checkbox"
-                checked={form.active}
-                onChange={(event) => setField("active", event.target.checked)}
-              />
-
-              <span>
-                <b>✅ Active plan</b>
-                <small>Inactive plans can stay saved without being sold.</small>
-              </span>
-            </label>
-          </div>
-        </section>
-
-        <div className="devplans-modal-actions">
-          <button type="button" onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-
-          <button type="submit" disabled={saving}>
-            {saving ? "Saving..." : form.id ? "Save Changes" : "Create Plan"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-// ======================================================
-// SMALL COMPONENTS
-// ======================================================
-
-function StatCard({
-  label,
-  value,
-  detail,
-  icon,
-}: {
-  label: string;
-  value: string | number;
-  detail: string;
-  icon: string;
-}) {
-  return (
-    <article className="devplans-stat">
-      <span>
-        {label}
-        <b>{icon}</b>
-      </span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </article>
-  );
-}
-
-function Chip({
-  children,
-  tone = "gray",
-}: {
-  children: React.ReactNode;
-  tone?: Tone;
-}) {
-  return <span className={`devplans-chip ${tone}`}>{children}</span>;
-}
-
-function Empty({ text }: { text: string }) {
-  return <div className="devplans-empty">{text}</div>;
-}
-
-function ChartCard({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="devplans-chart-card">
-      <h2>{title}</h2>
-      <p>{description}</p>
-      <div className="devplans-chart-shell">{children}</div>
-    </section>
-  );
-}
-
-function Legend({ rows }: { rows: ChartRow[] }) {
-  return (
-    <div className="devplans-legend">
-      {rows.map((row, index) => (
-        <span key={row.label}>
-          <i style={{ background: chartColors[index % chartColors.length] }} />
-          {row.label}: {row.value}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// ======================================================
-// CSS
-// ======================================================
-
-const css = `
-@keyframes devplansSpin { to { transform: rotate(360deg); } }
-
-.devplans-page {
-  min-height: 100dvh;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  padding: 8px;
-  padding-bottom: max(28px, env(safe-area-inset-bottom));
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--dev-primary) 10%, transparent), transparent 34rem),
-    var(--bg, #f8fafc);
-  color: var(--text, #0f172a);
-  font-family: var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  overflow-x: hidden;
-}
-
-.devplans-page *,
-.devplans-page *::before,
-.devplans-page *::after {
-  box-sizing: border-box;
-}
-
-.devplans-page button,
-.devplans-page input,
-.devplans-page select,
-.devplans-page textarea {
-  font: inherit;
-  max-width: 100%;
-}
-
-.devplans-page button {
-  -webkit-tap-highlight-color: transparent;
-}
-
-.devplans-state {
-  min-height: min(420px, calc(100dvh - 32px));
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 10px;
-  width: min(520px, 100%);
-  margin: 0 auto;
-  padding: 22px;
-  border-radius: 28px;
-  background: var(--surface, #ffffff);
-  border: 1px solid rgba(148, 163, 184, .22);
-  box-shadow: 0 24px 70px rgba(15, 23, 42, .08);
-  text-align: center;
-}
-
-.devplans-state h2 {
-  margin: 0;
-  font-size: clamp(18px, 5vw, 24px);
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.devplans-state p {
-  max-width: 34rem;
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.devplans-spinner {
-  width: 38px;
-  height: 38px;
-  border-radius: 999px;
-  border: 4px solid color-mix(in srgb, var(--dev-primary) 18%, transparent);
-  border-top-color: var(--dev-primary);
-  animation: devplansSpin .8s linear infinite;
-}
-
-.devplans-hero {
-  display: grid;
-  gap: 16px;
-  border-radius: 30px;
-  padding: 18px;
-  color: #fff;
-  background:
-    radial-gradient(circle at 20% 10%, rgba(255, 255, 255, .18), transparent 20rem),
-    linear-gradient(135deg, var(--dev-primary), #0f172a 72%);
-  box-shadow: 0 24px 70px rgba(15, 23, 42, .18);
-  overflow: hidden;
-}
-
-.devplans-eyebrow {
-  display: inline-flex;
-  font-size: 11px;
-  font-weight: 1000;
-  text-transform: uppercase;
-  letter-spacing: .14em;
-  opacity: .82;
-}
-
-.devplans-hero h1 {
-  margin: 8px 0 0;
-  font-size: clamp(28px, 8vw, 44px);
-  line-height: 1.02;
-  font-weight: 1000;
-  letter-spacing: -.07em;
-}
-
-.devplans-hero p {
-  max-width: 760px;
-  margin: 10px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
-  opacity: .9;
-}
-
-.devplans-hero-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.devplans-switch {
-  display: inline-flex;
-  gap: 5px;
-  padding: 5px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .14);
-  border: 1px solid rgba(255, 255, 255, .2);
-  backdrop-filter: blur(14px);
-}
-
-.devplans-switch button {
-  min-height: 34px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 11px;
-  background: transparent;
-  color: rgba(255, 255, 255, .75);
-  font-size: 12px;
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.devplans-switch button.active {
-  background: #fff;
-  color: #0f172a;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, .16);
-}
-
-.devplans-white-btn,
-.devplans-glass-btn {
-  min-height: 40px;
-  border-radius: 999px;
-  padding: 0 13px;
-  font-size: 12px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.devplans-white-btn {
-  border: 0;
-  background: #fff;
-  color: #0f172a;
-}
-
-.devplans-glass-btn {
-  border: 1px solid rgba(255, 255, 255, .28);
-  background: rgba(255, 255, 255, .14);
-  color: #fff;
-}
-
-.devplans-glass-btn:disabled {
-  opacity: .7;
-  cursor: not-allowed;
-}
-
-.devplans-alert {
-  margin-top: 10px;
-  padding: 12px 14px;
-  border-radius: 20px;
-  font-size: 13px;
-  font-weight: 850;
-}
-
-.devplans-alert.error {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.devplans-alert.success {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.devplans-stat-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.devplans-stat {
-  border: 1px solid rgba(148, 163, 184, .22);
-  border-radius: 24px;
-  padding: 16px;
-  background: var(--surface, #fff);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, .06);
-}
-
-.devplans-stat span {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.devplans-stat strong {
-  display: block;
-  margin-top: 8px;
-  font-size: clamp(24px, 8vw, 34px);
-  line-height: 1;
-  font-weight: 1000;
-  letter-spacing: -.06em;
-  overflow-wrap: anywhere;
-}
-
-.devplans-stat small {
-  display: block;
-  margin-top: 8px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.devplans-toolbar {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 10px;
-  border-radius: 24px;
-  background: var(--surface, #fff);
-  border: 1px solid rgba(148, 163, 184, .22);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, .05);
-}
-
-.devplans-toolbar input,
-.devplans-toolbar select {
-  min-height: 42px;
-  width: 100%;
-  border: 1px solid rgba(148, 163, 184, .3);
-  border-radius: 16px;
-  padding: 0 12px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.devplans-toolbar button {
-  min-height: 42px;
-  border: 0;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--dev-primary) 10%, white);
-  color: var(--dev-primary);
-  font-size: 13px;
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.devplans-card-grid,
-.devplans-chart-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.devplans-plan-card,
-.devplans-chart-card,
-.devplans-table-card {
-  min-width: 0;
-  border: 1px solid rgba(148, 163, 184, .22);
-  border-radius: 26px;
-  padding: 14px;
-  background: var(--surface, #fff);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, .06);
-}
-
-.devplans-plan-card.inactive {
-  opacity: .74;
-}
-
-.devplans-plan-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.devplans-plan-icon {
-  width: 42px;
-  height: 42px;
-  border-radius: 18px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, var(--dev-primary), #0f172a);
-  color: #fff;
-  font-weight: 1000;
-}
-
-.devplans-plan-card h2 {
-  margin: 14px 0 0;
-  font-size: 20px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.devplans-plan-card p {
-  margin: 6px 0 0;
-  min-height: 38px;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.devplans-price {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  margin-top: 14px;
-}
-
-.devplans-price strong {
-  font-size: clamp(26px, 9vw, 38px);
-  line-height: .92;
-  font-weight: 1000;
-  letter-spacing: -.07em;
-  overflow-wrap: anywhere;
-}
-
-.devplans-price span {
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.devplans-mini-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.devplans-mini-grid span {
-  padding: 10px;
-  border-radius: 16px;
-  background: #f8fafc;
-  color: #0f172a;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.devplans-mini-grid b {
-  display: block;
-  color: var(--muted, #64748b);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  margin-bottom: 3px;
-}
-
-.devplans-feature-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 14px;
-}
-
-.devplans-feature-pills span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 9px;
-  border-radius: 999px;
-  background: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, .18);
-  color: #475569;
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.devplans-actions,
-.devplans-table-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.devplans-actions {
-  margin-top: 14px;
-}
-
-.devplans-actions button,
-.devplans-table-actions button {
-  min-height: 38px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 12px;
-  background: color-mix(in srgb, var(--dev-primary) 10%, white);
-  color: var(--dev-primary);
-  font-size: 12px;
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.devplans-actions button:first-child,
-.devplans-table-actions button:first-child {
-  background: var(--dev-primary);
-  color: #fff;
-}
-
-.devplans-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 1000;
-  white-space: nowrap;
-}
-
-.devplans-chip.green { background: #dcfce7; color: #166534; }
-.devplans-chip.blue { background: #dbeafe; color: #1d4ed8; }
-.devplans-chip.purple { background: #f3e8ff; color: #7e22ce; }
-.devplans-chip.orange { background: #ffedd5; color: #c2410c; }
-.devplans-chip.red { background: #fee2e2; color: #b91c1c; }
-.devplans-chip.gray { background: #f1f5f9; color: #475569; }
-
-.devplans-table-wrap {
-  width: 100%;
-  overflow-x: auto;
-}
-
-.devplans-table-wrap table {
-  width: 100%;
-  min-width: 1000px;
-  border-collapse: collapse;
-}
-
-.devplans-table-wrap th {
-  text-align: left;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  padding: 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, .22);
-}
-
-.devplans-table-wrap td {
-  padding: 12px 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, .16);
-  font-size: 13px;
-  vertical-align: top;
-}
-
-.devplans-table-wrap strong {
-  display: block;
-  font-weight: 1000;
-}
-
-.devplans-table-wrap small {
-  display: block;
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.devplans-chart-card h2 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.devplans-chart-card p {
-  margin: 5px 0 10px;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.devplans-chart-shell {
-  min-width: 0;
-  width: 100%;
-}
-
-.devplans-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding-top: 8px;
-}
-
-.devplans-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  border-radius: 999px;
-  padding: 0 9px;
-  background: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, .18);
-  color: #475569;
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.devplans-legend i {
-  width: 9px;
-  height: 9px;
-  border-radius: 999px;
-}
-
-.devplans-empty {
-  grid-column: 1 / -1;
-  margin: 0;
-  padding: 18px;
-  border-radius: 20px;
-  background: #f8fafc;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  text-align: center;
-  border: 1px dashed rgba(148, 163, 184, .35);
-}
-
-.devplans-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: grid;
-  place-items: end center;
-  padding: 10px;
-  background: rgba(15, 23, 42, .58);
-  backdrop-filter: blur(12px);
-}
-
-.devplans-modal {
-  width: min(980px, 100%);
-  max-height: min(92dvh, 920px);
-  overflow-y: auto;
-  border-radius: 28px;
-  background: var(--surface, #fff);
-  box-shadow: 0 30px 100px rgba(15, 23, 42, .35);
-  border: 1px solid rgba(255, 255, 255, .24);
-  padding: 14px;
-}
-
-.devplans-modal-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 4px 14px;
-}
-
-.devplans-modal-head h2 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.devplans-modal-head p {
-  margin: 5px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.devplans-modal-head button {
-  width: 38px;
-  height: 38px;
-  border: 0;
-  border-radius: 999px;
-  background: #f1f5f9;
-  color: #0f172a;
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.devplans-form-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-}
-
-.devplans-form-grid label,
-.devplans-feature-editor {
-  display: grid;
-  gap: 6px;
-  color: #334155;
-  font-size: 12px;
-  font-weight: 950;
-}
-
-.devplans-form-grid input,
-.devplans-form-grid textarea {
-  width: 100%;
-  border: 1px solid rgba(148, 163, 184, .32);
-  border-radius: 16px;
-  background: #fff;
-  color: #0f172a;
-  padding: 11px 12px;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.devplans-form-grid input {
-  min-height: 42px;
-}
-
-.devplans-form-grid textarea {
-  resize: vertical;
-}
-
-.devplans-feature-editor {
-  margin-top: 12px;
-  padding: 12px;
-  border-radius: 22px;
-  background: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, .18);
-}
-
-.devplans-feature-editor h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 1000;
-  letter-spacing: -.03em;
-}
-
-.devplans-feature-editor > div {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.devplans-feature-toggle {
-  display: grid !important;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 10px !important;
-  padding: 10px;
-  border-radius: 18px;
-  background: #fff;
-  border: 1px solid rgba(148, 163, 184, .18);
-}
-
-.devplans-feature-toggle.important {
-  background: color-mix(in srgb, var(--dev-primary) 8%, white);
-}
-
-.devplans-feature-toggle input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--dev-primary);
-}
-
-.devplans-feature-toggle b {
-  display: block;
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 1000;
-}
-
-.devplans-feature-toggle small {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.devplans-modal-actions {
-  position: sticky;
-  bottom: -14px;
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 12px 0 2px;
-  background: linear-gradient(to top, var(--surface, #fff) 70%, transparent);
-}
-
-.devplans-modal-actions button {
-  min-height: 42px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 14px;
-  font-size: 12px;
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.devplans-modal-actions button:first-child {
-  background: #f1f5f9;
-  color: #0f172a;
-}
-
-.devplans-modal-actions button:last-child {
-  background: var(--dev-primary);
-  color: #fff;
-}
-
-.devplans-modal-actions button:disabled {
-  opacity: .65;
-  cursor: not-allowed;
-}
-
-@media (min-width: 520px) {
-  .devplans-stat-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+const css = String.raw`
+  .dp-page {
+    --dp-bg: var(--bg, #f6f7fb);
+    --dp-card: var(--card, #ffffff);
+    --dp-surface: var(--surface, #ffffff);
+    --dp-text: var(--text, #111827);
+    --dp-muted: var(--muted, #6b7280);
+    --dp-border: var(--border, #e5e7eb);
+    --dp-soft: color-mix(in srgb, var(--dp-primary) 8%, var(--dp-card));
+    --dp-muted-dot: color-mix(in srgb, var(--dp-muted) 28%, transparent);
+    min-height: 100%;
+    color: var(--dp-text);
   }
 
-  .devplans-toolbar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  * { box-sizing: border-box; }
+
+  button, input, select, textarea { font: inherit; }
+
+  button { color: inherit; }
+
+  .dp-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 42px 42px 42px;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
   }
 
-  .devplans-mini-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .dp-search {
+    min-width: 0;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 13px;
+    border: 1px solid var(--dp-border);
+    border-radius: 13px;
+    background: var(--dp-card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
   }
 
-  .devplans-feature-editor > div {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 760px) {
-  .devplans-card-grid,
-  .devplans-chart-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .dp-search span {
+    color: var(--dp-muted);
+    font-size: 19px;
+    line-height: 1;
   }
 
-  .devplans-form-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .dp-search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--dp-text);
   }
 
-  .devplans-form-grid .wide {
-    grid-column: 1 / -1;
-  }
+  .dp-search input::placeholder { color: var(--dp-muted); }
 
-  .devplans-modal-backdrop {
+  .dp-primary-action,
+  .dp-icon-action {
+    width: 42px;
+    height: 42px;
+    border-radius: 13px;
+    display: grid;
     place-items: center;
-    padding: 18px;
+    border: 1px solid var(--dp-border);
+    cursor: pointer;
+    position: relative;
+    transition: .18s ease;
   }
 
-  .devplans-modal {
-    padding: 18px;
-  }
-}
-
-@media (min-width: 920px) {
-  .devplans-page {
-    padding: 14px;
+  .dp-primary-action {
+    background: var(--dp-primary);
+    border-color: var(--dp-primary);
+    color: var(--dp-primary-text);
+    font-size: 24px;
+    box-shadow: 0 7px 18px color-mix(in srgb, var(--dp-primary) 24%, transparent);
   }
 
-  .devplans-hero {
-    grid-template-columns: 1fr auto;
-    align-items: end;
-    padding: 24px;
+  .dp-icon-action {
+    background: var(--dp-card);
+    color: var(--dp-text);
+    font-size: 20px;
   }
 
-  .devplans-stat-grid {
+  .dp-icon-action.active {
+    color: var(--dp-primary-text);
+    background: var(--dp-primary);
+    border-color: var(--dp-primary);
+  }
+
+  .dp-icon-action b {
+    position: absolute;
+    top: -5px;
+    right: -4px;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 4px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 10px;
+    border: 2px solid var(--dp-bg);
+  }
+
+  .dp-summary-grid {
+    display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 9px;
+    margin-bottom: 12px;
   }
 
-  .devplans-toolbar {
-    grid-template-columns: minmax(240px, 2fr) repeat(4, minmax(130px, 1fr)) auto;
+  .dp-summary-grid article {
+    min-width: 0;
+    padding: 13px 14px;
+    border: 1px solid var(--dp-border);
+    border-radius: 14px;
+    background: var(--dp-card);
   }
-}
 
-@media (min-width: 1180px) {
-  .devplans-card-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .dp-summary-grid span,
+  .dp-summary-grid small {
+    display: block;
+    color: var(--dp-muted);
+    font-size: 11px;
   }
-}
+
+  .dp-summary-grid strong {
+    display: block;
+    margin: 4px 0 3px;
+    font-size: clamp(16px, 2vw, 21px);
+    line-height: 1.1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dp-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+  }
+
+  .dp-plan-card {
+    min-width: 0;
+    padding: 15px;
+    border: 1px solid var(--dp-border);
+    border-radius: 17px;
+    background: var(--dp-card);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, .035);
+  }
+
+  .dp-plan-card.inactive { opacity: .7; }
+
+  .dp-plan-card > header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .dp-plan-mark {
+    width: 38px;
+    height: 38px;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    border-radius: 12px;
+    color: var(--dp-primary-text);
+    background: var(--dp-primary);
+    font-weight: 800;
+  }
+
+  .dp-plan-heading { min-width: 0; flex: 1; }
+
+  .dp-plan-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dp-plan-title-row h3 {
+    min-width: 0;
+    margin: 0;
+    font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-plan-heading p {
+    margin: 3px 0 0;
+    color: var(--dp-muted);
+    font-size: 11px;
+  }
+
+  .dp-status-dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: #16a34a;
+  }
+
+  .dp-status-dot.inactive { background: #94a3b8; }
+
+  .dp-card-more {
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--dp-muted);
+    cursor: pointer;
+    font-size: 20px;
+  }
+
+  .dp-card-more:hover { background: var(--dp-soft); }
+
+  .dp-price-row {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    margin-top: 15px;
+  }
+
+  .dp-price-row strong { font-size: 24px; letter-spacing: -.03em; }
+
+  .dp-price-row span {
+    color: var(--dp-muted);
+    font-size: 12px;
+  }
+
+  .dp-description {
+    min-height: 38px;
+    margin: 8px 0 13px;
+    color: var(--dp-muted);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  .dp-limit-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 7px;
+  }
+
+  .dp-limit-row span {
+    min-width: 0;
+    padding: 8px;
+    border-radius: 10px;
+    background: var(--dp-soft);
+    color: var(--dp-muted);
+    font-size: 10px;
+    text-align: center;
+  }
+
+  .dp-limit-row b {
+    display: block;
+    color: var(--dp-text);
+    font-size: 12px;
+    margin-bottom: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dp-feature-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 13px;
+  }
+
+  .dp-feature-summary > span {
+    display: flex;
+    align-items: center;
+  }
+
+  .dp-feature-summary i {
+    width: 25px;
+    height: 25px;
+    margin-left: -4px;
+    display: grid;
+    place-items: center;
+    border: 2px solid var(--dp-card);
+    border-radius: 999px;
+    background: var(--dp-soft);
+    color: var(--dp-primary);
+    font-size: 10px;
+    font-style: normal;
+    font-weight: 800;
+  }
+
+  .dp-feature-summary i:first-child { margin-left: 0; }
+
+  .dp-feature-summary small { color: var(--dp-muted); font-size: 10px; }
+
+  .dp-plan-card > footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--dp-border);
+  }
+
+  .dp-plan-card > footer > span {
+    color: var(--dp-muted);
+    font-size: 10px;
+  }
+
+  .dp-plan-card > footer > div { display: flex; gap: 6px; }
+
+  .dp-secondary-button,
+  .dp-primary-button {
+    min-height: 36px;
+    padding: 0 13px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 12px;
+    transition: .18s ease;
+  }
+
+  .dp-secondary-button {
+    border: 1px solid var(--dp-border);
+    background: var(--dp-card);
+    color: var(--dp-text);
+  }
+
+  .dp-primary-button {
+    border: 1px solid var(--dp-primary);
+    background: var(--dp-primary);
+    color: var(--dp-primary-text);
+    box-shadow: 0 6px 16px color-mix(in srgb, var(--dp-primary) 20%, transparent);
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: .58;
+  }
+
+  .dp-table-card,
+  .dp-chart-card {
+    border: 1px solid var(--dp-border);
+    border-radius: 17px;
+    background: var(--dp-card);
+    overflow: hidden;
+  }
+
+  .dp-table-title {
+    padding: 13px 15px;
+    border-bottom: 1px solid var(--dp-border);
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .dp-table-scroll { overflow: auto; }
+
+  .dp-table-scroll table {
+    width: 100%;
+    min-width: 830px;
+    border-collapse: collapse;
+  }
+
+  .dp-table-scroll th,
+  .dp-table-scroll td {
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--dp-border);
+    text-align: left;
+    font-size: 12px;
+  }
+
+  .dp-table-scroll th {
+    color: var(--dp-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+  }
+
+  .dp-table-scroll td strong,
+  .dp-table-scroll td small {
+    display: block;
+  }
+
+  .dp-table-scroll td small {
+    margin-top: 3px;
+    color: var(--dp-muted);
+    font-size: 10px;
+  }
+
+  .dp-inline-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .dp-inline-status i {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+  }
+
+  .dp-inline-status i.active { background: #16a34a; }
+  .dp-inline-status i.inactive { background: #94a3b8; }
+
+  .dp-table-action {
+    border: 0;
+    background: transparent;
+    color: var(--dp-primary);
+    cursor: pointer;
+    font-weight: 800;
+  }
+
+  .dp-analytics-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(300px, .9fr);
+    gap: 10px;
+  }
+
+  .dp-chart-card { padding: 15px; }
+
+  .dp-chart-card header h3 {
+    margin: 0;
+    font-size: 14px;
+  }
+
+  .dp-chart-card header p {
+    margin: 4px 0 0;
+    color: var(--dp-muted);
+    font-size: 11px;
+  }
+
+  .dp-chart { height: 340px; margin-top: 12px; }
+
+  .dp-coverage-list {
+    margin-top: 15px;
+    display: grid;
+    gap: 10px;
+  }
+
+  .dp-coverage-list > div {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(90px, 1.4fr) 24px;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .dp-coverage-list > div > div {
+    height: 7px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--dp-soft);
+  }
+
+  .dp-coverage-list i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--dp-primary);
+  }
+
+  .dp-coverage-list b { text-align: right; }
+
+  .dp-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    justify-content: flex-end;
+    background: rgba(15, 23, 42, .36);
+    backdrop-filter: blur(3px);
+  }
+
+  .dp-sheet {
+    width: min(760px, 100%);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--dp-border);
+    background: var(--dp-bg);
+    box-shadow: -18px 0 45px rgba(15, 23, 42, .18);
+  }
+
+  .dp-small-sheet { width: min(390px, 100%); }
+
+  .dp-sheet-header,
+  .dp-sheet-footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 16px;
+    background: var(--dp-card);
+  }
+
+  .dp-sheet-header { border-bottom: 1px solid var(--dp-border); }
+  .dp-sheet-footer { border-top: 1px solid var(--dp-border); justify-content: flex-end; }
+
+  .dp-sheet-header h2 {
+    margin: 0;
+    font-size: 16px;
+  }
+
+  .dp-sheet-header p {
+    margin: 3px 0 0;
+    color: var(--dp-muted);
+    font-size: 11px;
+  }
+
+  .dp-sheet-header > button {
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--dp-border);
+    border-radius: 11px;
+    background: var(--dp-card);
+    cursor: pointer;
+    font-size: 20px;
+  }
+
+  .dp-sheet-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 15px;
+  }
+
+  .dp-editor-body { display: grid; gap: 10px; }
+
+  .dp-form-section {
+    padding: 15px;
+    border: 1px solid var(--dp-border);
+    border-radius: 16px;
+    background: var(--dp-card);
+  }
+
+  .dp-section-title h3,
+  .dp-status-section h3 {
+    margin: 0;
+    font-size: 14px;
+  }
+
+  .dp-section-title p,
+  .dp-status-section p {
+    margin: 4px 0 0;
+    color: var(--dp-muted);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .dp-field-grid {
+    margin-top: 13px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .dp-three-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+  .dp-field-wide { grid-column: 1 / -1; }
+
+  .dp-field {
+    display: grid;
+    gap: 6px;
+  }
+
+  .dp-field > span {
+    color: var(--dp-muted);
+    font-size: 10px;
+    font-weight: 800;
+  }
+
+  .dp-field input,
+  .dp-field select,
+  .dp-field textarea {
+    width: 100%;
+    min-height: 40px;
+    border: 1px solid var(--dp-border);
+    border-radius: 11px;
+    outline: 0;
+    padding: 9px 11px;
+    background: var(--dp-surface);
+    color: var(--dp-text);
+    font-size: 12px;
+  }
+
+  .dp-field textarea { resize: vertical; }
+
+  .dp-field input:focus,
+  .dp-field select:focus,
+  .dp-field textarea:focus {
+    border-color: var(--dp-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--dp-primary) 12%, transparent);
+  }
+
+  .dp-feature-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .dp-feature-heading > span {
+    flex: 0 0 auto;
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: var(--dp-soft);
+    color: var(--dp-primary);
+    font-size: 10px;
+    font-weight: 800;
+  }
+
+  .dp-feature-group { margin-top: 15px; }
+
+  .dp-feature-group h4 {
+    margin: 0 0 8px;
+    color: var(--dp-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+
+  .dp-feature-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .dp-feature-option {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    padding: 10px;
+    border: 1px solid var(--dp-border);
+    border-radius: 13px;
+    background: var(--dp-surface);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .dp-feature-option.enabled {
+    border-color: color-mix(in srgb, var(--dp-primary) 38%, var(--dp-border));
+    background: var(--dp-soft);
+  }
+
+  .dp-feature-icon {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    background: var(--dp-card);
+    color: var(--dp-primary);
+    font-weight: 800;
+    font-size: 12px;
+  }
+
+  .dp-feature-copy { min-width: 0; }
+
+  .dp-feature-copy strong,
+  .dp-feature-copy small {
+    display: block;
+  }
+
+  .dp-feature-copy strong { font-size: 11px; }
+
+  .dp-feature-copy small {
+    margin-top: 3px;
+    color: var(--dp-muted);
+    font-size: 9px;
+    line-height: 1.35;
+  }
+
+  .dp-toggle {
+    width: 36px;
+    height: 21px;
+    flex: 0 0 auto;
+    padding: 2px;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--dp-muted) 28%, transparent);
+    transition: .18s ease;
+  }
+
+  .dp-toggle i {
+    display: block;
+    width: 17px;
+    height: 17px;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(15, 23, 42, .18);
+    transition: .18s ease;
+  }
+
+  .dp-toggle.enabled { background: var(--dp-primary); }
+
+  .dp-toggle.enabled i { transform: translateX(15px); }
+
+  .dp-large-toggle {
+    width: 44px;
+    height: 25px;
+    cursor: pointer;
+  }
+
+  .dp-large-toggle i {
+    width: 21px;
+    height: 21px;
+  }
+
+  .dp-large-toggle.enabled i { transform: translateX(19px); }
+
+  .dp-status-section {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+  }
+
+  .dp-option-list {
+    flex: 1;
+    overflow: auto;
+    padding: 12px;
+  }
+
+  .dp-option-list > button {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 10px;
+    padding: 11px;
+    border: 0;
+    border-radius: 13px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .dp-option-list > button:hover,
+  .dp-option-list > button.active {
+    background: var(--dp-soft);
+  }
+
+  .dp-option-list > button > span {
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border-radius: 11px;
+    background: var(--dp-card);
+    color: var(--dp-primary);
+    font-weight: 800;
+  }
+
+  .dp-option-list strong,
+  .dp-option-list small {
+    display: block;
+  }
+
+  .dp-option-list strong { font-size: 12px; }
+
+  .dp-option-list small {
+    margin-top: 3px;
+    color: var(--dp-muted);
+    font-size: 10px;
+  }
+
+  .dp-option-list > button > i {
+    color: var(--dp-primary);
+    font-style: normal;
+    font-weight: 900;
+  }
+
+  .dp-toast {
+    position: fixed;
+    z-index: 1200;
+    top: 18px;
+    right: 18px;
+    max-width: min(390px, calc(100vw - 36px));
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 13px;
+    border-radius: 13px;
+    color: #fff;
+    box-shadow: 0 14px 35px rgba(15, 23, 42, .2);
+    font-size: 12px;
+  }
+
+  .dp-toast.success { background: #15803d; }
+  .dp-toast.error { background: #b91c1c; }
+  .dp-toast.info { background: #1d4ed8; }
+
+  .dp-toast button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 18px;
+  }
+
+  .dp-empty,
+  .dp-loading {
+    min-height: 330px;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    padding: 30px;
+    text-align: center;
+    border: 1px dashed var(--dp-border);
+    border-radius: 17px;
+    background: var(--dp-card);
+  }
+
+  .dp-empty-icon {
+    width: 48px;
+    height: 48px;
+    display: grid;
+    place-items: center;
+    border-radius: 16px;
+    background: var(--dp-soft);
+    color: var(--dp-primary);
+    font-size: 20px;
+  }
+
+  .dp-empty h3,
+  .dp-loading h2 {
+    margin: 13px 0 0;
+    font-size: 15px;
+  }
+
+  .dp-empty p,
+  .dp-loading p {
+    max-width: 420px;
+    margin: 6px 0 0;
+    color: var(--dp-muted);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  .dp-spinner {
+    width: 29px;
+    height: 29px;
+    border: 3px solid var(--dp-border);
+    border-top-color: var(--dp-primary);
+    border-radius: 999px;
+    animation: dp-spin .75s linear infinite;
+  }
+
+  @keyframes dp-spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 860px) {
+    .dp-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dp-analytics-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 640px) {
+    .dp-toolbar {
+      grid-template-columns: minmax(0, 1fr) 40px 40px 40px;
+    }
+
+    .dp-primary-action,
+    .dp-icon-action {
+      width: 40px;
+      height: 40px;
+    }
+
+    .dp-summary-grid { gap: 7px; }
+
+    .dp-summary-grid article { padding: 11px; }
+
+    .dp-card-grid { grid-template-columns: 1fr; }
+
+    .dp-overlay {
+      align-items: flex-end;
+    }
+
+    .dp-sheet,
+    .dp-small-sheet {
+      width: 100%;
+      height: min(92dvh, 820px);
+      border-left: 0;
+      border-top: 1px solid var(--dp-border);
+      border-radius: 20px 20px 0 0;
+    }
+
+    .dp-field-grid,
+    .dp-three-columns,
+    .dp-feature-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .dp-feature-option {
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+    }
+
+    .dp-sheet-footer {
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
+    }
+  }
+
+  @media (max-width: 430px) {
+    .dp-summary-grid { grid-template-columns: 1fr 1fr; }
+
+    .dp-summary-grid article:nth-child(3),
+    .dp-summary-grid article:nth-child(4) {
+      display: none;
+    }
+
+    .dp-plan-card > footer {
+      align-items: flex-end;
+    }
+
+    .dp-plan-card > footer > div {
+      flex-direction: column;
+    }
+  }
 `;

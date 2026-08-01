@@ -1,641 +1,1710 @@
 "use client";
 
-/**
- * app/page.tsx
- * ---------------------------------------------------------
- * ELEEVEON SCHOOL MANAGEMENT HOME PAGE
- * ---------------------------------------------------------
- *
- * Updated for the centralized startup and reactive-data system:
- * - uses the single database instance exported by app/lib/db;
- * - waits on DatabaseBootstrap state;
- * - uses Dexie live queries for visible counts;
- * - automatically reflects local writes and background pull updates;
- * - does not start a separate synchronization loop.
- */
+import Image from "next/image";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { useLiveQuery } from "dexie-react-hooks";
-import { useRouter } from "next/navigation";
+import eleeveonIcon from "./favicon_io/android-chrome-192x192.png";
 
-import { db } from "./lib/db";
-import { useSettings } from "./context/settings-context";
-import { useAccount } from "./context/account-context";
-import { useDatabase } from "./context/database-context";
-import { useActiveBranch } from "./context/active-branch-context";
+import { apiRequest, extractToken, saveAuthToken } from "./lib/platformApi";
+import { setAccountId } from "./lib/sync/syncConfig";
+import {
+  clearStoredActiveMembership,
+  setStoredActiveMembership,
+} from "./lib/auth/activeMembership";
+import type { UserMembership } from "./lib/auth/roleRedirect";
 
-export default function HomePage() {
-  const router = useRouter();
-  const database = useDatabase();
+type Capability = {
+  icon: string;
+  title: string;
+  description: string;
+};
 
-  const {
-    authenticated,
-    accountId,
-    loading: accountLoading,
-  } = useAccount();
+type BillingCycle = "monthly" | "termly" | "yearly";
 
-  const { settings } = useSettings();
-  const appearanceSettings = settings as Record<string, any> | null;
+type PlanFeatureKey =
+  | "offlineSync"
+  | "cloudBackup"
+  | "reports"
+  | "finance"
+  | "attendance"
+  | "identityCards"
+  | "identitySafety"
+  | "transport"
+  | "schoolWebsites"
+  | "communications"
+  | "calendarScheduling"
+  | "parentPortal"
+  | "studentPortal"
+  | "teacherPortal"
+  | "advancedAnalytics"
+  | "apiAccess"
+  | string;
 
-  const {
-    activeSchool,
-    activeBranch,
-    activeSchoolId,
-    activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch();
+type Plan = {
+  id: string;
+  name: string;
+  code: string;
+  description?: string | null;
+  currency?: string | null;
+  priceMonthly?: number;
+  priceTermly?: number;
+  priceYearly?: number;
+  maxSchools?: number | null;
+  maxBranches?: number | null;
+  maxUsers?: number | null;
+  maxStudents?: number | null;
+  maxTeachers?: number | null;
+  maxStorageMb?: number | null;
 
-  const primary = settings?.primaryColor || "#2f6fed";
+  offlineSync?: boolean;
+  cloudBackup?: boolean;
+  reports?: boolean;
+  finance?: boolean;
+  attendance?: boolean;
+  identityCards?: boolean;
+  identitySafety?: boolean;
+  transport?: boolean;
+  schoolWebsites?: boolean;
+  communications?: boolean;
+  calendarScheduling?: boolean;
+  parentPortal?: boolean;
+  studentPortal?: boolean;
+  teacherPortal?: boolean;
+  advancedAnalytics?: boolean;
+  apiAccess?: boolean;
 
-  const [isOnline, setIsOnline] = useState(true);
-  const [isMobile, setIsMobile] = useState(false);
+  features?: PlanFeatureKey[] | null;
+  metadata?: {
+    featureFlags?: Record<string, boolean>;
+    featureKeys?: PlanFeatureKey[];
+    recommended?: boolean;
+    badge?: string | null;
+    displayOrder?: number | null;
+    [key: string]: unknown;
+  } | null;
 
-  const counts =
-    useLiveQuery(
-      async () => {
-        if (!database.ready) {
-          return {
-            schools: 0,
-            branches: 0,
-            students: 0,
-            teachers: 0,
-            classes: 0,
-          };
-        }
+  active?: boolean;
+};
 
-        const [schools, branches, students, teachers, classes] =
-          await Promise.all([
-            db.schools.toArray(),
-            db.branches.toArray(),
-            db.students.toArray(),
-            db.teachers.toArray(),
-            db.classes.toArray(),
-          ]);
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://localhost:4000"
+).replace(/\/$/, "");
 
-        const belongsToActiveAccount = (row: any) =>
-          !accountId || row.accountId === accountId;
+const PLAN_FEATURE_LABELS: Record<string, string> = {
+  offlineSync: "Offline-first access",
+  cloudBackup: "Protected cloud backup",
+  reports: "Assessments, reports & broadsheets",
+  finance: "Fees, payments & finance",
+  attendance: "Student and staff attendance",
+  identityCards: "ID cards and digital passes",
+  identitySafety: "Pickup, visitors & school safety",
+  transport: "School transport management",
+  schoolWebsites: "Professional school website",
+  communications: "Announcements and communication",
+  calendarScheduling: "Calendar and timetable tools",
+  parentPortal: "Parent portal",
+  studentPortal: "Student portal",
+  teacherPortal: "Teacher workspace",
+  advancedAnalytics: "Advanced analytics",
+  apiAccess: "API and integration access",
+};
 
-        return {
-          schools: schools.filter(
-            (row) => belongsToActiveAccount(row) && !row.isDeleted,
-          ).length,
-          branches: branches.filter(
-            (row) => belongsToActiveAccount(row) && !row.isDeleted,
-          ).length,
-          students: students.filter(
-            (row) => belongsToActiveAccount(row) && !row.isDeleted,
-          ).length,
-          teachers: teachers.filter(
-            (row) => belongsToActiveAccount(row) && !row.isDeleted,
-          ).length,
-          classes: classes.filter(
-            (row) => belongsToActiveAccount(row) && !row.isDeleted,
-          ).length,
-        };
-      },
-      [database.ready, accountId],
-      {
-        schools: 0,
-        branches: 0,
-        students: 0,
-        teachers: 0,
-        classes: 0,
-      },
-    ) || {
-      schools: 0,
-      branches: 0,
-      students: 0,
-      teachers: 0,
-      classes: 0,
-    };
+const PLAN_FEATURE_ORDER: PlanFeatureKey[] = [
+  "offlineSync",
+  "cloudBackup",
+  "reports",
+  "attendance",
+  "identityCards",
+  "identitySafety",
+  "schoolWebsites",
+  "communications",
+  "calendarScheduling",
+  "parentPortal",
+  "studentPortal",
+  "teacherPortal",
+  "finance",
+  "transport",
+  "advancedAnalytics",
+  "apiAccess",
+];
 
-  useEffect(() => {
-    const update = () => setIsOnline(navigator.onLine);
+const PLATFORM_BENEFITS = [
+  {
+    title: "Reduce repeated work",
+    description:
+      "Enter school information once and reuse it across reports, portals, identity tools and public websites.",
+  },
+  {
+    title: "Keep working through weak internet",
+    description:
+      "Offline-first workflows help schools continue essential work and synchronize when connectivity returns.",
+  },
+  {
+    title: "Give every person a focused experience",
+    description:
+      "Owners, administrators, teachers, students and parents receive role-appropriate workspaces from one system.",
+  },
+  {
+    title: "Grow without replacing the platform",
+    description:
+      "Start with the package that fits today, then move to a larger plan as student numbers and school needs grow.",
+  },
+];
 
-    update();
-    window.addEventListener("online", update);
-    window.addEventListener("offline", update);
+const CAPABILITIES: Capability[] = [
+  {
+    icon: "◎",
+    title: "Offline-first operations",
+    description:
+      "Keep essential school work available on unreliable connections, then synchronize safely when connectivity returns.",
+  },
+  {
+    icon: "▦",
+    title: "Assessments and reports",
+    description:
+      "Manage scores, grading structures, report cards, broadsheets and reusable report templates from one connected system.",
+  },
+  {
+    icon: "◫",
+    title: "Connected school records",
+    description:
+      "Bring students, teachers, parents, classes, subjects, branches and academic structures into one source of truth.",
+  },
+  {
+    icon: "◌",
+    title: "Role-based workspaces",
+    description:
+      "Give owners, administrators, teachers, students and parents focused portals shaped around what each person needs.",
+  },
+  {
+    icon: "◇",
+    title: "Identity and attendance",
+    description:
+      "Support attendance, identity cards, QR workflows, access points, pickup, visitors and future verification systems.",
+  },
+  {
+    icon: "↗",
+    title: "Public school websites",
+    description:
+      "Extend approved school data into professional websites that remain connected to the same Eleeveon infrastructure.",
+  },
+];
 
-    return () => {
-      window.removeEventListener("online", update);
-      window.removeEventListener("offline", update);
-    };
-  }, []);
+const WORKSPACES = [
+  {
+    label: "Owner",
+    detail: "Account-wide oversight",
+  },
+  {
+    label: "School Admin",
+    detail: "School-level coordination",
+  },
+  {
+    label: "Branch Admin",
+    detail: "Daily branch operations",
+  },
+  {
+    label: "Teacher",
+    detail: "Classes, attendance and assessments",
+  },
+  {
+    label: "Student",
+    detail: "Learning records and results",
+  },
+  {
+    label: "Parent",
+    detail: "Children, reports and communication",
+  },
+];
 
-  useEffect(() => {
-    const check = () => setIsMobile(window.innerWidth < 760);
 
-    check();
-    window.addEventListener("resize", check);
+function normalizePlans(payload: unknown): Plan[] {
+  if (Array.isArray(payload)) return payload as Plan[];
 
-    return () => window.removeEventListener("resize", check);
-  }, []);
+  if (payload && typeof payload === "object") {
+    const value = payload as Record<string, unknown>;
 
-  const schoolName =
-    activeSchool?.name ||
-    appearanceSettings?.schoolName ||
-    "Eleeveon School Management";
+    for (const key of ["plans", "data", "items", "results"]) {
+      if (Array.isArray(value[key])) return value[key] as Plan[];
+    }
+  }
 
-  const branchName = activeBranch?.name || "No active branch selected";
+  return [];
+}
 
-  const logo =
-    (activeSchool as any)?.logo ||
-    (activeBranch as any)?.logo ||
-    appearanceSettings?.logo ||
-    "";
+function planFeatureEnabled(plan: Plan, key: PlanFeatureKey): boolean {
+  const topLevel = plan[key as keyof Plan];
 
-  const heroImage =
-    appearanceSettings?.dashboardHeroImage ||
-    appearanceSettings?.dashboardBannerImage ||
-    (activeSchool as any)?.bannerImage ||
-    (activeBranch as any)?.bannerImage ||
-    "";
+  if (typeof topLevel === "boolean") {
+    return topLevel;
+  }
 
-  const contextReady = !!activeSchoolId && !!activeBranchId;
-  const appReady = database.ready && !accountLoading;
-  const canEnterWorkspace = authenticated && contextReady;
+  const metadataFlag = plan.metadata?.featureFlags?.[key];
+  if (typeof metadataFlag === "boolean") {
+    return metadataFlag;
+  }
 
-  const quickStats = useMemo(
-    () => [
-      { label: "Schools", value: counts.schools, icon: "🏫" },
-      { label: "Branches", value: counts.branches, icon: "🏢" },
-      { label: "Students", value: counts.students, icon: "🧑‍🎓" },
-      { label: "Teachers", value: counts.teachers, icon: "👨‍🏫" },
-      { label: "Classes", value: counts.classes, icon: "🏷" },
-    ],
-    [counts]
+  return Array.isArray(plan.features) && plan.features.includes(key);
+}
+
+function humanizeFeatureKey(key: string): string {
+  return (
+    PLAN_FEATURE_LABELS[key] ||
+    key
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (character) => character.toUpperCase())
+  );
+}
+
+function planFeatureLabels(plan: Plan): string[] {
+  const known = PLAN_FEATURE_ORDER.filter((key) =>
+    planFeatureEnabled(plan, key),
+  ).map((key) => humanizeFeatureKey(String(key)));
+
+  const extras = Array.from(
+    new Set([
+      ...(Array.isArray(plan.features) ? plan.features : []),
+      ...(Array.isArray(plan.metadata?.featureKeys)
+        ? plan.metadata.featureKeys
+        : []),
+      ...Object.keys(plan.metadata?.featureFlags || {}).filter(
+        (key) => plan.metadata?.featureFlags?.[key] === true,
+      ),
+    ]),
+  )
+    .filter((key) => !PLAN_FEATURE_ORDER.includes(key))
+    .map((key) => humanizeFeatureKey(String(key)));
+
+  return [...known, ...extras];
+}
+
+function planPrice(plan: Plan, cycle: BillingCycle): number {
+  if (cycle === "yearly") return Number(plan.priceYearly || 0);
+
+  if (cycle === "termly") {
+    const configured = Number(plan.priceTermly || 0);
+    return configured > 0
+      ? configured
+      : Number(plan.priceMonthly || 0) * 4;
+  }
+
+  return Number(plan.priceMonthly || 0);
+}
+
+function billingCycleLabel(cycle: BillingCycle): string {
+  if (cycle === "termly") return "4 months";
+  if (cycle === "yearly") return "year";
+  return "month";
+}
+
+function stringIdOrNull(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = String(value).trim();
+  return parsed || null;
+}
+
+function normalizeRegistrationMembership(
+  value: UserMembership,
+): UserMembership {
+  const source = value as any;
+  const branchId = stringIdOrNull(
+    source.branchId || source.schoolBranchId || source.branch?.id,
   );
 
-  const modules = [
-    {
-      title: "Account Setup",
-      text: "Create schools, manage branches, owner settings, subscription and account users.",
-      icon: "🧭",
-    },
-    {
-      title: "Branch Dashboard",
-      text: "Enter one selected school branch for students, teachers, classes and daily operations.",
-      icon: "📊",
-    },
-    {
-      title: "Academic Engine",
-      text: "Configure structures, periods, class subjects, grading systems and assessment rules.",
-      icon: "🎯",
-    },
-    {
-      title: "Report Publishing",
-      text: "Generate report cards, broadsheets, remarks and branded academic records.",
-      icon: "📄",
-    },
-  ];
-
-  const page: React.CSSProperties = {
-    minHeight: "100vh",
-    background:
-      appearanceSettings?.theme === "dark"
-        ? "var(--bg)"
-        : "linear-gradient(135deg, #f7f8fb 0%, #eef3ff 55%, #ffffff 100%)",
-    color: "var(--text)",
-    fontFamily: "var(--font-family, system-ui)",
-    padding: isMobile ? 12 : 20,
-    boxSizing: "border-box",
+  return {
+    ...value,
+    id:
+      stringIdOrNull(source.id) ||
+      `membership-${source.role}-${Date.now()}`,
+    accountId: stringIdOrNull(source.accountId),
+    schoolId: stringIdOrNull(source.schoolId || source.school?.id),
+    branchId,
+    schoolBranchId: branchId,
+    teacherId: stringIdOrNull(source.teacherId || source.teacher?.id),
+    studentId: stringIdOrNull(source.studentId || source.student?.id),
+    parentId: stringIdOrNull(source.parentId || source.parent?.id),
+    active: source.active !== false,
   };
+}
 
-  const shell: React.CSSProperties = {
-    maxWidth: 1180,
-    margin: "0 auto",
-    display: "grid",
-    gap: isMobile ? 14 : 20,
-  };
+function formatMoney(amount: number, currency = "GHS"): string {
+  try {
+    return new Intl.NumberFormat("en-GH", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 0,
+    }).format(Number(amount || 0));
+  } catch {
+    return `${currency} ${Number(amount || 0).toLocaleString()}`;
+  }
+}
 
-  const card: React.CSSProperties = {
-    background: "var(--surface)",
-    color: "var(--text)",
-    border: "1px solid rgba(0,0,0,0.08)",
-    borderRadius: isMobile ? 22 : 26,
-    boxShadow: "0 18px 46px rgba(15,23,42,0.08)",
-  };
+function PlanLimit({
+  value,
+  label,
+}: {
+  value?: number | null;
+  label: string;
+}) {
+  return (
+    <div className="rounded-2xl bg-zinc-50 px-3 py-3 dark:bg-white/5">
+      <strong className="block text-sm font-semibold">
+        {value == null ? "Flexible" : value.toLocaleString()}
+      </strong>
+      <span className="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">
+        {label}
+      </span>
+    </div>
+  );
+}
 
-  const button: React.CSSProperties = {
-    border: "none",
-    borderRadius: 16,
-    padding: "14px 18px",
-    background: primary,
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-    boxShadow: "0 16px 28px rgba(0,0,0,0.18)",
-    width: isMobile ? "100%" : "auto",
-  };
+function ArrowIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      className="h-4 w-4"
+      fill="none"
+    >
+      <path
+        d="M4 10h11M11 6l4 4-4 4"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
-  const ghostButton: React.CSSProperties = {
-    border: "1px solid rgba(0,0,0,0.10)",
-    borderRadius: 16,
-    padding: "14px 18px",
-    background: "rgba(255,255,255,0.70)",
-    color: "#111827",
-    fontWeight: 900,
-    cursor: "pointer",
-    width: isMobile ? "100%" : "auto",
-  };
+function GridMark() {
+  return (
+    <span
+      aria-hidden="true"
+      className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-white/10"
+    >
+      <Image
+        src={eleeveonIcon}
+        alt=""
+        width={40}
+        height={40}
+        priority
+        className="h-full w-full object-contain"
+      />
+    </span>
+  );
+}
 
-  const badge = (
-    tone: "green" | "red" | "blue" | "gray" | "orange"
-  ): React.CSSProperties => {
-    const tones = {
-      green: { bg: "rgba(34,197,94,0.12)", color: "#16a34a" },
-      red: { bg: "rgba(239,68,68,0.12)", color: "#dc2626" },
-      blue: { bg: "rgba(59,130,246,0.12)", color: "#2563eb" },
-      gray: { bg: "rgba(107,114,128,0.12)", color: "#4b5563" },
-      orange: { bg: "rgba(245,158,11,0.14)", color: "#b45309" },
-    }[tone];
 
-    return {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      padding: "7px 11px",
-      borderRadius: 999,
-      background: tones.bg,
-      color: tones.color,
-      fontSize: 12,
-      fontWeight: 900,
-      maxWidth: "100%",
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
+type ThemeMode = "light" | "dark";
+
+function ThemeToggle({
+  theme,
+  onToggle,
+}: {
+  theme: ThemeMode;
+  onToggle: () => void;
+}) {
+  const dark = theme === "dark";
+
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+      title={dark ? "Switch to light mode" : "Switch to dark mode"}
+      className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-zinc-200 bg-white text-zinc-700 transition hover:-translate-y-0.5 hover:bg-zinc-50 dark:border-white/15 dark:bg-white/5 dark:text-zinc-100 dark:hover:bg-white/10"
+    >
+      {dark ? (
+        <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none">
+          <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.7" />
+          <path
+            d="M12 2.75v2M12 19.25v2M21.25 12h-2M4.75 12h-2M18.54 5.46l-1.42 1.42M6.88 17.12l-1.42 1.42M18.54 18.54l-1.42-1.42M6.88 6.88 5.46 5.46"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+          />
+        </svg>
+      ) : (
+        <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none">
+          <path
+            d="M20.25 15.1A8.3 8.3 0 0 1 8.9 3.75 8.5 8.5 0 1 0 20.25 15.1Z"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+export default function Home() {
+  const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const [theme, setTheme] = useState<ThemeMode>("light");
+  const [themeReady, setThemeReady] = useState(false);
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [plansError, setPlansError] = useState("");
+  const [billingCycle, setBillingCycle] = useState<BillingCycle>("termly");
+  const [pricingPage, setPricingPage] = useState(0);
+  const [pricingCardsPerPage, setPricingCardsPerPage] = useState(1);
+  const [signupPlan, setSignupPlan] = useState<Plan | null>(null);
+  const [signupLoading, setSignupLoading] = useState(false);
+  const [signupError, setSignupError] = useState("");
+  const [showSignupPassword, setShowSignupPassword] = useState(false);
+  const [signupForm, setSignupForm] = useState({
+    fullName: "",
+    accountName: "",
+    email: "",
+    phone: "",
+    password: "",
+  });
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("eleeveon-public-theme");
+    const initial: ThemeMode =
+      saved === "dark" || saved === "light"
+        ? saved
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+
+    document.documentElement.classList.toggle("dark", initial === "dark");
+    document.documentElement.style.colorScheme = initial;
+    setTheme(initial);
+    setThemeReady(true);
+  }, []);
+
+  useEffect(() => {
+    const updatePricingLayout = () => {
+      const width = window.innerWidth;
+
+      setPricingCardsPerPage(
+        width >= 1024 ? 3 : width >= 640 ? 2 : 1,
+      );
     };
+
+    updatePricingLayout();
+    window.addEventListener("resize", updatePricingLayout);
+
+    return () => {
+      window.removeEventListener("resize", updatePricingLayout);
+    };
+  }, []);
+
+  useEffect(() => {
+    setPricingPage(0);
+  }, [billingCycle, pricingCardsPerPage, plans.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPlans = async () => {
+      try {
+        setPlansLoading(true);
+        setPlansError("");
+
+        const response = await fetch(`${API_BASE_URL}/billing/plans`, {
+          headers: {
+            Accept: "application/json",
+          },
+          cache: "no-store",
+        });
+
+        const text = await response.text();
+        let payload: unknown = null;
+
+        try {
+          payload = text ? JSON.parse(text) : null;
+        } catch {
+          payload = text;
+        }
+
+        if (!response.ok) {
+          const message =
+            payload &&
+            typeof payload === "object" &&
+            "message" in payload
+              ? String((payload as { message?: unknown }).message || "")
+              : "";
+
+          throw new Error(
+            message || `Unable to load plans (${response.status}).`,
+          );
+        }
+
+        const activePlans = normalizePlans(payload)
+          .filter((plan) => plan.active !== false)
+          .sort((a, b) => {
+            const aOrder = Number(a.metadata?.displayOrder ?? 999);
+            const bOrder = Number(b.metadata?.displayOrder ?? 999);
+
+            if (aOrder !== bOrder) return aOrder - bOrder;
+
+            return (
+              Number(a.priceMonthly || 0) -
+              Number(b.priceMonthly || 0)
+            );
+          });
+
+        if (!cancelled) {
+          setPlans(activePlans);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPlansError(
+            error instanceof Error
+              ? error.message
+              : "Unable to load subscription plans.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setPlansLoading(false);
+        }
+      }
+    };
+
+    void loadPlans();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleTheme = () => {
+    const next: ThemeMode = theme === "dark" ? "light" : "dark";
+    document.documentElement.classList.toggle("dark", next === "dark");
+    document.documentElement.style.colorScheme = next;
+    window.localStorage.setItem("eleeveon-public-theme", next);
+    setTheme(next);
+  };
+
+  const openPublicSignup = (plan: Plan) => {
+    setSignupError("");
+    setSignupPlan(plan);
+  };
+
+  const closePublicSignup = () => {
+    if (signupLoading) return;
+    setSignupPlan(null);
+    setSignupError("");
+  };
+
+  const submitPublicSignup = async () => {
+    if (!signupPlan) return;
+
+    if (!signupForm.fullName.trim()) {
+      setSignupError("Enter your full name.");
+      return;
+    }
+
+    if (!signupForm.accountName.trim()) {
+      setSignupError("Enter the school or account name.");
+      return;
+    }
+
+    if (!signupForm.email.trim()) {
+      setSignupError("Enter your email address.");
+      return;
+    }
+
+    if (signupForm.password.trim().length < 6) {
+      setSignupError("Password must be at least 6 characters.");
+      return;
+    }
+
+    try {
+      setSignupLoading(true);
+      setSignupError("");
+
+      const response = await apiRequest<{
+        token?: string;
+        accessToken?: string;
+        access_token?: string;
+        user: {
+          id: string;
+          accountId: string;
+          email: string;
+          role: string;
+          fullName?: string;
+          name?: string;
+          memberships?: UserMembership[];
+        };
+        memberships?: UserMembership[];
+        account?: {
+          id: string;
+          name: string;
+        } | null;
+      }>("/auth/register", {
+        method: "POST",
+        body: JSON.stringify({
+          fullName: signupForm.fullName.trim(),
+          email: signupForm.email.trim().toLowerCase(),
+          phone: signupForm.phone.trim() || undefined,
+          password: signupForm.password,
+          accountName: signupForm.accountName.trim(),
+          selectedPlanId: signupPlan.id,
+          selectedBillingCycle: billingCycle,
+        }),
+      });
+
+      if (!response.user?.accountId) {
+        throw new Error(
+          "Account created, but no account ID was returned.",
+        );
+      }
+
+      const token = extractToken(response);
+
+      if (!token) {
+        throw new Error(
+          "Account created, but no login token was returned.",
+        );
+      }
+
+      const memberships = (
+        response.user.memberships ||
+        response.memberships ||
+        []
+      )
+        .filter((membership) => membership.active !== false)
+        .map(normalizeRegistrationMembership);
+
+      const userToStore = {
+        ...response.user,
+        memberships,
+        userMemberships: memberships,
+      };
+
+      const accountToStore = response.account
+        ? {
+            ...response.account,
+            memberships,
+            userMemberships: memberships,
+          }
+        : {
+            id: response.user.accountId,
+            name: signupForm.accountName.trim(),
+            memberships,
+            userMemberships: memberships,
+          };
+
+      clearStoredActiveMembership();
+      saveAuthToken(token);
+      setAccountId(response.user.accountId);
+
+      const storageValues: Record<string, unknown> = {
+        eleeveon_auth_user: userToStore,
+        eleeveon_auth_account: accountToStore,
+        eleeveon_account_user: userToStore,
+        eleeveon_account_info: accountToStore,
+        eleeveon_user_memberships: memberships,
+        user: userToStore,
+        account: accountToStore,
+      };
+
+      for (const [key, value] of Object.entries(storageValues)) {
+        window.localStorage.setItem(key, JSON.stringify(value));
+      }
+
+      window.sessionStorage.setItem(
+        "eleeveon_auth_user",
+        JSON.stringify(userToStore),
+      );
+      window.sessionStorage.setItem(
+        "eleeveon_auth_account",
+        JSON.stringify(accountToStore),
+      );
+      window.sessionStorage.setItem(
+        "eleeveon_user_memberships",
+        JSON.stringify(memberships),
+      );
+
+      const ownerMembership =
+        memberships.find((membership) =>
+          ["super_admin", "owner"].includes(
+            String(membership.role || ""),
+          ),
+        ) ||
+        memberships[0] || {
+          id: `owner-${response.user.id}`,
+          accountId: response.user.accountId,
+          role: "super_admin",
+          active: true,
+        };
+
+      setStoredActiveMembership(ownerMembership as UserMembership);
+
+      const destination = new URL(
+        "/owner/subscription",
+        window.location.origin,
+      );
+
+      destination.searchParams.set("planId", signupPlan.id);
+      destination.searchParams.set("billingCycle", billingCycle);
+      destination.searchParams.set("checkout", "1");
+      destination.searchParams.set("source", "public-pricing");
+
+      window.location.replace(destination.toString());
+    } catch (error) {
+      setSignupError(
+        error instanceof Error
+          ? error.message
+          : "Unable to create your account.",
+      );
+    } finally {
+      setSignupLoading(false);
+    }
+  };
+
+  const pricingPageCount = Math.max(
+    1,
+    Math.ceil(plans.length / pricingCardsPerPage),
+  );
+
+  const safePricingPage = Math.min(
+    pricingPage,
+    pricingPageCount - 1,
+  );
+
+  const visiblePricingPlans = plans.slice(
+    safePricingPage * pricingCardsPerPage,
+    safePricingPage * pricingCardsPerPage +
+      pricingCardsPerPage,
+  );
+
+  const goToPricingPage = (page: number) => {
+    const normalized =
+      (page + pricingPageCount) % pricingPageCount;
+
+    setPricingPage(normalized);
   };
 
   return (
-    <main style={page}>
-      <div style={shell}>
-        {/* TOP BAR */}
-        <header
-          style={{
-            display: "flex",
-            alignItems: isMobile ? "stretch" : "center",
-            justifyContent: "space-between",
-            gap: 14,
-            flexDirection: isMobile ? "column" : "row",
-            padding: "6px 2px",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              minWidth: 0,
-            }}
-          >
-            <div
-              style={{
-                width: 48,
-                height: 48,
-                borderRadius: 18,
-                background: logo ? `url(${logo}) center/cover` : primary,
-                color: "#fff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontWeight: 950,
-                fontSize: 20,
-                boxShadow: "0 12px 26px rgba(0,0,0,0.14)",
-                flex: "0 0 48px",
-              }}
-            >
-              {!logo && "E"}
-            </div>
-
-            <div style={{ minWidth: 0 }}>
-              <div
-                style={{
-                  fontWeight: 950,
-                  fontSize: 18,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {schoolName}
-              </div>
-
-              <div
-                style={{
-                  opacity: 0.66,
-                  fontSize: 13,
-                  fontWeight: 700,
-                  lineHeight: 1.4,
-                }}
-              >
-                Offline-first school management workspace
-              </div>
-            </div>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              justifyContent: isMobile ? "flex-start" : "flex-end",
-            }}
-          >
-            <span style={badge(isOnline ? "green" : "red")}>
-              ● {isOnline ? "Online" : "Offline"}
-            </span>
-
-            <span style={badge(contextReady ? "blue" : "orange")}>
-              {contextReady ? branchName : "Setup Needed"}
-            </span>
-          </div>
-        </header>
-
-        {/* HERO */}
-        <section
-          style={{
-            ...card,
-            overflow: "hidden",
-            display: "grid",
-            gridTemplateColumns: isMobile
-              ? "1fr"
-              : "minmax(0, 1.08fr) minmax(320px, 0.92fr)",
-          }}
-        >
-          <div
-            style={{
-              padding: isMobile ? 20 : 30,
-              display: "grid",
-              alignContent: "center",
-              gap: isMobile ? 14 : 18,
-            }}
-          >
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <span style={badge("blue")}>School-first</span>
-              <span style={badge("green")}>Branch-aware</span>
-              <span style={badge("orange")}>PWA Ready</span>
-            </div>
-
-            <div>
-              <h1
-                style={{
-                  margin: 0,
-                  fontSize: isMobile ? 39 : "clamp(40px, 6vw, 64px)",
-                  lineHeight: isMobile ? 1.02 : 0.96,
-                  letterSpacing: isMobile ? -1.4 : -2.2,
-                  fontWeight: 950,
-                }}
-              >
-                Manage learning, assessments and reports from one place.
-              </h1>
-
-              <p
-                style={{
-                  margin: "16px 0 0",
-                  maxWidth: 620,
-                  opacity: 0.74,
-                  fontSize: isMobile ? 14 : 16,
-                  lineHeight: 1.65,
-                  fontWeight: 650,
-                }}
-              >
-                A configurable institutional system for schools that need
-                student records, attendance, finance, curriculum, assessment,
-                report publishing and branch-aware operations.
-              </p>
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                flexWrap: "wrap",
-                flexDirection: isMobile ? "column" : "row",
-              }}
-            >
-              <button
-                type="button"
-                style={button}
-                onClick={() =>
-                  router.push(authenticated ? "/select-role" : "/login")
-                }
-              >
-                {authenticated ? "Open Account Workspace" : "Sign In"}
-              </button>
-
-              <button
-                type="button"
-                style={{
-                  ...ghostButton,
-                  opacity: canEnterWorkspace ? 1 : 0.65,
-                }}
-                disabled={!canEnterWorkspace}
-                onClick={() => router.push("/select-role")}
-              >
-                Enter Dashboard
-              </button>
-            </div>
-
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <span style={badge(contextReady ? "green" : "orange")}>
-                {contextLoading
-                  ? "Loading context..."
-                  : contextReady
-                  ? `Active: ${branchName}`
-                  : "Create/select school and branch"}
-              </span>
-
-              <span style={badge(appReady ? "gray" : "orange")}>
-                {database.upgrading
-                  ? "Upgrading local database..."
-                  : database.opening
-                    ? "Opening local database..."
-                    : database.ready
-                      ? "Local database ready"
-                      : "Preparing local database..."}
-              </span>
-            </div>
-          </div>
-
-          <div
-            style={{
-              minHeight: isMobile ? 260 : 430,
-              position: "relative",
-              background: heroImage
-                ? `linear-gradient(135deg, rgba(15,23,42,0.08), rgba(15,23,42,0.38)), url(${heroImage}) center/cover`
-                : `linear-gradient(135deg, ${primary}, rgba(15,23,42,0.92))`,
-              display: "flex",
-              alignItems: "flex-end",
-              padding: isMobile ? 16 : 24,
-              boxSizing: "border-box",
-            }}
-          >
-            <div
-              style={{
-                width: "100%",
-                borderRadius: 22,
-                padding: isMobile ? 15 : 18,
-                background: "rgba(255,255,255,0.88)",
-                backdropFilter: "blur(10px)",
-                color: "#111827",
-                boxShadow: "0 18px 40px rgba(0,0,0,0.22)",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 12,
-                  fontWeight: 900,
-                  opacity: 0.62,
-                  textTransform: "uppercase",
-                }}
-              >
-                Active Workspace
-              </div>
-
-              <div
-                style={{
-                  marginTop: 4,
-                  fontSize: isMobile ? 21 : 24,
-                  fontWeight: 950,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {activeSchool?.name || "School Setup"}
-              </div>
-
-              <div
-                style={{
-                  marginTop: 4,
-                  fontWeight: 750,
-                  opacity: 0.72,
-                  lineHeight: 1.4,
-                }}
-              >
-                {activeBranch?.name || "Select a branch to begin operations"}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* STATS */}
-        <section
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile
-              ? "repeat(2, minmax(0, 1fr))"
-              : "repeat(auto-fit,minmax(170px,1fr))",
-            gap: isMobile ? 10 : 14,
-          }}
-        >
-          {quickStats.map((stat) => (
-            <div
-              key={stat.label}
-              style={{
-                ...card,
-                padding: isMobile ? 14 : 18,
-                minWidth: 0,
-              }}
-            >
-              <div style={{ fontSize: 23 }}>{stat.icon}</div>
-
-              <div
-                style={{
-                  marginTop: 8,
-                  fontSize: isMobile ? 24 : 30,
-                  fontWeight: 950,
-                }}
-              >
-                {stat.value}
-              </div>
-
-              <div
-                style={{
-                  marginTop: 2,
-                  opacity: 0.64,
-                  fontSize: 13,
-                  fontWeight: 800,
-                }}
-              >
-                {stat.label}
-              </div>
-            </div>
-          ))}
-        </section>
-
-        {/* MODULES */}
-        <section
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile
-              ? "1fr"
-              : "repeat(auto-fit,minmax(240px,1fr))",
-            gap: 14,
-          }}
-        >
-          {modules.map((module) => (
-            <div
-              key={module.title}
-              style={{
-                ...card,
-                padding: isMobile ? 18 : 20,
-              }}
-            >
-              <div
-                style={{
-                  width: 48,
-                  height: 48,
-                  borderRadius: 18,
-                  background: "rgba(47,111,237,0.10)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 23,
-                }}
-              >
-                {module.icon}
-              </div>
-
-              <h3
-                style={{
-                  margin: "14px 0 6px",
-                  fontSize: 18,
-                  fontWeight: 950,
-                }}
-              >
-                {module.title}
-              </h3>
-
-              <p
-                style={{
-                  margin: 0,
-                  opacity: 0.7,
-                  lineHeight: 1.55,
-                  fontSize: 13,
-                  fontWeight: 650,
-                }}
-              >
-                {module.text}
-              </p>
-            </div>
-          ))}
-        </section>
-
-        <footer
-          style={{
-            textAlign: "center",
-            opacity: 0.62,
-            fontSize: 12,
-            fontWeight: 750,
-            padding: "10px 0 4px",
-            lineHeight: 1.5,
-          }}
-        >
-          Eleeveon School Management System • Built for learning, work and life
-        </footer>
+    <main className="min-h-screen overflow-hidden bg-white text-zinc-950 selection:bg-zinc-950 selection:text-white dark:bg-zinc-950 dark:text-white dark:selection:bg-white dark:selection:text-zinc-950">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-0 h-195 overflow-hidden">
+        <div className="absolute left-1/2 -top-85 h-170 w-170 -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(47,111,237,0.17),rgba(47,111,237,0)_68%)]" />
+        <div className="absolute -right-55 top-48 h-120 w-120 rounded-full bg-[radial-gradient(circle,rgba(87,109,146,0.1),rgba(87,109,146,0)_70%)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(24,24,27,0.045)_1px,transparent_1px),linear-gradient(to_bottom,rgba(24,24,27,0.045)_1px,transparent_1px)] bg-size-[44px_44px] mask-[linear-gradient(to_bottom,black,transparent_82%)] dark:bg-[linear-gradient(to_right,rgba(255,255,255,0.045)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.045)_1px,transparent_1px)]" />
       </div>
+
+      <header className="relative z-10 border-b border-zinc-200/80 bg-white/75 backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/75">
+        <div className="mx-auto flex min-h-18 w-full max-w-7xl items-center justify-between px-5 sm:px-8">
+          <Link href="/" className="flex items-center gap-3">
+            <GridMark />
+            <div>
+              <div className="text-sm font-semibold tracking-tight">
+                Eleeveon
+              </div>
+              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                Schools
+              </div>
+            </div>
+          </Link>
+
+          <nav className="hidden items-center gap-7 text-sm text-zinc-600 md:flex dark:text-zinc-300">
+            <a
+              href="#capabilities"
+              className="transition hover:text-zinc-950 dark:hover:text-white"
+            >
+              Capabilities
+            </a>
+            <a
+              href="#workspaces"
+              className="transition hover:text-zinc-950 dark:hover:text-white"
+            >
+              Workspaces
+            </a>
+            <a
+              href="#pricing"
+              className="transition hover:text-zinc-950 dark:hover:text-white"
+            >
+              Pricing
+            </a>
+            <a
+              href="#ecosystem"
+              className="transition hover:text-zinc-950 dark:hover:text-white"
+            >
+              Ecosystem
+            </a>
+          </nav>
+
+          <div className="flex items-center gap-2">
+            {themeReady ? (
+              <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            ) : (
+              <div className="h-10 w-10" aria-hidden="true" />
+            )}
+
+            <Link
+              href="/login"
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-zinc-950 px-4 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+            >
+              <span className="hidden sm:inline">Open workspace</span>
+              <span className="sm:hidden">Open</span>
+              <ArrowIcon />
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      <section className="relative z-10 mx-auto grid min-h-180 w-full max-w-7xl items-center gap-14 px-5 py-20 sm:px-8 lg:grid-cols-[1.04fr_0.96fr] lg:py-28">
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5 dark:text-zinc-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            Built for connected and offline school work
+          </div>
+
+          <h1 className="mt-7 max-w-3xl text-5xl font-semibold tracking-[-0.055em] sm:text-6xl lg:text-7xl">
+            One calm workspace for the life of a school.
+          </h1>
+
+          <p className="mt-7 max-w-2xl text-lg leading-8 text-zinc-600 sm:text-xl dark:text-zinc-300">
+            Eleeveon Schools brings administration, academics, reporting,
+            attendance, communication and public school identity into one
+            thoughtful platform.
+          </p>
+
+          <div className="mt-9 flex flex-col gap-3 sm:flex-row">
+            <Link
+              href="/login"
+              className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-zinc-950 px-6 text-sm font-semibold text-white shadow-lg shadow-zinc-950/10 transition hover:-translate-y-0.5 hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+            >
+              Enter Eleeveon Schools
+              <ArrowIcon />
+            </Link>
+
+            <a
+              href="#capabilities"
+              className="inline-flex h-12 items-center justify-center rounded-full border border-zinc-300 bg-white px-6 text-sm font-semibold text-zinc-800 transition hover:-translate-y-0.5 hover:bg-zinc-50 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10"
+            >
+              Explore the platform
+            </a>
+          </div>
+
+          <div className="mt-10 flex flex-wrap gap-x-8 gap-y-3 text-sm text-zinc-500 dark:text-zinc-400">
+            <span>Offline-first</span>
+            <span>Multi-role</span>
+            <span>Multi-branch</span>
+            <span>Template-powered</span>
+          </div>
+        </div>
+
+        <div className="relative">
+          <div className="absolute -inset-10 -z-10 rounded-[40px] bg-[radial-gradient(circle_at_top,rgba(47,111,237,0.15),transparent_65%)] blur-2xl" />
+
+          <div className="overflow-hidden rounded-[30px] border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/10 dark:border-white/10 dark:bg-zinc-900">
+            <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-white/10">
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
+                <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+              </div>
+              <div className="rounded-full bg-zinc-100 px-4 py-1.5 text-xs text-zinc-500 dark:bg-white/5 dark:text-zinc-400">
+                A connected school platform
+              </div>
+              <div className="w-12" />
+            </div>
+
+            <div className="relative min-h-130 overflow-hidden bg-zinc-50 p-6 dark:bg-zinc-950 sm:p-8">
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 bg-[linear-gradient(to_right,rgba(24,24,27,0.04)_1px,transparent_1px),linear-gradient(to_bottom,rgba(24,24,27,0.04)_1px,transparent_1px)] bg-size-[32px_32px] dark:bg-[linear-gradient(to_right,rgba(255,255,255,0.035)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.035)_1px,transparent_1px)]"
+              />
+
+              <div className="relative">
+                <div className="mx-auto max-w-md text-center">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#2f6fed]">
+                    One source of truth
+                  </p>
+                  <h2 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
+                    School information moves through one connected system.
+                  </h2>
+                  <p className="mt-3 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+                    This is a conceptual platform map—not a screenshot of the current application interface.
+                  </p>
+                </div>
+
+                <div className="relative mx-auto mt-10 max-w-lg">
+                  <div className="absolute left-1/2 top-16 h-40 w-px -translate-x-1/2 bg-zinc-300 dark:bg-white/15" />
+                  <div className="absolute left-[18%] right-[18%] top-36 h-px bg-zinc-300 dark:bg-white/15" />
+
+                  <div className="relative z-10 mx-auto flex w-44 flex-col items-center rounded-3xl border border-zinc-200 bg-white p-5 text-center shadow-lg shadow-zinc-950/5 dark:border-white/10 dark:bg-zinc-900">
+                    <div className="grid h-12 w-12 place-items-center rounded-2xl bg-zinc-950 text-sm font-semibold text-white dark:bg-white dark:text-zinc-950">
+                      ES
+                    </div>
+                    <p className="mt-3 text-sm font-semibold">Eleeveon Schools</p>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      Shared school foundation
+                    </p>
+                  </div>
+
+                  <div className="relative z-10 mt-16 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {[
+                      ["Records", "Students · Staff · Classes"],
+                      ["Academics", "Assessment · Reports"],
+                      ["Operations", "Attendance · Identity"],
+                      ["People", "Role-based workspaces"],
+                      ["Communication", "News · Calendar"],
+                      ["Public presence", "School websites"],
+                    ].map(([title, detail]) => (
+                      <div
+                        key={title}
+                        className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-zinc-900"
+                      >
+                        <div className="h-1.5 w-8 rounded-full bg-[#2f6fed]" />
+                        <p className="mt-3 text-sm font-semibold">{title}</p>
+                        <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                          {detail}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-5 rounded-2xl border border-dashed border-zinc-300 bg-white/70 px-4 py-3 text-center text-xs leading-5 text-zinc-500 backdrop-blur dark:border-white/15 dark:bg-white/3 dark:text-zinc-400">
+                    Individual portals use the same protected data foundation while presenting role-appropriate tools.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="capabilities"
+        className="relative z-10 border-y border-zinc-200 bg-zinc-50/80 dark:border-white/10 dark:bg-white/2.5"
+      >
+        <div className="mx-auto w-full max-w-7xl px-5 py-24 sm:px-8">
+          <div className="max-w-2xl">
+            <p className="text-sm font-semibold text-[#2f6fed]">
+              A connected operating system for schools
+            </p>
+            <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
+              Powerful where it matters. Quiet where it should be.
+            </h2>
+            <p className="mt-5 text-lg leading-8 text-zinc-600 dark:text-zinc-300">
+              Eleeveon is designed to reduce repeated work, preserve school
+              identity and make complex operations feel clear across devices
+              and roles.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {CAPABILITIES.map((capability) => (
+              <article
+                key={capability.title}
+                className="group rounded-3xl border border-zinc-200 bg-white p-6 transition duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-zinc-950/5 dark:border-white/10 dark:bg-zinc-900/70"
+              >
+                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-zinc-100 text-xl font-semibold transition group-hover:scale-105 dark:bg-white/10">
+                  {capability.icon}
+                </div>
+                <h3 className="mt-6 text-lg font-semibold">
+                  {capability.title}
+                </h3>
+                <p className="mt-3 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                  {capability.description}
+                </p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="workspaces"
+        className="relative z-10 mx-auto w-full max-w-7xl px-5 py-24 sm:px-8"
+      >
+        <div className="grid gap-14 lg:grid-cols-[0.8fr_1.2fr]">
+          <div>
+            <p className="text-sm font-semibold text-[#2f6fed]">
+              One platform, focused workspaces
+            </p>
+            <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
+              Everyone sees what helps them move forward.
+            </h2>
+            <p className="mt-5 text-lg leading-8 text-zinc-600 dark:text-zinc-300">
+              The platform shares one trusted data foundation while giving each
+              role a cleaner, more relevant experience.
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            {WORKSPACES.map((workspace, index) => (
+              <article
+                key={workspace.label}
+                className="flex items-center gap-4 rounded-3xl border border-zinc-200 bg-white p-5 dark:border-white/10 dark:bg-zinc-900/60"
+              >
+                <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-zinc-100 text-sm font-semibold text-zinc-500 dark:bg-white/10 dark:text-zinc-300">
+                  {String(index + 1).padStart(2, "0")}
+                </div>
+                <div>
+                  <h3 className="font-semibold">{workspace.label}</h3>
+                  <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+                    {workspace.detail}
+                  </p>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+
+      <section
+        id="pricing"
+        className="relative z-10 border-y border-zinc-200 bg-zinc-50/80 dark:border-white/10 dark:bg-white/2.5"
+      >
+        <div className="mx-auto w-full max-w-7xl px-5 py-24 sm:px-8">
+          <div className="grid gap-10 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div className="max-w-3xl">
+              <p className="text-sm font-semibold text-[#2f6fed]">Pricing</p>
+              <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
+                Choose a package that fits the school you have today.
+              </h2>
+              <p className="mt-5 text-lg leading-8 text-zinc-600 dark:text-zinc-300">
+                Each package combines a student-capacity range with the
+                Eleeveon capabilities enabled for that plan. Schools can begin
+                at the right size and move upward as enrolment, branches and
+                operational needs grow.
+              </p>
+            </div>
+
+            <div className="inline-flex w-full rounded-full border border-zinc-200 bg-white p-1 shadow-sm sm:w-auto dark:border-white/10 dark:bg-zinc-900">
+              {(["termly", "monthly", "yearly"] as BillingCycle[]).map((cycle) => (
+                <button
+                  key={cycle}
+                  type="button"
+                  onClick={() => setBillingCycle(cycle)}
+                  className={`flex-1 rounded-full px-5 py-2.5 text-sm font-semibold capitalize transition sm:flex-none ${
+                    billingCycle === cycle
+                      ? "bg-zinc-950 text-white dark:bg-white dark:text-zinc-950"
+                      : "text-zinc-500 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white"
+                  }`}
+                >
+                  {cycle === "termly" ? "Termly · 4 months" : cycle}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-12 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            {PLATFORM_BENEFITS.map((benefit, index) => (
+              <article
+                key={benefit.title}
+                className="rounded-3xl border border-zinc-200 bg-white p-5 dark:border-white/10 dark:bg-zinc-900/70"
+              >
+                <div className="grid h-9 w-9 place-items-center rounded-xl bg-zinc-100 text-xs font-semibold text-zinc-500 dark:bg-white/10 dark:text-zinc-300">
+                  {String(index + 1).padStart(2, "0")}
+                </div>
+                <h3 className="mt-5 font-semibold">{benefit.title}</h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+                  {benefit.description}
+                </p>
+              </article>
+            ))}
+          </div>
+
+          {plansLoading ? (
+            <div className="mt-12 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({
+                length: pricingCardsPerPage,
+              }).map((_, item) => (
+                <div
+                  key={item}
+                  className="h-150 animate-pulse rounded-4xl border border-zinc-200 bg-white dark:border-white/10 dark:bg-zinc-900"
+                />
+              ))}
+            </div>
+          ) : plansError ? (
+            <div className="mt-12 rounded-3xl border border-amber-200 bg-amber-50 p-6 text-amber-950 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100">
+              <h3 className="font-semibold">
+                Pricing is temporarily unavailable
+              </h3>
+              <p className="mt-2 text-sm leading-6 opacity-80">
+                {plansError} You can still enter Eleeveon Schools and
+                contact the team about the right package.
+              </p>
+            </div>
+          ) : plans.length ? (
+            <div className="mt-12">
+              <div className="relative">
+                {pricingPageCount > 1 ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        goToPricingPage(safePricingPage - 1)
+                      }
+                      aria-label="Show previous pricing packages"
+                      className="absolute left-0 top-1/2 z-20 hidden h-11 w-11 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-zinc-200 bg-white text-xl shadow-lg transition hover:-translate-x-1/2 hover:-translate-y-[54%] hover:bg-zinc-50 lg:grid dark:border-white/10 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                    >
+                      ‹
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        goToPricingPage(safePricingPage + 1)
+                      }
+                      aria-label="Show next pricing packages"
+                      className="absolute right-0 top-1/2 z-20 hidden h-11 w-11 translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-zinc-200 bg-white text-xl shadow-lg transition hover:translate-x-1/2 hover:-translate-y-[54%] hover:bg-zinc-50 lg:grid dark:border-white/10 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                    >
+                      ›
+                    </button>
+                  </>
+                ) : null}
+
+                <div
+                  className={`grid items-stretch gap-5 transition-all duration-300 ${
+                    pricingCardsPerPage === 3
+                      ? "lg:grid-cols-3"
+                      : pricingCardsPerPage === 2
+                        ? "sm:grid-cols-2"
+                        : "grid-cols-1"
+                  }`}
+                >
+                  {visiblePricingPlans.map((plan) => {
+                    const index = plans.findIndex(
+                      (item) => item.id === plan.id,
+                    );
+                    const features = planFeatureLabels(plan);
+                    const price = planPrice(
+                      plan,
+                      billingCycle,
+                    );
+                    const currency = plan.currency || "GHS";
+                    const monthlyPrice = Number(
+                      plan.priceMonthly || 0,
+                    );
+                    const termlyPrice = planPrice(
+                      plan,
+                      "termly",
+                    );
+                    const yearlyPrice = Number(
+                      plan.priceYearly || 0,
+                    );
+                    const termlySaving =
+                      monthlyPrice * 4 - termlyPrice;
+                    const yearlySaving =
+                      monthlyPrice * 12 - yearlyPrice;
+                    const recommended =
+                      plan.metadata?.recommended === true ||
+                      index === Math.min(1, plans.length - 1);
+
+                    return (
+                      <article
+                        key={plan.id}
+                        className={`relative flex min-h-full flex-col overflow-hidden rounded-4xl border bg-white p-6 transition duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-zinc-950/8 dark:bg-zinc-900 ${
+                          recommended
+                            ? "border-[#2f6fed] shadow-xl shadow-[#2f6fed]/10"
+                            : "border-zinc-200 dark:border-white/10"
+                        }`}
+                      >
+                        {recommended ? (
+                          <div className="absolute right-5 top-5 rounded-full bg-[#2f6fed] px-3 py-1 text-xs font-semibold text-white">
+                            {plan.metadata?.badge || "Popular"}
+                          </div>
+                        ) : null}
+
+                        <div className="pr-20">
+                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#2f6fed]">
+                            {plan.code}
+                          </p>
+                          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
+                            {plan.name}
+                          </h3>
+                        </div>
+
+                        <p className="mt-4 min-h-18 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+                          {plan.description ||
+                            "A flexible Eleeveon Schools package designed around your school’s size and operational needs."}
+                        </p>
+
+                        <div className="mt-6">
+                          <div className="flex items-end gap-2">
+                            <strong className="text-4xl font-semibold tracking-tighter">
+                              {formatMoney(price, currency)}
+                            </strong>
+                            <span className="pb-1 text-sm text-zinc-500 dark:text-zinc-400">
+                              /{billingCycleLabel(billingCycle)}
+                            </span>
+                          </div>
+
+                          {billingCycle === "termly" &&
+                          termlySaving > 0 ? (
+                            <p className="mt-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                              Save{" "}
+                              {formatMoney(
+                                termlySaving,
+                                currency,
+                              )}{" "}
+                              compared with four monthly payments.
+                            </p>
+                          ) : billingCycle === "yearly" &&
+                            yearlySaving > 0 ? (
+                            <p className="mt-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                              Save{" "}
+                              {formatMoney(
+                                yearlySaving,
+                                currency,
+                              )}{" "}
+                              compared with twelve monthly payments.
+                            </p>
+                          ) : (
+                            <p className="mt-2 text-xs text-zinc-400">
+                              Clear package pricing with no separate
+                              feature bundle to assemble.
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="mt-6 grid grid-cols-3 gap-2">
+                          <PlanLimit
+                            value={plan.maxStudents}
+                            label="students"
+                          />
+                          <PlanLimit
+                            value={plan.maxBranches}
+                            label="branches"
+                          />
+                          <PlanLimit
+                            value={plan.maxUsers}
+                            label="users"
+                          />
+                        </div>
+
+                        <div className="mt-7 border-t border-zinc-200 pt-6 dark:border-white/10">
+                          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400">
+                            What the school receives
+                          </p>
+
+                          <ul className="mt-4 space-y-3">
+                            {features
+                              .slice(0, 10)
+                              .map((feature) => (
+                                <li
+                                  key={feature}
+                                  className="flex gap-3 text-sm leading-5 text-zinc-700 dark:text-zinc-200"
+                                >
+                                  <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-50 text-xs font-bold text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400">
+                                    ✓
+                                  </span>
+                                  <span>{feature}</span>
+                                </li>
+                              ))}
+                          </ul>
+
+                          {features.length > 10 ? (
+                            <p className="mt-4 text-xs font-semibold text-[#2f6fed]">
+                              +{features.length - 10} more included
+                              capabilities
+                            </p>
+                          ) : null}
+                        </div>
+
+                        <div className="mt-auto pt-7">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openPublicSignup(plan)
+                            }
+                            className={`inline-flex h-12 w-full items-center justify-center gap-2 rounded-full px-5 text-sm font-semibold transition hover:-translate-y-0.5 ${
+                              recommended
+                                ? "bg-[#2f6fed] text-white hover:bg-[#245ed0]"
+                                : "bg-zinc-950 text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                            }`}
+                          >
+                            Create account with {plan.name}
+                            <ArrowIcon />
+                          </button>
+                          <p className="mt-3 text-center text-xs text-zinc-400">
+                            No school or branch ID is required.
+                            Create the owner account first, then
+                            continue directly to payment.
+                          </p>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {pricingPageCount > 1 ? (
+                <div className="mt-7 flex items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      goToPricingPage(safePricingPage - 1)
+                    }
+                    aria-label="Previous pricing page"
+                    className="mr-2 grid h-9 w-9 place-items-center rounded-full border border-zinc-200 bg-white text-lg shadow-sm transition hover:bg-zinc-50 lg:hidden dark:border-white/10 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                  >
+                    ‹
+                  </button>
+
+                  {Array.from({
+                    length: pricingPageCount,
+                  }).map((_, page) => (
+                    <button
+                      key={page}
+                      type="button"
+                      onClick={() =>
+                        goToPricingPage(page)
+                      }
+                      aria-label={`Show pricing page ${page + 1}`}
+                      aria-current={
+                        safePricingPage === page
+                          ? "true"
+                          : undefined
+                      }
+                      className={`h-2.5 rounded-full transition-all ${
+                        safePricingPage === page
+                          ? "w-8 bg-[#2f6fed]"
+                          : "w-2.5 bg-zinc-300 hover:bg-zinc-400 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                      }`}
+                    />
+                  ))}
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      goToPricingPage(safePricingPage + 1)
+                    }
+                    aria-label="Next pricing page"
+                    className="ml-2 grid h-9 w-9 place-items-center rounded-full border border-zinc-200 bg-white text-lg shadow-sm transition hover:bg-zinc-50 lg:hidden dark:border-white/10 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                  >
+                    ›
+                  </button>
+                </div>
+              ) : null}
+
+              <p className="mt-3 text-center text-xs text-zinc-400">
+                {pricingCardsPerPage === 1
+                  ? "Use the dots or arrows to view each package."
+                  : pricingCardsPerPage === 2
+                    ? "Two packages are shown at a time."
+                    : "Three packages are shown at a time."}
+              </p>
+            </div>
+          ) : (
+            <div className="mt-12 rounded-3xl border border-dashed border-zinc-300 bg-white p-8 text-center dark:border-white/15 dark:bg-zinc-900">
+              <h3 className="font-semibold">
+                Packages are being prepared
+              </h3>
+              <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+                Active subscription plans will appear here
+                automatically when they are published from the
+                developer workspace.
+              </p>
+            </div>
+          )}
+
+          <div className="mt-10 grid gap-4 rounded-4xl border border-zinc-200 bg-white p-6 lg:grid-cols-[1fr_auto] lg:items-center dark:border-white/10 dark:bg-zinc-900">
+            <div>
+              <h3 className="text-xl font-semibold">
+                Not sure which package fits?
+              </h3>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+                The most important starting point is the school’s current
+                student population, number of branches and the capabilities it
+                wants enabled. The package can change later without rebuilding
+                the school’s records.
+              </p>
+            </div>
+            <Link
+              href="/login"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-zinc-300 px-5 text-sm font-semibold transition hover:bg-zinc-50 dark:border-white/15 dark:hover:bg-white/5"
+            >
+              Open Eleeveon Schools
+              <ArrowIcon />
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      <section id="ecosystem" className="relative z-10 px-5 pb-24 sm:px-8">
+        <div className="mx-auto max-w-7xl overflow-hidden rounded-4xl bg-zinc-950 px-6 py-16 text-white sm:px-10 lg:px-16 dark:bg-white dark:text-zinc-950">
+          <div className="grid items-end gap-10 lg:grid-cols-[1fr_auto]">
+            <div>
+              <p className="text-sm font-semibold text-white/60 dark:text-zinc-500">
+                Built as part of Eleeveon Systems
+              </p>
+              <h2 className="mt-4 max-w-3xl text-4xl font-semibold tracking-[-0.045em] sm:text-5xl">
+                Schools today. Learning experiences next.
+              </h2>
+              <p className="mt-5 max-w-2xl text-lg leading-8 text-white/70 dark:text-zinc-600">
+                Eleeveon Schools forms the operational foundation for a wider
+                education ecosystem, including public school websites and the
+                future Eleeveon Learn platform.
+              </p>
+
+              <div className="mt-8 flex flex-wrap gap-3 text-sm">
+                <span className="rounded-full border border-white/15 px-4 py-2 text-white/80 dark:border-zinc-200 dark:text-zinc-700">
+                  Eleeveon Schools
+                </span>
+                <span className="rounded-full border border-white/15 px-4 py-2 text-white/80 dark:border-zinc-200 dark:text-zinc-700">
+                  School Websites
+                </span>
+                <span className="rounded-full border border-white/15 px-4 py-2 text-white/55 dark:border-zinc-200 dark:text-zinc-500">
+                  Eleeveon Learn · Coming soon
+                </span>
+              </div>
+            </div>
+
+            <Link
+              href="/login"
+              className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-white px-6 text-sm font-semibold text-zinc-950 transition hover:-translate-y-0.5 hover:bg-zinc-200 dark:bg-zinc-950 dark:text-white dark:hover:bg-zinc-800"
+            >
+              Open workspace
+              <ArrowIcon />
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      <footer className="relative z-10 border-t border-zinc-200 dark:border-white/10">
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-5 py-10 sm:px-8 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-3">
+            <GridMark />
+            <div>
+              <p className="text-sm font-semibold">Eleeveon Systems</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Building thoughtful technology for education.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-5 text-sm text-zinc-500 dark:text-zinc-400">
+            <a
+              href="https://eleeveon.com"
+              className="hover:text-zinc-950 dark:hover:text-white"
+            >
+              Eleeveon
+            </a>
+            <a
+              href="https://websites.eleeveon.com"
+              className="hover:text-zinc-950 dark:hover:text-white"
+            >
+              School Websites
+            </a>
+            <a
+              href="#pricing"
+              className="hover:text-zinc-950 dark:hover:text-white"
+            >
+              Pricing
+            </a>
+            <span>© {currentYear} Eleeveon Systems</span>
+          </div>
+        </div>
+      </footer>
+
+      {signupPlan ? (
+        <div
+          className="fixed inset-0 z-100 flex items-end justify-center bg-zinc-950/55 p-0 backdrop-blur-sm sm:items-center sm:p-5"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="public-signup-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closePublicSignup();
+          }}
+        >
+          <section className="max-h-[94dvh] w-full overflow-auto rounded-t-[30px] border border-zinc-200 bg-white p-5 shadow-2xl sm:max-w-xl sm:rounded-[30px] sm:p-7 dark:border-white/10 dark:bg-zinc-900">
+            <div className="flex items-start justify-between gap-5">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#2f6fed]">
+                  Create account and continue
+                </p>
+                <h2
+                  id="public-signup-title"
+                  className="mt-2 text-2xl font-semibold tracking-tight"
+                >
+                  Start with {signupPlan.name}
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+                  We will create the owner account, attach this package and
+                  {` ${billingCycle}`} billing choice, then take you to secure
+                  payment. School and branch records can be created afterward.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closePublicSignup}
+                disabled={signupLoading}
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-zinc-200 text-lg dark:border-white/10"
+                aria-label="Close account form"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mt-5 grid grid-cols-3 gap-2 rounded-2xl bg-zinc-50 p-3 dark:bg-white/5">
+              <div>
+                <span className="block text-[10px] uppercase tracking-wide text-zinc-400">
+                  Package
+                </span>
+                <strong className="mt-1 block text-sm">{signupPlan.name}</strong>
+              </div>
+              <div>
+                <span className="block text-[10px] uppercase tracking-wide text-zinc-400">
+                  Billing
+                </span>
+                <strong className="mt-1 block text-sm capitalize">
+                  {billingCycle}
+                </strong>
+              </div>
+              <div>
+                <span className="block text-[10px] uppercase tracking-wide text-zinc-400">
+                  Amount
+                </span>
+                <strong className="mt-1 block text-sm">
+                  {formatMoney(
+                    planPrice(signupPlan, billingCycle),
+                    signupPlan.currency || "GHS",
+                  )}
+                </strong>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-semibold text-zinc-500">
+                  Your full name
+                </span>
+                <input
+                  value={signupForm.fullName}
+                  onChange={(event) =>
+                    setSignupForm((current) => ({
+                      ...current,
+                      fullName: event.target.value,
+                    }))
+                  }
+                  autoComplete="name"
+                  className="h-12 rounded-2xl border border-zinc-200 bg-white px-4 outline-none focus:border-[#2f6fed] dark:border-white/10 dark:bg-zinc-950"
+                />
+              </label>
+
+              <label className="grid gap-1.5">
+                <span className="text-xs font-semibold text-zinc-500">
+                  School or account name
+                </span>
+                <input
+                  value={signupForm.accountName}
+                  onChange={(event) =>
+                    setSignupForm((current) => ({
+                      ...current,
+                      accountName: event.target.value,
+                    }))
+                  }
+                  autoComplete="organization"
+                  className="h-12 rounded-2xl border border-zinc-200 bg-white px-4 outline-none focus:border-[#2f6fed] dark:border-white/10 dark:bg-zinc-950"
+                />
+              </label>
+
+              <label className="grid gap-1.5">
+                <span className="text-xs font-semibold text-zinc-500">
+                  Email address
+                </span>
+                <input
+                  type="email"
+                  value={signupForm.email}
+                  onChange={(event) =>
+                    setSignupForm((current) => ({
+                      ...current,
+                      email: event.target.value,
+                    }))
+                  }
+                  autoComplete="email"
+                  className="h-12 rounded-2xl border border-zinc-200 bg-white px-4 outline-none focus:border-[#2f6fed] dark:border-white/10 dark:bg-zinc-950"
+                />
+              </label>
+
+              <label className="grid gap-1.5">
+                <span className="text-xs font-semibold text-zinc-500">
+                  Phone number
+                </span>
+                <input
+                  value={signupForm.phone}
+                  onChange={(event) =>
+                    setSignupForm((current) => ({
+                      ...current,
+                      phone: event.target.value,
+                    }))
+                  }
+                  autoComplete="tel"
+                  placeholder="Optional"
+                  className="h-12 rounded-2xl border border-zinc-200 bg-white px-4 outline-none focus:border-[#2f6fed] dark:border-white/10 dark:bg-zinc-950"
+                />
+              </label>
+
+              <label className="grid gap-1.5 sm:col-span-2">
+                <span className="text-xs font-semibold text-zinc-500">
+                  Create password
+                </span>
+                <div className="relative">
+                  <input
+                    type={showSignupPassword ? "text" : "password"}
+                    value={signupForm.password}
+                    onChange={(event) =>
+                      setSignupForm((current) => ({
+                        ...current,
+                        password: event.target.value,
+                      }))
+                    }
+                    autoComplete="new-password"
+                    className="h-12 w-full rounded-2xl border border-zinc-200 bg-white px-4 pr-14 outline-none focus:border-[#2f6fed] dark:border-white/10 dark:bg-zinc-950"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowSignupPassword((current) => !current)
+                    }
+                    className="absolute right-1.5 top-1.5 h-9 rounded-xl px-3 text-xs font-semibold text-zinc-500"
+                  >
+                    {showSignupPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </label>
+            </div>
+
+            {signupError ? (
+              <p className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-200">
+                {signupError}
+              </p>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={() => void submitPublicSignup()}
+              disabled={signupLoading}
+              className="mt-5 inline-flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#2f6fed] px-5 text-sm font-semibold text-white transition hover:bg-[#245ed0] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {signupLoading
+                ? "Creating your account..."
+                : Number(planPrice(signupPlan, billingCycle)) > 0
+                  ? "Create account and continue to payment"
+                  : "Create account and activate package"}
+              {!signupLoading ? <ArrowIcon /> : null}
+            </button>
+
+            <p className="mt-3 text-center text-xs leading-5 text-zinc-400">
+              Already registered?{" "}
+              <Link href="/login" className="font-semibold text-[#2f6fed]">
+                Sign in
+              </Link>{" "}
+              and choose the package from your owner workspace.
+            </p>
+          </section>
+        </div>
+      ) : null}
+
     </main>
   );
 }

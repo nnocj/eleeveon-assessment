@@ -63,7 +63,7 @@ type CommonProps = {
 type SubscriptionProps = CommonProps & {
   purpose?: "subscription";
   planId: string;
-  billingCycle?: "monthly" | "yearly";
+  billingCycle?: "monthly" | "termly" | "yearly";
   invoiceId?: never;
   studentId?: never;
   schoolId?: never;
@@ -113,6 +113,14 @@ function purposeTitle(purpose: PaymentCheckoutPurpose) {
 function purposeDescription(purpose: PaymentCheckoutPurpose) {
   if (purpose === "student_fee") return "Choose a payment option and pay this invoice securely.";
   return "Choose a payment option and confirm your subscription securely.";
+}
+
+function billingCycleDescription(
+  cycle: "monthly" | "termly" | "yearly" | undefined,
+) {
+  if (cycle === "termly") return "4-month termly subscription";
+  if (cycle === "yearly") return "yearly subscription";
+  return "monthly subscription";
 }
 
 export default function PaymentCheckout(props: Props) {
@@ -292,7 +300,7 @@ export default function PaymentCheckout(props: Props) {
             <section className="amount-row" aria-label="Payment amount">
               <span>
                 <strong>{money(amount, currency)}</strong>
-                <small>{billingCycle ? `${billingCycle} subscription` : purposeLabel(purpose)}</small>
+                <small>{billingCycle ? billingCycleDescription(billingCycle) : purposeLabel(purpose)}</small>
               </span>
 
               <b>{provider === "paystack" ? "Paystack" : "Manual"}</b>

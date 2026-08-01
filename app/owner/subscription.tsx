@@ -35,6 +35,25 @@ import {
   readJson,
 } from "../components/payments/payment-utils";
 
+type PlanFeatureKey =
+  | "offlineSync"
+  | "cloudBackup"
+  | "reports"
+  | "finance"
+  | "attendance"
+  | "identityCards"
+  | "identitySafety"
+  | "transport"
+  | "schoolWebsites"
+  | "communications"
+  | "calendarScheduling"
+  | "parentPortal"
+  | "studentPortal"
+  | "teacherPortal"
+  | "advancedAnalytics"
+  | "apiAccess"
+  | string;
+
 type Plan = {
   id: string;
   name: string;
@@ -42,6 +61,7 @@ type Plan = {
   description?: string | null;
   currency?: string | null;
   priceMonthly?: number;
+  priceTermly?: number;
   priceYearly?: number;
   maxSchools?: number | null;
   maxBranches?: number | null;
@@ -49,15 +69,34 @@ type Plan = {
   maxStudents?: number | null;
   maxTeachers?: number | null;
   maxStorageMb?: number | null;
+
   offlineSync?: boolean;
   cloudBackup?: boolean;
   reports?: boolean;
   finance?: boolean;
+
+  attendance?: boolean;
+  identityCards?: boolean;
+  identitySafety?: boolean;
+  transport?: boolean;
+  schoolWebsites?: boolean;
+  communications?: boolean;
+  calendarScheduling?: boolean;
+
   parentPortal?: boolean;
   studentPortal?: boolean;
   teacherPortal?: boolean;
   advancedAnalytics?: boolean;
   apiAccess?: boolean;
+
+  features?: PlanFeatureKey[] | null;
+  metadata?: {
+    featureFlags?: Record<string, boolean>;
+    featureKeys?: PlanFeatureKey[];
+    featureSchemaVersion?: number;
+    [key: string]: unknown;
+  } | null;
+
   active?: boolean;
 };
 
@@ -83,7 +122,7 @@ type CurrentSubscription = {
   id?: string;
   planId?: string;
   status?: string;
-  billingCycle?: "monthly" | "yearly" | string;
+  billingCycle?: "monthly" | "termly" | "yearly" | string;
   currentPeriodStart?: string | null;
   currentPeriodEnd?: string | null;
   nextBillingDate?: string | null;
@@ -92,7 +131,7 @@ type CurrentSubscription = {
   payments?: Payment[];
 };
 
-type BillingCycle = "monthly" | "yearly";
+type BillingCycle = "monthly" | "termly" | "yearly";
 
 function niceDate(value?: string | null) {
   if (!value) return "—";
@@ -157,33 +196,126 @@ function subscriptionDisplayStatus(current: CurrentSubscription | null) {
 }
 
 function planPrice(plan: Plan, cycle: BillingCycle) {
-  return cycle === "yearly" ? Number(plan.priceYearly || 0) : Number(plan.priceMonthly || 0);
+  if (cycle === "yearly") return Number(plan.priceYearly || 0);
+  if (cycle === "termly") {
+    const configured = Number(plan.priceTermly || 0);
+    return configured > 0 ? configured : Number(plan.priceMonthly || 0) * 4;
+  }
+  return Number(plan.priceMonthly || 0);
+}
+
+function billingCycleLabel(cycle: BillingCycle) {
+  if (cycle === "termly") return "4 months";
+  if (cycle === "yearly") return "year";
+  return "month";
+}
+
+const PLAN_FEATURE_LABELS: Record<string, string> = {
+  offlineSync: "Offline-first sync",
+  cloudBackup: "Cloud backup",
+  reports: "Assessments & reports",
+  finance: "Finance",
+  attendance: "Attendance",
+  identityCards: "ID cards & passes",
+  identitySafety: "Identity & safety",
+  transport: "School transport",
+  schoolWebsites: "School websites",
+  communications: "Communication",
+  calendarScheduling: "Calendar & scheduling",
+  parentPortal: "Parent portal",
+  studentPortal: "Student portal",
+  teacherPortal: "Teacher portal",
+  advancedAnalytics: "Advanced analytics",
+  apiAccess: "API access",
+};
+
+const PLAN_FEATURE_ORDER: PlanFeatureKey[] = [
+  "offlineSync",
+  "cloudBackup",
+  "reports",
+  "finance",
+  "attendance",
+  "identityCards",
+  "identitySafety",
+  "transport",
+  "schoolWebsites",
+  "communications",
+  "calendarScheduling",
+  "parentPortal",
+  "studentPortal",
+  "teacherPortal",
+  "advancedAnalytics",
+  "apiAccess",
+];
+
+function planFeatureEnabled(plan: Plan, key: PlanFeatureKey) {
+  const topLevelValue = plan[key as keyof Plan];
+
+  if (typeof topLevelValue === "boolean") {
+    return topLevelValue;
+  }
+
+  const metadataFlag = plan.metadata?.featureFlags?.[key];
+  if (typeof metadataFlag === "boolean") {
+    return metadataFlag;
+  }
+
+  if (Array.isArray(plan.features)) {
+    return plan.features.includes(key);
+  }
+
+  return false;
+}
+
+function humanizeFeatureKey(key: string) {
+  return (
+    PLAN_FEATURE_LABELS[key] ||
+    key
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (character) => character.toUpperCase())
+  );
 }
 
 function planFeatures(plan: Plan) {
-  return [
+  const limits = [
     plan.maxSchools ? `${plan.maxSchools} school(s)` : "Flexible schools",
     plan.maxBranches ? `${plan.maxBranches} branch(es)` : "Flexible branches",
     plan.maxUsers ? `${plan.maxUsers} users` : "Flexible users",
     plan.maxStudents ? `${plan.maxStudents} students` : "Flexible students",
     plan.maxTeachers ? `${plan.maxTeachers} teachers` : "Flexible teachers",
     plan.maxStorageMb ? `${plan.maxStorageMb} MB storage` : null,
-    plan.offlineSync ? "Offline sync" : null,
-    plan.cloudBackup ? "Cloud backup" : null,
-    plan.reports ? "Reports" : null,
-    plan.finance ? "Finance" : null,
-    plan.parentPortal ? "Parent portal" : null,
-    plan.studentPortal ? "Student portal" : null,
-    plan.teacherPortal ? "Teacher portal" : null,
-    plan.advancedAnalytics ? "Advanced analytics" : null,
-    plan.apiAccess ? "API access" : null,
-  ].filter(Boolean);
+  ];
+
+  const knownFeatures = PLAN_FEATURE_ORDER.filter((key) =>
+    planFeatureEnabled(plan, key),
+  ).map((key) => humanizeFeatureKey(key));
+
+  const extraFeatureKeys = Array.from(
+    new Set([
+      ...(Array.isArray(plan.features) ? plan.features : []),
+      ...(Array.isArray(plan.metadata?.featureKeys)
+        ? plan.metadata.featureKeys
+        : []),
+      ...Object.keys(plan.metadata?.featureFlags || {}).filter(
+        (key) => plan.metadata?.featureFlags?.[key] === true,
+      ),
+    ]),
+  ).filter((key) => !PLAN_FEATURE_ORDER.includes(key));
+
+  const extraFeatures = extraFeatureKeys.map((key) =>
+    humanizeFeatureKey(String(key)),
+  );
+
+  return [...limits, ...knownFeatures, ...extraFeatures].filter(
+    (value): value is string => Boolean(value),
+  );
 }
 
 export default function OwnerSubscriptionPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [current, setCurrent] = useState<CurrentSubscription | null>(null);
-  const [cycle, setCycle] = useState<BillingCycle>("monthly");
+  const [cycle, setCycle] = useState<BillingCycle>("termly");
   const [loading, setLoading] = useState(true);
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
   const [notice, setNotice] = useState("");
@@ -214,9 +346,39 @@ export default function OwnerSubscriptionPage() {
       setPlans(activePlans);
       setCurrent(currentJson?.id || currentJson?.planId ? currentJson : null);
 
-      if (currentJson?.billingCycle === "yearly") {
-        setCycle("yearly");
+      const params = new URLSearchParams(window.location.search);
+      const requestedPlanId = params.get("planId");
+      const requestedCycle = params.get("billingCycle");
+      const shouldOpenCheckout = params.get("checkout") === "1";
+
+      if (
+        requestedCycle === "monthly" ||
+        requestedCycle === "termly" ||
+        requestedCycle === "yearly"
+      ) {
+        setCycle(requestedCycle);
       }
+
+      if (requestedPlanId && shouldOpenCheckout) {
+        const requestedPlan = activePlans.find(
+          (plan) => plan.id === requestedPlanId,
+        );
+
+        if (requestedPlan) {
+          setSelectedPlan(requestedPlan);
+
+          const cleanUrl = new URL(window.location.href);
+          cleanUrl.searchParams.delete("planId");
+          cleanUrl.searchParams.delete("billingCycle");
+          cleanUrl.searchParams.delete("checkout");
+          cleanUrl.searchParams.delete("source");
+          window.history.replaceState({}, "", cleanUrl.toString());
+        }
+      }
+
+      // Keep the pricing view on the user's selected/default cycle.
+      // The current subscription's billing cycle is shown in the status details,
+      // but it must not override the package-view selector after plans load.
     } catch (err: any) {
       setError(err?.message || "Unable to load subscription plans.");
     } finally {
@@ -298,11 +460,15 @@ export default function OwnerSubscriptionPage() {
         <button
           type="button"
           className="ba-add-inline"
-          onClick={() => setCycle((value) => (value === "monthly" ? "yearly" : "monthly"))}
+          onClick={() =>
+            setCycle((value) =>
+              value === "monthly" ? "termly" : value === "termly" ? "yearly" : "monthly",
+            )
+          }
           aria-label="Toggle billing cycle"
           title="Toggle billing cycle"
         >
-          {cycle === "monthly" ? "Month" : "Year"}
+          {cycle === "monthly" ? "Month" : cycle === "termly" ? "Term" : "Year"}
         </button>
 
         <button
@@ -329,7 +495,7 @@ export default function OwnerSubscriptionPage() {
             <span className="status-main">
               <strong>{currentPlanName}</strong>
               <small>
-                {confirmedSubscriptionActive ? "Current subscription" : "Pending subscription"} · {current.billingCycle || "monthly"}
+                {confirmedSubscriptionActive ? "Current subscription" : "Pending subscription"} · {current.billingCycle || "termly"}
               </small>
               <em>
                 {currentStatus} · Ends {confirmedSubscriptionActive ? niceDate(current.currentPeriodEnd) : "after confirmation"}
@@ -347,7 +513,7 @@ export default function OwnerSubscriptionPage() {
             <span className="status-main">
               <strong>No active subscription</strong>
               <small>Choose a package below</small>
-              <em>Plans are available in monthly and yearly billing.</em>
+              <em>Plans are available in monthly, four-month termly and yearly billing.</em>
             </span>
             <span className="status-side">
               <span className="status-dot-mini gray" />
@@ -379,11 +545,21 @@ export default function OwnerSubscriptionPage() {
         {sortedPlans.map((plan) => {
           const currency = plan.currency || "GHS";
           const monthlyPrice = Number(plan.priceMonthly || 0);
+          const configuredTermlyPrice = Number(plan.priceTermly || 0);
+          const termlyPrice =
+            configuredTermlyPrice > 0 ? configuredTermlyPrice : monthlyPrice * 4;
           const yearlyPrice = Number(plan.priceYearly || 0);
+
+          const expectedTermlyCost = monthlyPrice * 4;
+          const termlyDifference = expectedTermlyCost - termlyPrice;
+          const hasTermlySaving = cycle === "termly" && termlyDifference > 0;
+          const hasTermlyIncrease = cycle === "termly" && termlyDifference < 0;
+
           const expectedYearlyCost = monthlyPrice * 12;
           const yearlyDifference = expectedYearlyCost - yearlyPrice;
           const hasYearlySaving = cycle === "yearly" && yearlyDifference > 0;
           const hasYearlyIncrease = cycle === "yearly" && yearlyDifference < 0;
+
           const price = planPrice(plan, cycle);
 
           const planMatchesCurrent =
@@ -410,15 +586,35 @@ export default function OwnerSubscriptionPage() {
               <div className="price">
                 <div>
                   <strong>{money(price, currency)}</strong>
-                  <span>/{cycle === "yearly" ? "year" : "month"}</span>
+                  <span>/{billingCycleLabel(cycle)}</span>
                 </div>
+
+                {cycle === "termly" ? (
+                  <small>
+                    Four monthly payments would cost:{" "}
+                    <b>{money(expectedTermlyCost, currency)}</b>
+                  </small>
+                ) : null}
 
                 {cycle === "yearly" ? (
                   <small>
-                    Expected yearly cost: <b>{money(expectedYearlyCost, currency)}</b>
+                    Twelve monthly payments would cost:{" "}
+                    <b>{money(expectedYearlyCost, currency)}</b>
                   </small>
                 ) : null}
               </div>
+
+              {hasTermlySaving ? (
+                <div className="saving-pill">
+                  Save {money(termlyDifference, currency)} every 4 months
+                </div>
+              ) : null}
+
+              {hasTermlyIncrease ? (
+                <div className="saving-pill warning">
+                  Termly is {money(Math.abs(termlyDifference), currency)} higher
+                </div>
+              ) : null}
 
               {hasYearlySaving ? (
                 <div className="saving-pill">
@@ -439,10 +635,16 @@ export default function OwnerSubscriptionPage() {
               ) : null}
 
               <ul>
-                {features.slice(0, 12).map((feature) => (
+                {features.slice(0, 16).map((feature) => (
                   <li key={String(feature)}>✓ {feature}</li>
                 ))}
               </ul>
+
+              {features.length > 16 ? (
+                <small className="feature-count">
+                  +{features.length - 16} more included
+                </small>
+              ) : null}
 
               <button
                 type="button"
@@ -550,6 +752,14 @@ function MoreSheet({
         <div className="cycle-sheet">
           <button
             type="button"
+            className={cycle === "termly" ? "active" : ""}
+            onClick={() => setCycle("termly")}
+          >
+            Termly
+            <small>4 months</small>
+          </button>
+          <button
+            type="button"
             className={cycle === "monthly" ? "active" : ""}
             onClick={() => setCycle("monthly")}
           >
@@ -567,7 +777,7 @@ function MoreSheet({
         <div className="sub-info-list">
           <InfoLine label="Plan" value={current?.plan?.name || "No subscription"} />
           <InfoLine label="Status" value={currentStatus} />
-          <InfoLine label="Billing" value={current?.billingCycle || cycle} />
+          <InfoLine label="Billing" value={current?.billingCycle || "termly"} />
           <InfoLine label="Current" value={confirmedSubscriptionActive ? "Confirmed" : current ? "Pending" : "None"} />
           <InfoLine label="Ends" value={confirmedSubscriptionActive ? niceDate(current?.currentPeriodEnd) : "After confirmation"} />
           {currentInvoice ? (
@@ -1049,7 +1259,7 @@ const css = `
   margin:0;
   padding:0;
   display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
+  grid-template-columns:repeat(3,minmax(0,1fr));
   gap:5px 8px;
 }
 
@@ -1061,6 +1271,19 @@ const css = `
   font-size:11px;
   font-weight:800;
   line-height:1.2;
+}
+
+.feature-count{
+  display:block;
+  width:max-content;
+  max-width:100%;
+  margin-top:-1px;
+  padding:4px 7px;
+  border-radius:999px;
+  background:color-mix(in srgb,var(--primary-color,#2563eb) 8%,transparent);
+  color:var(--primary-color,#2563eb);
+  font-size:9.5px;
+  font-weight:1000;
 }
 
 .plan button{
@@ -1146,7 +1369,7 @@ const css = `
 
 .cycle-sheet{
   display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
+  grid-template-columns:repeat(3,minmax(0,1fr));
   gap:7px;
   padding:4px;
   border-radius:999px;
@@ -1168,6 +1391,15 @@ const css = `
 .cycle-sheet button.active{
   background:var(--primary-color,#2563eb);
   color:#fff;
+}
+
+.cycle-sheet button small{
+  display:block;
+  margin-top:1px;
+  color:inherit;
+  font-size:8.5px;
+  font-weight:850;
+  opacity:.78;
 }
 
 .sub-info-list{
