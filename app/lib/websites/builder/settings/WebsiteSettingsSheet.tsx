@@ -19,6 +19,9 @@ import {
   db,
   type WebsiteSetting,
   type WebsiteDomain,
+  type WebsitePage,
+  type WebsiteSection,
+  type WebsiteNavigationItem,
 } from "../../../db/db";
 
 import {
@@ -64,6 +67,217 @@ function createdId(value: unknown) {
 
 function activeRecord(row: any) {
   return !row?.isDeleted;
+}
+
+type SeedSectionDefinition = {
+  sectionKey: string;
+  sectionType: string;
+  sourceType:
+    | "manual"
+    | "school"
+    | "branches"
+    | "programs"
+    | "subjects"
+    | "organizations"
+    | "teachers"
+    | "announcements"
+    | "calendar_events"
+    | "portal_highlights"
+    | "media_gallery"
+    | "custom";
+  heading: string;
+  subheading?: string;
+  showInNavigation?: boolean;
+  navigationLabel?: string;
+};
+
+function normalizeTemplateSectionName(value: string) {
+  return value.trim().toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function sectionDefinition(label: string): SeedSectionDefinition {
+  const normalized = normalizeTemplateSectionName(label);
+
+  const definitions: Record<string, SeedSectionDefinition> = {
+    hero: { sectionKey: "home", sectionType: "hero", sourceType: "school", heading: "", showInNavigation: true, navigationLabel: "Home" },
+    welcome: { sectionKey: "home", sectionType: "hero", sourceType: "school", heading: "", showInNavigation: true, navigationLabel: "Home" },
+    quick_links: { sectionKey: "quick-links", sectionType: "quick_links", sourceType: "custom", heading: "Explore our school" },
+    about: { sectionKey: "about", sectionType: "about", sourceType: "school", heading: "About our school", showInNavigation: true, navigationLabel: "About" },
+    school_profile: { sectionKey: "about", sectionType: "about", sourceType: "school", heading: "About our school", showInNavigation: true, navigationLabel: "About" },
+    leadership: { sectionKey: "leadership", sectionType: "leadership", sourceType: "teachers", heading: "School leadership", showInNavigation: true, navigationLabel: "Leadership" },
+    academics: { sectionKey: "academics", sectionType: "subjects", sourceType: "subjects", heading: "Academic learning", showInNavigation: true, navigationLabel: "Academics" },
+    programmes: { sectionKey: "programmes", sectionType: "programmes", sourceType: "programs", heading: "Our programmes", showInNavigation: true, navigationLabel: "Programmes" },
+    programs: { sectionKey: "programmes", sectionType: "programmes", sourceType: "programs", heading: "Our programmes", showInNavigation: true, navigationLabel: "Programmes" },
+    why_choose_us: { sectionKey: "why-choose-us", sectionType: "statistics", sourceType: "school", heading: "Why choose us" },
+    campus_life: { sectionKey: "campus-life", sectionType: "campus_life", sourceType: "portal_highlights", heading: "Campus life" },
+    school_life: { sectionKey: "school-life", sectionType: "organizations", sourceType: "organizations", heading: "School life" },
+    admissions: { sectionKey: "admissions", sectionType: "admissions", sourceType: "manual", heading: "Admissions", showInNavigation: true, navigationLabel: "Admissions" },
+    announcements: { sectionKey: "announcements", sectionType: "announcements", sourceType: "announcements", heading: "Announcements" },
+    news: { sectionKey: "news", sectionType: "announcements", sourceType: "announcements", heading: "Latest news" },
+    events: { sectionKey: "events", sectionType: "calendar_events", sourceType: "calendar_events", heading: "Upcoming events" },
+    gallery: { sectionKey: "gallery", sectionType: "gallery", sourceType: "media_gallery", heading: "School gallery", showInNavigation: true, navigationLabel: "Gallery" },
+    contact: { sectionKey: "contact", sectionType: "contact", sourceType: "school", heading: "Contact us", showInNavigation: true, navigationLabel: "Contact" },
+    enquire: { sectionKey: "contact", sectionType: "contact", sourceType: "school", heading: "Enquire now", showInNavigation: true, navigationLabel: "Contact" },
+  };
+
+  return definitions[normalized] || {
+    sectionKey: normalized.replace(/_/g, "-") || "section",
+    sectionType: normalized || "custom",
+    sourceType: "custom",
+    heading: label,
+  };
+}
+
+function websiteRecordStatus(status: WebsiteSettingsDraft["status"]): "draft" | "published" | "hidden" | "archived" {
+  if (status === "published") return "published";
+  if (status === "archived") return "archived";
+  if (status === "unpublished") return "hidden";
+  return "draft";
+}
+
+async function ensureWebsiteStructure({
+  accountId,
+  schoolId,
+  branchId,
+  websiteSettingId,
+  templateKey,
+  siteName,
+  websiteStatus,
+}: {
+  accountId: string;
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+  templateKey: string;
+  siteName: string;
+  websiteStatus: WebsiteSettingsDraft["status"];
+}) {
+  const now = Date.now();
+  const recordStatus = websiteRecordStatus(websiteStatus);
+  const publishedAt = websiteStatus === "published" ? now : null;
+
+  const pageRows = ((await (db as any).websitePages.toArray()) as WebsitePage[]).filter(
+    (row) => row.accountId === accountId && row.schoolId === schoolId && row.websiteSettingId === websiteSettingId && activeRecord(row),
+  );
+
+  let homePage = pageRows.find((row) => row.pageType === "home" || row.slug === "home");
+  let homePageId = cleanId(homePage?.id);
+  const pagePayload = {
+    accountId,
+    schoolId,
+    branchId: cleanId(branchId) || null,
+    websiteSettingId,
+    title: homePage?.title || "Home",
+    slug: "home",
+    pageType: "home",
+    status: recordStatus,
+    displayOrder: 0,
+    parentPageId: null,
+    seoTitle: homePage?.seoTitle || siteName,
+    seoDescription: homePage?.seoDescription || null,
+    seoKeywords: homePage?.seoKeywords || [],
+    socialPreviewMediaAssetId: homePage?.socialPreviewMediaAssetId || null,
+    showInNavigation: true,
+    navigationLabel: "Home",
+    publishedAt,
+    metadata: { ...(homePage?.metadata || {}), seededFromTemplate: templateKey },
+  };
+
+  if (homePageId) {
+    await updateLocal("websitePages" as any, homePageId, pagePayload as any);
+  } else {
+    homePageId = createdId(await createLocal("websitePages" as any, pagePayload as any));
+  }
+  if (!homePageId) throw new Error("The website home page could not be created.");
+
+  const template = getWebsiteTemplates().find((item) => item.key === templateKey) || getWebsiteTemplates()[0];
+  const defaults = (template?.defaultSections?.length ? template.defaultSections : ["Hero", "About", "Academics", "Leadership", "Gallery", "Contact"]).map(sectionDefinition);
+  const uniqueDefaults = defaults.filter((item, index, all) => all.findIndex((candidate) => candidate.sectionKey === item.sectionKey) === index);
+
+  const sectionRows = ((await (db as any).websiteSections.toArray()) as WebsiteSection[]).filter(
+    (row) => row.accountId === accountId && row.schoolId === schoolId && row.websiteSettingId === websiteSettingId && row.pageId === homePageId && activeRecord(row),
+  );
+  const sectionIds = new Map<string, string>();
+
+  for (let index = 0; index < uniqueDefaults.length; index += 1) {
+    const definition = uniqueDefaults[index];
+    const existing = sectionRows.find((row) => row.sectionKey === definition.sectionKey);
+    const sectionPayload = {
+      accountId,
+      schoolId,
+      branchId: cleanId(branchId) || null,
+      websiteSettingId,
+      pageId: homePageId,
+      sectionKey: definition.sectionKey,
+      sectionType: definition.sectionType,
+      variant: existing?.variant || templateKey,
+      status: recordStatus,
+      displayOrder: existing?.displayOrder ?? index,
+      sourceType: existing?.sourceType || definition.sourceType,
+      sourceId: existing?.sourceId || null,
+      sourceFilters: existing?.sourceFilters || {},
+      heading: existing?.heading ?? definition.heading,
+      subheading: existing?.subheading || null,
+      body: existing?.body || null,
+      content: existing?.content || {},
+      settings: existing?.settings || {},
+      primaryMediaAssetId: (existing as any)?.primaryMediaAssetId || null,
+      backgroundMediaAssetId: (existing as any)?.backgroundMediaAssetId || null,
+      publishedAt,
+      metadata: { ...(existing?.metadata || {}), seededFromTemplate: templateKey },
+    };
+
+    let sectionId = cleanId(existing?.id);
+    if (sectionId) {
+      await updateLocal("websiteSections" as any, sectionId, sectionPayload as any);
+    } else {
+      sectionId = createdId(await createLocal("websiteSections" as any, sectionPayload as any));
+    }
+    if (sectionId) sectionIds.set(definition.sectionKey, sectionId);
+  }
+
+  const navigationRows = ((await (db as any).websiteNavigationItems.toArray()) as WebsiteNavigationItem[]).filter(
+    (row) => row.accountId === accountId && row.schoolId === schoolId && row.websiteSettingId === websiteSettingId && row.location === "header" && activeRecord(row),
+  );
+
+  const navigationDefinitions = uniqueDefaults.filter((item) => item.showInNavigation);
+  for (let index = 0; index < navigationDefinitions.length; index += 1) {
+    const definition = navigationDefinitions[index];
+    const sectionId = sectionIds.get(definition.sectionKey);
+    const isHome = definition.sectionKey === "home";
+    const existing = navigationRows.find((row) =>
+      isHome ? row.pageId === homePageId && row.targetType === "page" : row.sectionId === sectionId && row.targetType === "section",
+    );
+    const navigationPayload = {
+      accountId,
+      schoolId,
+      branchId: cleanId(branchId) || null,
+      websiteSettingId,
+      location: "header",
+      parentItemId: null,
+      label: definition.navigationLabel || definition.heading || "Section",
+      targetType: isHome ? "page" : "section",
+      pageId: isHome ? homePageId : null,
+      sectionId: isHome ? null : sectionId || null,
+      url: isHome ? "/" : `#${definition.sectionKey}`,
+      openInNewTab: false,
+      displayOrder: index,
+      active: websiteStatus !== "archived",
+      metadata: { ...(existing?.metadata || {}), seededFromTemplate: templateKey },
+    };
+
+    const navigationId = cleanId(existing?.id);
+    if (navigationId) {
+      await updateLocal("websiteNavigationItems" as any, navigationId, navigationPayload as any);
+    } else {
+      await createLocal("websiteNavigationItems" as any, navigationPayload as any);
+    }
+  }
+
+  await updateLocal("websiteSettings" as any, websiteSettingId, {
+    homePageId,
+    metadata: { settingsSource: "branch_settings", branchThemeControlled: true, structureSeeded: true, seededTemplateKey: templateKey },
+  } as any);
 }
 
 function fieldLabel(tab: WebsiteEditorTab) {
@@ -279,6 +493,16 @@ export default function WebsiteSettingsSheet({
       update("id", websiteSettingId);
       update("eleeveonSlug", slug);
 
+      await ensureWebsiteStructure({
+        accountId,
+        schoolId,
+        branchId: cleanId(branchId) || null,
+        websiteSettingId,
+        templateKey: draft.templateKey,
+        siteName: payload.siteName,
+        websiteStatus: draft.status,
+      });
+
       const normalizedCustomDomain = customDomain
         .trim()
         .toLowerCase()
@@ -320,8 +544,8 @@ export default function WebsiteSettingsSheet({
 
       setMessage(
         draft.status === "published"
-          ? "Website settings saved and marked for publishing."
-          : "Website settings saved.",
+          ? "Website, home page, sections and navigation saved for publishing."
+          : "Website settings and page structure saved.",
       );
 
       window.dispatchEvent(new Event("website-settings-updated"));
