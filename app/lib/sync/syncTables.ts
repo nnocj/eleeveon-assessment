@@ -134,6 +134,8 @@ export const ALL_KNOWN_DEXIE_TABLES = [
   "notificationTemplates",
 
   "schoolBranchSettings",
+   // Portal home / school experience
+  "portalHighlights",
 
   // Public school website and template system
   "websiteSettings",
@@ -322,6 +324,8 @@ export const LOCAL_FIRST_SYNC_TABLES = [
 
   // Settings
   "schoolBranchSettings",
+   // Portal home / school experience
+  "portalHighlights",
 
   // Public school website and template system
   // Records are lightweight, offline-first metadata/content. Website media files
