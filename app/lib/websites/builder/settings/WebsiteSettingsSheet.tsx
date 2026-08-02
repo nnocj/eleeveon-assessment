@@ -3,1246 +3,1209 @@
 /**
  * app/lib/websites/builder/settings/WebsiteSettingsSheet.tsx
  * --------------------------------------------------------------------------
- * Local-first website controls opened from Branchsettings.tsx.
- *
- * Responsibilities:
- * - load/create the school's WebsiteSetting record;
- * - choose a template;
- * - configure the Eleeveon subdomain and optional custom domain;
- * - edit SEO, analytics and publishing controls;
- * - keep website persistence separate from the already-large Branchsettings file.
+ * Report-style website settings experience:
+ * - template selection;
+ * - exact shared preview;
+ * - display, labels, content and ordering controls;
+ * - domain, SEO and publishing;
+ * - local-first persistence for identity, template settings and assignment.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import {
   db,
-  type WebsiteSetting,
-  type WebsiteDomain,
-  type WebsitePage,
-  type WebsiteSection,
-  type WebsiteNavigationItem,
+  type WebsiteTemplateAssignment,
+  type WebsiteTemplateSetting,
 } from "../../../db/db";
 
-import {
-  createLocal,
-  updateLocal,
-} from "../../../sync/syncUtils";
+import { SyncStatus } from "../../../constants/syncStatus";
 
-import WebsitePreview from "../../components/WebsitePreview";
-import { getWebsiteTemplates } from "../../templates/registry";
-import {
-  normalizeWebsiteSlug,
-  splitKeywords,
-  websiteSettingsDraft,
-} from "../../shared/websiteDefaults";
 import type {
   WebsiteEditorTab,
   WebsiteSettingsDraft,
+  WebsiteTemplateSettings,
+  WebsiteTemplateDefinition,
+  WebsiteStatus,
 } from "../../types";
 
-type Props = {
-  accountId?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  schoolName?: string;
-  branchName?: string;
-  primaryColor?: string;
-  onClose: () => void;
-  onSaved?: () => void | Promise<void>;
-};
+import {
+  applyWebsiteTemplateDesign,
+  createWebsiteTemplateSettings,
+} from "../../shared/websiteTemplateSettings";
 
-function cleanId(value: unknown) {
-  const normalized = String(value ?? "").trim();
-  return normalized || undefined;
-}
+import {
+  normalizeCustomDomain,
+  splitKeywords,
+  websiteSettingsDraft,
+} from "../../shared/websiteDefaults";
 
-function createdId(value: unknown) {
-  if (typeof value === "string" || typeof value === "number") {
-    return String(value);
-  }
+import {
+  getDefaultWebsiteTemplate,
+  getWebsiteTemplate,
+  getWebsiteTemplates,
+} from "../../templates/registry";
 
-  return cleanId((value as any)?.id);
-}
+import WebsitePreview from "../../components/WebsitePreview";
+import WebsiteTemplateSelector from "./WebsiteTemplateSelector";
+import WebsiteDisplayControls from "./WebsiteDisplayControls";
+import WebsiteLabelControls from "./WebsiteLabelControls";
+import WebsiteContentOverrides from "./WebsiteContentOverrides";
+import WebsiteSectionOrder from "./WebsiteSectionOrder";
+import WebsitePublishingControls from "./WebsitePublishingControls";
+import WebsiteDomainControls from "./WebsiteDomainControls";
 
-function activeRecord(row: any) {
-  return !row?.isDeleted;
-}
+type AnyRow = Record<string, any>;
 
-type SeedSectionDefinition = {
-  sectionKey: string;
-  sectionType: string;
-  sourceType:
-    | "manual"
-    | "school"
-    | "branches"
-    | "programs"
-    | "subjects"
-    | "organizations"
-    | "teachers"
-    | "announcements"
-    | "calendar_events"
-    | "portal_highlights"
-    | "media_gallery"
-    | "custom";
-  heading: string;
-  subheading?: string;
-  showInNavigation?: boolean;
-  navigationLabel?: string;
-};
+const TABS: Array<{
+  key: WebsiteEditorTab;
+  label: string;
+}> = [
+  { key: "template", label: "Template" },
+  { key: "display", label: "Display" },
+  { key: "labels", label: "Labels" },
+  { key: "content", label: "Content" },
+  { key: "order", label: "Order" },
+  { key: "domain", label: "Domain" },
+  { key: "seo", label: "SEO" },
+  { key: "publishing", label: "Publishing" },
+];
 
-function normalizeTemplateSectionName(value: string) {
-  return value.trim().toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-}
+const id = () =>
+  typeof crypto !== "undefined" &&
+  "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2)}`;
 
-function sectionDefinition(label: string): SeedSectionDefinition {
-  const normalized = normalizeTemplateSectionName(label);
-
-  const definitions: Record<string, SeedSectionDefinition> = {
-    hero: { sectionKey: "home", sectionType: "hero", sourceType: "school", heading: "", showInNavigation: true, navigationLabel: "Home" },
-    welcome: { sectionKey: "home", sectionType: "hero", sourceType: "school", heading: "", showInNavigation: true, navigationLabel: "Home" },
-    quick_links: { sectionKey: "quick-links", sectionType: "quick_links", sourceType: "custom", heading: "Explore our school" },
-    about: { sectionKey: "about", sectionType: "about", sourceType: "school", heading: "About our school", showInNavigation: true, navigationLabel: "About" },
-    school_profile: { sectionKey: "about", sectionType: "about", sourceType: "school", heading: "About our school", showInNavigation: true, navigationLabel: "About" },
-    leadership: { sectionKey: "leadership", sectionType: "leadership", sourceType: "teachers", heading: "School leadership", showInNavigation: true, navigationLabel: "Leadership" },
-    academics: { sectionKey: "academics", sectionType: "subjects", sourceType: "subjects", heading: "Academic learning", showInNavigation: true, navigationLabel: "Academics" },
-    programmes: { sectionKey: "programmes", sectionType: "programmes", sourceType: "programs", heading: "Our programmes", showInNavigation: true, navigationLabel: "Programmes" },
-    programs: { sectionKey: "programmes", sectionType: "programmes", sourceType: "programs", heading: "Our programmes", showInNavigation: true, navigationLabel: "Programmes" },
-    why_choose_us: { sectionKey: "why-choose-us", sectionType: "statistics", sourceType: "school", heading: "Why choose us" },
-    campus_life: { sectionKey: "campus-life", sectionType: "campus_life", sourceType: "portal_highlights", heading: "Campus life" },
-    school_life: { sectionKey: "school-life", sectionType: "organizations", sourceType: "organizations", heading: "School life" },
-    admissions: { sectionKey: "admissions", sectionType: "admissions", sourceType: "manual", heading: "Admissions", showInNavigation: true, navigationLabel: "Admissions" },
-    announcements: { sectionKey: "announcements", sectionType: "announcements", sourceType: "announcements", heading: "Announcements" },
-    news: { sectionKey: "news", sectionType: "announcements", sourceType: "announcements", heading: "Latest news" },
-    events: { sectionKey: "events", sectionType: "calendar_events", sourceType: "calendar_events", heading: "Upcoming events" },
-    gallery: { sectionKey: "gallery", sectionType: "gallery", sourceType: "media_gallery", heading: "School gallery", showInNavigation: true, navigationLabel: "Gallery" },
-    contact: { sectionKey: "contact", sectionType: "contact", sourceType: "school", heading: "Contact us", showInNavigation: true, navigationLabel: "Contact" },
-    enquire: { sectionKey: "contact", sectionType: "contact", sourceType: "school", heading: "Enquire now", showInNavigation: true, navigationLabel: "Contact" },
-  };
-
-  return definitions[normalized] || {
-    sectionKey: normalized.replace(/_/g, "-") || "section",
-    sectionType: normalized || "custom",
-    sourceType: "custom",
-    heading: label,
-  };
-}
-
-function websiteRecordStatus(status: WebsiteSettingsDraft["status"]): "draft" | "published" | "hidden" | "archived" {
-  if (status === "published") return "published";
-  if (status === "archived") return "archived";
-  if (status === "unpublished") return "hidden";
-  return "draft";
-}
-
-async function ensureWebsiteStructure({
-  accountId,
-  schoolId,
-  branchId,
-  websiteSettingId,
-  templateKey,
-  siteName,
-  websiteStatus,
-}: {
+export type WebsiteSettingsSheetProps = {
+  open: boolean;
   accountId: string;
   schoolId: string;
   branchId?: string | null;
-  websiteSettingId: string;
-  templateKey: string;
-  siteName: string;
-  websiteStatus: WebsiteSettingsDraft["status"];
-}) {
-  const now = Date.now();
-  const recordStatus = websiteRecordStatus(websiteStatus);
-  const publishedAt = websiteStatus === "published" ? now : null;
-
-  const pageRows = ((await (db as any).websitePages.toArray()) as WebsitePage[]).filter(
-    (row) => row.accountId === accountId && row.schoolId === schoolId && row.websiteSettingId === websiteSettingId && activeRecord(row),
-  );
-
-  let homePage = pageRows.find((row) => row.pageType === "home" || row.slug === "home");
-  let homePageId = cleanId(homePage?.id);
-  const pagePayload = {
-    accountId,
-    schoolId,
-    branchId: cleanId(branchId) || null,
-    websiteSettingId,
-    title: homePage?.title || "Home",
-    slug: "home",
-    pageType: "home",
-    status: recordStatus,
-    displayOrder: 0,
-    parentPageId: null,
-    seoTitle: homePage?.seoTitle || siteName,
-    seoDescription: homePage?.seoDescription || null,
-    seoKeywords: homePage?.seoKeywords || [],
-    socialPreviewMediaAssetId: homePage?.socialPreviewMediaAssetId || null,
-    showInNavigation: true,
-    navigationLabel: "Home",
-    publishedAt,
-    metadata: { ...(homePage?.metadata || {}), seededFromTemplate: templateKey },
-  };
-
-  if (homePageId) {
-    await updateLocal("websitePages" as any, homePageId, pagePayload as any);
-  } else {
-    homePageId = createdId(await createLocal("websitePages" as any, pagePayload as any));
-  }
-  if (!homePageId) throw new Error("The website home page could not be created.");
-
-  const template = getWebsiteTemplates().find((item) => item.key === templateKey) || getWebsiteTemplates()[0];
-  const defaults = (template?.defaultSections?.length ? template.defaultSections : ["Hero", "About", "Academics", "Leadership", "Gallery", "Contact"]).map(sectionDefinition);
-  const uniqueDefaults = defaults.filter((item, index, all) => all.findIndex((candidate) => candidate.sectionKey === item.sectionKey) === index);
-
-  const sectionRows = ((await (db as any).websiteSections.toArray()) as WebsiteSection[]).filter(
-    (row) => row.accountId === accountId && row.schoolId === schoolId && row.websiteSettingId === websiteSettingId && row.pageId === homePageId && activeRecord(row),
-  );
-  const sectionIds = new Map<string, string>();
-
-  for (let index = 0; index < uniqueDefaults.length; index += 1) {
-    const definition = uniqueDefaults[index];
-    const existing = sectionRows.find((row) => row.sectionKey === definition.sectionKey);
-    const sectionPayload = {
-      accountId,
-      schoolId,
-      branchId: cleanId(branchId) || null,
-      websiteSettingId,
-      pageId: homePageId,
-      sectionKey: definition.sectionKey,
-      sectionType: definition.sectionType,
-      variant: existing?.variant || templateKey,
-      status: recordStatus,
-      displayOrder: existing?.displayOrder ?? index,
-      sourceType: existing?.sourceType || definition.sourceType,
-      sourceId: existing?.sourceId || null,
-      sourceFilters: existing?.sourceFilters || {},
-      heading: existing?.heading ?? definition.heading,
-      subheading: existing?.subheading || null,
-      body: existing?.body || null,
-      content: existing?.content || {},
-      settings: existing?.settings || {},
-      primaryMediaAssetId: (existing as any)?.primaryMediaAssetId || null,
-      backgroundMediaAssetId: (existing as any)?.backgroundMediaAssetId || null,
-      publishedAt,
-      metadata: { ...(existing?.metadata || {}), seededFromTemplate: templateKey },
-    };
-
-    let sectionId = cleanId(existing?.id);
-    if (sectionId) {
-      await updateLocal("websiteSections" as any, sectionId, sectionPayload as any);
-    } else {
-      sectionId = createdId(await createLocal("websiteSections" as any, sectionPayload as any));
-    }
-    if (sectionId) sectionIds.set(definition.sectionKey, sectionId);
-  }
-
-  const navigationRows = ((await (db as any).websiteNavigationItems.toArray()) as WebsiteNavigationItem[]).filter(
-    (row) => row.accountId === accountId && row.schoolId === schoolId && row.websiteSettingId === websiteSettingId && row.location === "header" && activeRecord(row),
-  );
-
-  const navigationDefinitions = uniqueDefaults.filter((item) => item.showInNavigation);
-  for (let index = 0; index < navigationDefinitions.length; index += 1) {
-    const definition = navigationDefinitions[index];
-    const sectionId = sectionIds.get(definition.sectionKey);
-    const isHome = definition.sectionKey === "home";
-    const existing = navigationRows.find((row) =>
-      isHome ? row.pageId === homePageId && row.targetType === "page" : row.sectionId === sectionId && row.targetType === "section",
-    );
-    const navigationPayload = {
-      accountId,
-      schoolId,
-      branchId: cleanId(branchId) || null,
-      websiteSettingId,
-      location: "header",
-      parentItemId: null,
-      label: definition.navigationLabel || definition.heading || "Section",
-      targetType: isHome ? "page" : "section",
-      pageId: isHome ? homePageId : null,
-      sectionId: isHome ? null : sectionId || null,
-      url: isHome ? "/" : `#${definition.sectionKey}`,
-      openInNewTab: false,
-      displayOrder: index,
-      active: websiteStatus !== "archived",
-      metadata: { ...(existing?.metadata || {}), seededFromTemplate: templateKey },
-    };
-
-    const navigationId = cleanId(existing?.id);
-    if (navigationId) {
-      await updateLocal("websiteNavigationItems" as any, navigationId, navigationPayload as any);
-    } else {
-      await createLocal("websiteNavigationItems" as any, navigationPayload as any);
-    }
-  }
-
-  await updateLocal("websiteSettings" as any, websiteSettingId, {
-    homePageId,
-    metadata: { settingsSource: "branch_settings", branchThemeControlled: true, structureSeeded: true, seededTemplateKey: templateKey },
-  } as any);
-}
-
-function fieldLabel(tab: WebsiteEditorTab) {
-  switch (tab) {
-    case "identity":
-      return "Website Identity";
-    case "template":
-      return "Template";
-    case "domain":
-      return "Domain";
-    case "seo":
-      return "SEO & Analytics";
-    case "publishing":
-      return "Publishing";
-  }
-}
+  schoolName?: string;
+  branchName?: string;
+  rootDomain?: string;
+  onClose: () => void;
+  onSaved?: () => void;
+};
 
 export default function WebsiteSettingsSheet({
+  open,
   accountId,
   schoolId,
   branchId,
   schoolName,
   branchName,
-  primaryColor,
+  rootDomain = "eleeveon.com",
   onClose,
   onSaved,
-}: Props) {
-  const [tab, setTab] = useState<WebsiteEditorTab>("identity");
-  const [draft, setDraft] = useState<WebsiteSettingsDraft>(
-    websiteSettingsDraft({ schoolName, branchName }),
+}: WebsiteSettingsSheetProps) {
+  const templates = useMemo(
+    () => getWebsiteTemplates(),
+    [],
   );
-  const [customDomain, setCustomDomain] = useState("");
-  const [customDomainId, setCustomDomainId] = useState<string>();
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string>();
 
-  const canSave = Boolean(accountId && schoolId && draft.eleeveonSlug);
+  const fallbackTemplate =
+    getDefaultWebsiteTemplate();
 
-  const publicAddress = useMemo(
-    () =>
-      draft.eleeveonSlug
-        ? `${draft.eleeveonSlug}.eleeveon.com`
-        : "your-school.eleeveon.com",
-    [draft.eleeveonSlug],
-  );
+  const [tab, setTab] =
+    useState<WebsiteEditorTab>("template");
+
+  const [draft, setDraft] =
+    useState<WebsiteSettingsDraft>(() =>
+      websiteSettingsDraft({
+        schoolName,
+        branchName,
+        defaultTemplateKey:
+          fallbackTemplate?.key,
+      }),
+    );
+
+  const [settings, setSettings] =
+    useState<WebsiteTemplateSettings>(() =>
+      createWebsiteTemplateSettings(
+        undefined,
+        fallbackTemplate,
+      ),
+    );
+
+  const [customDomain, setCustomDomain] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [saving, setSaving] =
+    useState(false);
+
+  const [message, setMessage] =
+    useState<string | null>(null);
+
+  const selectedTemplate =
+    getWebsiteTemplate(
+      settings.templateKey ||
+        draft.templateKey,
+    ) || fallbackTemplate;
 
   useEffect(() => {
+    if (!open) return;
+
     let cancelled = false;
 
-    async function load() {
-      if (!accountId || !schoolId) {
-        setLoading(false);
-        return;
-      }
+    setLoading(true);
+    setMessage(null);
 
-      setLoading(true);
+    Promise.all([
+      db.websiteSettings
+        .where("schoolId")
+        .equals(schoolId)
+        .toArray(),
+      db.websiteTemplateSettings
+        .where("schoolId")
+        .equals(schoolId)
+        .toArray(),
+      db.websiteTemplateAssignments
+        .where("schoolId")
+        .equals(schoolId)
+        .toArray(),
+      db.websiteDomains
+        .where("schoolId")
+        .equals(schoolId)
+        .toArray(),
+    ])
+      .then(
+        ([
+          websiteRows,
+          templateSettingRows,
+          assignmentRows,
+          domainRows,
+        ]) => {
+          if (cancelled) return;
 
-      try {
-        const settingsRows = (
-          await (db as any).websiteSettings.toArray()
-        ).filter(
-          (row: WebsiteSetting) =>
-            row.accountId === accountId &&
-            row.schoolId === schoolId &&
-            activeRecord(row),
-        );
+          const website = (
+            websiteRows as AnyRow[]
+          ).find(
+            (row) =>
+              !row.isDeleted &&
+              (!branchId ||
+                !row.branchId ||
+                row.branchId === branchId),
+          );
 
-        const row = [...settingsRows].sort(
-          (a: any, b: any) =>
-            Number(b.updatedAt || 0) - Number(a.updatedAt || 0),
-        )[0] as WebsiteSetting | undefined;
+          const websiteId =
+            website?.id;
 
-        if (row && !cancelled) {
-          setDraft(
+          const assignment = (
+            assignmentRows as AnyRow[]
+          ).find(
+            (row) =>
+              !row.isDeleted &&
+              row.active !== false &&
+              row.isDefault !== false &&
+              (!websiteId ||
+                row.websiteSettingId ===
+                  websiteId),
+          );
+
+          const savedTemplateSetting = (
+            templateSettingRows as AnyRow[]
+          ).find(
+            (row) =>
+              !row.isDeleted &&
+              row.active !== false &&
+              (
+                row.id ===
+                  assignment?.templateSettingId ||
+                row.websiteSettingId ===
+                  websiteId
+              ),
+          );
+
+          const nextDraft =
             websiteSettingsDraft({
-              id: row.id,
+              ...website,
+              id: websiteId,
               schoolName,
               branchName,
-              siteName: row.siteName || "",
-              tagline: row.tagline || "",
-              description: row.description || "",
-              templateKey:
-                row.templateKey || getWebsiteTemplates()[0]?.key || "",
-              eleeveonSlug: row.eleeveonSlug || "",
-              status: row.status,
-              defaultLanguage: row.defaultLanguage || "en",
-              searchEngineIndexing: row.searchEngineIndexing !== false,
-              seoTitle: row.seoTitle || "",
-              seoDescription: row.seoDescription || "",
-              seoKeywordsText: Array.isArray(row.seoKeywords)
-                ? row.seoKeywords.join(", ")
-                : "",
-              analyticsProvider: row.analyticsProvider || "",
-              analyticsTrackingId: row.analyticsTrackingId || "",
-            }),
+              seoKeywordsText:
+                Array.isArray(
+                  website?.seoKeywords,
+                )
+                  ? website.seoKeywords.join(
+                      ", ",
+                    )
+                  : website
+                      ?.seoKeywordsText || "",
+            });
+
+          const template =
+            getWebsiteTemplate(
+              savedTemplateSetting
+                ?.templateKey ||
+                website?.templateKey ||
+                nextDraft.templateKey,
+            ) || fallbackTemplate;
+
+          const nextSettings =
+            createWebsiteTemplateSettings(
+              savedTemplateSetting?.settings ||
+                website
+                  ?.templateSettings,
+              template,
+            );
+
+          const domain = (
+            domainRows as AnyRow[]
+          ).find(
+            (row) =>
+              !row.isDeleted &&
+              row.domainType === "custom" &&
+              (!websiteId ||
+                row.websiteSettingId ===
+                  websiteId),
           );
 
-          const domains = (
-            await (db as any).websiteDomains.toArray()
-          ).filter(
-            (domain: WebsiteDomain) =>
-              domain.accountId === accountId &&
-              domain.schoolId === schoolId &&
-              domain.websiteSettingId === row.id &&
-              domain.domainType === "custom" &&
-              activeRecord(domain),
+          setDraft(nextDraft);
+          setSettings(nextSettings);
+          setCustomDomain(
+            domain?.hostname || "",
           );
+          setLoading(false);
+        },
+      )
+      .catch((error: unknown) => {
+        if (cancelled) return;
 
-          const domain = domains.find((item: any) => item.isPrimary) || domains[0];
-
-          if (domain && !cancelled) {
-            setCustomDomain(domain.hostname || "");
-            setCustomDomainId(domain.id);
-          }
-        }
-      } catch (error) {
-        console.error("[WebsiteSettingsSheet] load failed", error);
-        if (!cancelled) setMessage("Website settings could not be loaded.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    void load();
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Unable to load website settings.",
+        );
+        setLoading(false);
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [accountId, schoolId, branchId, schoolName, branchName]);
+  }, [
+    open,
+    schoolId,
+    branchId,
+    schoolName,
+    branchName,
+    fallbackTemplate,
+  ]);
 
-  function update<K extends keyof WebsiteSettingsDraft>(
-    key: K,
-    value: WebsiteSettingsDraft[K],
-  ) {
-    setDraft((current) => ({ ...current, [key]: value }));
-    setMessage(undefined);
-  }
+  const patchSettings = useCallback(
+    <K extends keyof WebsiteTemplateSettings>(
+      key: K,
+      value: WebsiteTemplateSettings[K],
+    ) => {
+      setSettings((current) => ({
+        ...current,
+        [key]: value,
+      }));
+    },
+    [],
+  );
 
-  async function save() {
-    if (!accountId || !schoolId) {
-      setMessage("The active account and school are required.");
+  const selectTemplate = (
+    template: WebsiteTemplateDefinition,
+  ) => {
+    setSettings((current) =>
+      applyWebsiteTemplateDesign(
+        current,
+        template,
+      ),
+    );
+
+    setDraft((current) => ({
+      ...current,
+      templateKey: template.key,
+    }));
+  };
+
+  const save = async () => {
+    if (!draft.siteName.trim()) {
+      setMessage(
+        "Enter a website name before saving.",
+      );
       return;
     }
 
-    const slug = normalizeWebsiteSlug(draft.eleeveonSlug);
-
-    if (!slug) {
-      setMessage("Enter a valid Eleeveon website address.");
-      setTab("domain");
+    if (!draft.eleeveonSlug.trim()) {
+      setMessage(
+        "Enter an Eleeveon subdomain before saving.",
+      );
       return;
     }
 
     setSaving(true);
-    setMessage(undefined);
+    setMessage(null);
 
     try {
       const now = Date.now();
-      const payload = {
+      const deviceId =
+        localStorage.getItem(
+          "eleeveon_device_id",
+        ) ||
+        localStorage.getItem(
+          "deviceId",
+        ) ||
+        "browser";
+
+      const websiteId =
+        draft.id || id();
+
+      const existingWebsite =
+        draft.id
+          ? await db.websiteSettings.get(
+              draft.id,
+            )
+          : undefined;
+
+      const websiteRecord = {
+        ...(existingWebsite || {}),
+        id: websiteId,
         accountId,
         schoolId,
-        branchId: cleanId(branchId) || null,
-        siteName: draft.siteName.trim() || schoolName || "School Website",
-        tagline: draft.tagline.trim() || null,
-        description: draft.description.trim() || null,
-        templateKey: draft.templateKey,
-        templateVersion: "1",
-        theme: {
-          inheritBranchPrimaryColor: true,
-          primaryColor: primaryColor || null,
-        },
-        templateSettings: {},
-        eleeveonSlug: slug,
+        branchId: branchId || null,
+
+        siteName: draft.siteName.trim(),
+        tagline:
+          draft.tagline.trim() || null,
+        description:
+          draft.description.trim() || null,
+
+        templateKey:
+          settings.templateKey,
+        templateVersion:
+          settings.templateVersion,
+
+        eleeveonSlug:
+          draft.eleeveonSlug.trim(),
+
         status: draft.status,
-        defaultLanguage: draft.defaultLanguage || "en",
-        supportedLanguages: [draft.defaultLanguage || "en"],
-        seoTitle: draft.seoTitle.trim() || null,
-        seoDescription: draft.seoDescription.trim() || null,
-        seoKeywords: splitKeywords(draft.seoKeywordsText),
-        searchEngineIndexing: draft.searchEngineIndexing,
-        analyticsProvider: draft.analyticsProvider.trim() || null,
-        analyticsTrackingId: draft.analyticsTrackingId.trim() || null,
+        defaultLanguage:
+          draft.defaultLanguage || "en",
+        searchEngineIndexing:
+          draft.searchEngineIndexing,
+
+        seoTitle:
+          draft.seoTitle.trim() || null,
+        seoDescription:
+          draft.seoDescription.trim() ||
+          null,
+        seoKeywords: splitKeywords(
+          draft.seoKeywordsText,
+        ),
+
+        analyticsProvider:
+          draft.analyticsProvider.trim() ||
+          null,
+        analyticsTrackingId:
+          draft.analyticsTrackingId.trim() ||
+          null,
+
         publishedAt:
-          draft.status === "published" ? now : null,
-        unpublishedAt:
-          draft.status === "unpublished" ? now : null,
-        metadata: {
-          settingsSource: "branch_settings",
-          branchThemeControlled: true,
-        },
+          draft.status === "published"
+            ? existingWebsite?.publishedAt ||
+              now
+            : existingWebsite?.publishedAt ||
+              null,
+
+        active: true,
+        createdAt:
+          existingWebsite?.createdAt || now,
+        updatedAt: now,
+        version:
+          Number(
+            existingWebsite?.version || 0,
+          ) + 1,
+        deviceId,
+        createdByDeviceId:
+          existingWebsite
+            ?.createdByDeviceId ||
+          deviceId,
+        updatedByDeviceId: deviceId,
+        synced: SyncStatus.PENDING,
+        isDeleted: false,
       };
 
-      let websiteSettingId = draft.id;
+      await db.websiteSettings.put(
+        websiteRecord as any,
+      );
 
-      if (websiteSettingId) {
-        await updateLocal(
-          "websiteSettings" as any,
-          websiteSettingId,
-          payload as any,
+      const existingTemplateSettings =
+        await db.websiteTemplateSettings
+          .where("websiteSettingId")
+          .equals(websiteId)
+          .toArray();
+
+      const currentTemplateSetting =
+        existingTemplateSettings.find(
+          (row) =>
+            !row.isDeleted &&
+            row.active !== false,
         );
-      } else {
-        const created = await createLocal(
-          "websiteSettings" as any,
-          payload as any,
-        );
-        websiteSettingId = createdId(created);
-      }
 
-      if (!websiteSettingId) {
-        throw new Error("The website settings record could not be created.");
-      }
+      const templateSettingId =
+        currentTemplateSetting?.id ||
+        id();
 
-      update("id", websiteSettingId);
-      update("eleeveonSlug", slug);
-
-      await ensureWebsiteStructure({
-        accountId,
-        schoolId,
-        branchId: cleanId(branchId) || null,
-        websiteSettingId,
-        templateKey: draft.templateKey,
-        siteName: payload.siteName,
-        websiteStatus: draft.status,
-      });
-
-      const normalizedCustomDomain = customDomain
-        .trim()
-        .toLowerCase()
-        .replace(/^https?:\/\//, "")
-        .replace(/\/.*$/, "");
-
-      if (normalizedCustomDomain) {
-        const domainPayload = {
+      const templateSettingRecord: WebsiteTemplateSetting =
+        {
+          ...(currentTemplateSetting || {}),
+          id: templateSettingId,
           accountId,
           schoolId,
-          branchId: cleanId(branchId) || null,
-          websiteSettingId,
-          hostname: normalizedCustomDomain,
-          domainType: "custom",
-          status: "pending",
-          sslStatus: "pending",
-          isPrimary: true,
-          redirectToPrimary: true,
+          branchId: branchId || null,
+          websiteSettingId: websiteId,
+          templateKey:
+            settings.templateKey,
+          templateVersion:
+            settings.templateVersion,
+          settings,
           active: true,
-          metadata: {
-            addedFrom: "branch_settings",
-          },
+          createdAt:
+            currentTemplateSetting
+              ?.createdAt || now,
+          updatedAt: now,
+          version:
+            Number(
+              currentTemplateSetting
+                ?.version || 0,
+            ) + 1,
+          deviceId,
+          createdByDeviceId:
+            currentTemplateSetting
+              ?.createdByDeviceId ||
+            deviceId,
+          updatedByDeviceId:
+            deviceId,
+          synced: SyncStatus.PENDING,
+          isDeleted: false,
         };
 
-        if (customDomainId) {
-          await updateLocal(
-            "websiteDomains" as any,
-            customDomainId,
-            domainPayload as any,
-          );
-        } else {
-          const createdDomain = await createLocal(
-            "websiteDomains" as any,
-            domainPayload as any,
-          );
-          setCustomDomainId(createdId(createdDomain));
-        }
+      await db.websiteTemplateSettings.put(
+        templateSettingRecord,
+      );
+
+      const existingAssignments =
+        await db.websiteTemplateAssignments
+          .where("websiteSettingId")
+          .equals(websiteId)
+          .toArray();
+
+      const currentAssignment =
+        existingAssignments.find(
+          (row) =>
+            !row.isDeleted &&
+            row.scopeType ===
+              "website" &&
+            row.active !== false,
+        );
+
+      const assignmentRecord: WebsiteTemplateAssignment =
+        {
+          ...(currentAssignment || {}),
+          id:
+            currentAssignment?.id ||
+            id(),
+          accountId,
+          schoolId,
+          branchId: branchId || null,
+          websiteSettingId: websiteId,
+          templateSettingId,
+          scopeType: "website",
+          scopeId: websiteId,
+          isDefault: true,
+          active: true,
+          createdAt:
+            currentAssignment
+              ?.createdAt || now,
+          updatedAt: now,
+          version:
+            Number(
+              currentAssignment?.version ||
+                0,
+            ) + 1,
+          deviceId,
+          createdByDeviceId:
+            currentAssignment
+              ?.createdByDeviceId ||
+            deviceId,
+          updatedByDeviceId:
+            deviceId,
+          synced: SyncStatus.PENDING,
+          isDeleted: false,
+        };
+
+      await db.websiteTemplateAssignments.put(
+        assignmentRecord,
+      );
+
+      const existingDomains =
+        await db.websiteDomains
+          .where("websiteSettingId")
+          .equals(websiteId)
+          .toArray();
+
+      const subdomain =
+        existingDomains.find(
+          (row: AnyRow) =>
+            row.domainType ===
+            "eleeveon_subdomain",
+        );
+
+      await db.websiteDomains.put({
+        ...(subdomain || {}),
+        id: subdomain?.id || id(),
+        accountId,
+        schoolId,
+        branchId: branchId || null,
+        websiteSettingId: websiteId,
+        domainType:
+          "eleeveon_subdomain",
+        hostname: `${draft.eleeveonSlug}.${rootDomain}`,
+        status: "active",
+        sslStatus: "active",
+        isPrimary: !customDomain,
+        active: true,
+        createdAt:
+          subdomain?.createdAt || now,
+        updatedAt: now,
+        version:
+          Number(subdomain?.version || 0) +
+          1,
+        deviceId,
+        createdByDeviceId:
+          subdomain?.createdByDeviceId ||
+          deviceId,
+        updatedByDeviceId: deviceId,
+        synced: SyncStatus.PENDING,
+        isDeleted: false,
+      } as any);
+
+      const normalizedDomain =
+        normalizeCustomDomain(
+          customDomain,
+        );
+
+      const savedCustomDomain =
+        existingDomains.find(
+          (row: AnyRow) =>
+            row.domainType === "custom",
+        );
+
+      if (normalizedDomain) {
+        await db.websiteDomains.put({
+          ...(savedCustomDomain || {}),
+          id:
+            savedCustomDomain?.id || id(),
+          accountId,
+          schoolId,
+          branchId: branchId || null,
+          websiteSettingId: websiteId,
+          domainType: "custom",
+          hostname: normalizedDomain,
+          status:
+            savedCustomDomain?.status ||
+            "pending",
+          sslStatus:
+            savedCustomDomain?.sslStatus ||
+            "pending",
+          isPrimary: true,
+          active: true,
+          createdAt:
+            savedCustomDomain?.createdAt ||
+            now,
+          updatedAt: now,
+          version:
+            Number(
+              savedCustomDomain?.version ||
+                0,
+            ) + 1,
+          deviceId,
+          createdByDeviceId:
+            savedCustomDomain
+              ?.createdByDeviceId ||
+            deviceId,
+          updatedByDeviceId: deviceId,
+          synced: SyncStatus.PENDING,
+          isDeleted: false,
+        } as any);
+      } else if (savedCustomDomain) {
+        await db.websiteDomains.put({
+          ...savedCustomDomain,
+          active: false,
+          isDeleted: true,
+          updatedAt: now,
+          version:
+            Number(
+              savedCustomDomain.version ||
+                0,
+            ) + 1,
+          updatedByDeviceId: deviceId,
+          synced: SyncStatus.PENDING,
+        } as any);
       }
+
+      setDraft((current) => ({
+        ...current,
+        id: websiteId,
+      }));
 
       setMessage(
         draft.status === "published"
-          ? "Website, home page, sections and navigation saved for publishing."
-          : "Website settings and page structure saved.",
+          ? "Website settings saved and published."
+          : "Website settings saved.",
       );
 
-      window.dispatchEvent(new Event("website-settings-updated"));
-      await onSaved?.();
-    } catch (error: any) {
-      console.error("[WebsiteSettingsSheet] save failed", error);
-      setMessage(error?.message || "Website settings could not be saved.");
+      onSaved?.();
+    } catch (error: unknown) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to save website settings.",
+      );
     } finally {
       setSaving(false);
     }
-  }
+  };
+
+  if (!open) return null;
 
   return (
-    <div className="website-settings-backdrop" role="dialog" aria-modal="true">
+    <div
+      className="ba-sheet-backdrop website-settings-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Website settings"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) {
+          onClose();
+        }
+      }}
+    >
       <section
-        className="website-settings-sheet"
+        className="ba-sheet report-template-suite-sheet website-settings-modal"
         style={
           {
-            "--website-primary":
-              primaryColor || "var(--primary-color, #2563eb)",
+            "--ba-primary": "#2f6fed",
           } as React.CSSProperties
         }
       >
-        <style>{css}</style>
-
-        <header className="website-settings-head">
+        <div className="ba-sheet-head">
           <div>
-            <small>PUBLIC SCHOOL WEBSITE</small>
-            <h2>{fieldLabel(tab)}</h2>
+            <h2>School Website</h2>
             <p>
-              Configure the school website without mixing website content into
-              branch operational settings.
+              Choose a template, control what appears, edit labels and preview
+              the exact public website before publishing.
             </p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close website settings">
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            aria-label="Close website settings"
+          >
             ✕
           </button>
-        </header>
+        </div>
 
-        <nav className="website-settings-tabs" aria-label="Website settings">
-          {(
-            [
-              "identity",
-              "template",
-              "domain",
-              "seo",
-              "publishing",
-            ] as WebsiteEditorTab[]
-          ).map((item) => (
+        <div className="website-settings-status-row">
+          <span
+            className={`website-settings-status-dot ${
+              draft.status === "published" ? "published" : "draft"
+            }`}
+          />
+          <strong>
+            {draft.status === "published" ? "Published" : "Draft"}
+          </strong>
+          <span>{selectedTemplate?.name || "Website template"}</span>
+        </div>
+
+        <nav
+          className="website-settings-tabs"
+          aria-label="Website settings sections"
+        >
+          {TABS.map((item) => (
             <button
-              key={item}
+              key={item.key}
               type="button"
-              className={tab === item ? "active" : ""}
-              onClick={() => setTab(item)}
+              className={tab === item.key ? "active" : ""}
+              onClick={() => setTab(item.key)}
             >
-              {fieldLabel(item)}
+              <strong>{item.label}</strong>
             </button>
           ))}
         </nav>
 
-        {loading ? (
-          <div className="website-settings-state">Loading website settings…</div>
-        ) : (
-          <div className="website-settings-body">
-            <div className="website-settings-fields">
-              {tab === "identity" && (
-                <>
-                  <Field label="Website name">
-                    <input
-                      value={draft.siteName}
-                      onChange={(event) => update("siteName", event.target.value)}
-                      placeholder={schoolName || "School name"}
-                    />
-                  </Field>
-
-                  <Field label="Tagline">
-                    <input
-                      value={draft.tagline}
-                      onChange={(event) => update("tagline", event.target.value)}
-                      placeholder="Learning today. Leading tomorrow."
-                    />
-                  </Field>
-
-                  <Field label="Short website description">
-                    <textarea
-                      rows={5}
-                      value={draft.description}
-                      onChange={(event) =>
-                        update("description", event.target.value)
-                      }
-                      placeholder="Introduce the school to parents, students and visitors."
-                    />
-                  </Field>
-
-                  <Field label="Default language">
-                    <select
-                      value={draft.defaultLanguage}
-                      onChange={(event) =>
-                        update("defaultLanguage", event.target.value)
-                      }
-                    >
-                      <option value="en">English</option>
-                      <option value="fr">French</option>
-                      <option value="de">German</option>
-                    </select>
-                  </Field>
-                </>
-              )}
-
-              {tab === "template" && (
-                <div className="website-template-grid">
-                  {getWebsiteTemplates().map((template) => (
-                    <button
-                      key={template.key}
-                      type="button"
-                      className={
-                        draft.templateKey === template.key ? "selected" : ""
-                      }
-                      onClick={() => update("templateKey", template.key)}
-                    >
-                      <span>{template.name}</span>
-                      <small>{template.tone}</small>
-                      <p>{template.description}</p>
-                      <em>
-                        {template.defaultSections.slice(0, 4).join(" · ")}
-                      </em>
-                    </button>
-                  ))}
+        <div className="website-settings-workspace">
+          <aside className="website-settings-controls">
+            <div className="website-settings-panel">
+              {loading ? (
+                <div className="website-settings-state" role="status">
+                  <span className="website-settings-spinner" />
+                  <strong>Loading website settings…</strong>
                 </div>
-              )}
+              ) : null}
 
-              {tab === "domain" && (
-                <>
-                  <Field label="Eleeveon address">
-                    <div className="website-slug-control">
-                      <input
-                        value={draft.eleeveonSlug}
-                        onChange={(event) =>
-                          update(
-                            "eleeveonSlug",
-                            normalizeWebsiteSlug(event.target.value),
-                          )
-                        }
-                        placeholder="school-name"
-                      />
-                      <span>.eleeveon.com</span>
-                    </div>
-                  </Field>
+              {!loading && tab === "template" ? (
+                <WebsiteTemplateSelector
+                  templates={templates}
+                  selectedKey={
+                    selectedTemplate?.key || settings.templateKey
+                  }
+                  settings={settings}
+                  disabled={saving}
+                  onSelect={selectTemplate}
+                />
+              ) : null}
 
-                  <div className="website-address-preview">
-                    <small>PUBLIC ADDRESS</small>
-                    <strong>{publicAddress}</strong>
-                  </div>
+              {!loading && tab === "display" ? (
+                <WebsiteDisplayControls
+                  settings={settings}
+                  disabled={saving}
+                  onChange={patchSettings}
+                />
+              ) : null}
 
-                  <Field
-                    label="Custom domain"
-                    hint="Optional. Verification and SSL activation are completed by the backend domain workflow."
-                  >
-                    <input
-                      value={customDomain}
-                      onChange={(event) => setCustomDomain(event.target.value)}
-                      placeholder="www.school.edu.gh"
-                    />
-                  </Field>
-                </>
-              )}
+              {!loading && tab === "labels" ? (
+                <WebsiteLabelControls
+                  settings={settings}
+                  disabled={saving}
+                  onChange={patchSettings}
+                />
+              ) : null}
 
-              {tab === "seo" && (
-                <>
-                  <Field label="Search result title">
+              {!loading && tab === "content" ? (
+                <WebsiteContentOverrides
+                  settings={settings}
+                  disabled={saving}
+                  onChange={patchSettings}
+                />
+              ) : null}
+
+              {!loading && tab === "order" ? (
+                <WebsiteSectionOrder
+                  settings={settings}
+                  disabled={saving}
+                  onChange={(sectionOrder) =>
+                    patchSettings("sectionOrder", sectionOrder)
+                  }
+                />
+              ) : null}
+
+              {!loading && tab === "domain" ? (
+                <WebsiteDomainControls
+                  slug={draft.eleeveonSlug}
+                  customDomain={customDomain}
+                  rootDomain={rootDomain}
+                  disabled={saving}
+                  onSlugChange={(value) =>
+                    setDraft((current) => ({
+                      ...current,
+                      eleeveonSlug: value,
+                    }))
+                  }
+                  onCustomDomainChange={setCustomDomain}
+                />
+              ) : null}
+
+              {!loading && tab === "seo" ? (
+                <div className="website-settings-form-grid">
+                  <label className="website-settings-field">
+                    <span>SEO title</span>
                     <input
                       value={draft.seoTitle}
-                      onChange={(event) => update("seoTitle", event.target.value)}
-                      placeholder="School name | Admissions and programmes"
-                    />
-                  </Field>
-
-                  <Field label="Search result description">
-                    <textarea
-                      rows={4}
-                      value={draft.seoDescription}
+                      disabled={saving}
                       onChange={(event) =>
-                        update("seoDescription", event.target.value)
-                      }
-                      placeholder="A concise description for search engines and shared links."
-                    />
-                  </Field>
-
-                  <Field label="Keywords" hint="Separate phrases with commas.">
-                    <input
-                      value={draft.seoKeywordsText}
-                      onChange={(event) =>
-                        update("seoKeywordsText", event.target.value)
-                      }
-                      placeholder="school in Accra, admissions, primary school"
-                    />
-                  </Field>
-
-                  <label className="website-toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={draft.searchEngineIndexing}
-                      onChange={(event) =>
-                        update("searchEngineIndexing", event.target.checked)
+                        setDraft((current) => ({
+                          ...current,
+                          seoTitle: event.target.value,
+                        }))
                       }
                     />
-                    <span>
-                      <b>Allow search-engine indexing</b>
-                      <small>
-                        Turn this off while the website is still being prepared.
-                      </small>
-                    </span>
                   </label>
 
-                  <div className="website-two-columns">
-                    <Field label="Analytics provider">
-                      <select
-                        value={draft.analyticsProvider}
-                        onChange={(event) =>
-                          update("analyticsProvider", event.target.value)
-                        }
-                      >
-                        <option value="">None</option>
-                        <option value="google_analytics">Google Analytics</option>
-                        <option value="plausible">Plausible</option>
-                        <option value="matomo">Matomo</option>
-                      </select>
-                    </Field>
-
-                    <Field label="Tracking ID">
-                      <input
-                        value={draft.analyticsTrackingId}
-                        onChange={(event) =>
-                          update("analyticsTrackingId", event.target.value)
-                        }
-                        placeholder="G-XXXXXXXXXX"
-                      />
-                    </Field>
-                  </div>
-                </>
-              )}
-
-              {tab === "publishing" && (
-                <>
-                  <Field label="Website status">
-                    <select
-                      value={draft.status}
+                  <label className="website-settings-field website-settings-field-wide">
+                    <span>SEO description</span>
+                    <textarea
+                      value={draft.seoDescription}
+                      disabled={saving}
+                      rows={4}
                       onChange={(event) =>
-                        update(
-                          "status",
-                          event.target.value as WebsiteSettingsDraft["status"],
-                        )
+                        setDraft((current) => ({
+                          ...current,
+                          seoDescription: event.target.value,
+                        }))
                       }
-                    >
-                      <option value="draft">Draft</option>
-                      <option value="published">Published</option>
-                      <option value="unpublished">Unpublished</option>
-                      <option value="archived">Archived</option>
-                    </select>
-                  </Field>
+                    />
+                  </label>
 
-                  <div className="website-publish-note">
-                    <strong>
-                      {draft.status === "published"
-                        ? "Ready for the public website renderer"
-                        : "Not publicly active"}
-                    </strong>
-                    <p>
-                      Saving creates a pending local-first sync update. The
-                      backend publishing service can later build the public
-                      revision, domain and cache.
-                    </p>
-                  </div>
-                </>
-              )}
+                  <label className="website-settings-field website-settings-field-wide">
+                    <span>SEO keywords</span>
+                    <input
+                      value={draft.seoKeywordsText}
+                      disabled={saving}
+                      placeholder="school, admissions, Accra"
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          seoKeywordsText: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {!loading && tab === "publishing" ? (
+                <WebsitePublishingControls
+                  draft={draft}
+                  disabled={saving}
+                  onStatusChange={(status: WebsiteStatus) =>
+                    setDraft((current) => ({
+                      ...current,
+                      status,
+                    }))
+                  }
+                  onIndexingChange={(value) =>
+                    setDraft((current) => ({
+                      ...current,
+                      searchEngineIndexing: value,
+                    }))
+                  }
+                />
+              ) : null}
+            </div>
+          </aside>
+
+          <main className="website-settings-preview">
+            <div className="website-settings-preview-head">
+              <div>
+                <strong>Live Preview</strong>
+                <span>The exact renderer used by the public website.</span>
+              </div>
+
+              <span className="website-settings-preview-badge">
+                {selectedTemplate?.name || "Template"}
+              </span>
             </div>
 
-            <aside>
-              <WebsitePreview
-                draft={draft}
-                accountId={accountId}
-                schoolId={schoolId}
-                branchId={branchId}
-                schoolName={schoolName}
-                branchName={branchName}
-                primaryColor={primaryColor}
-              />
-            </aside>
-          </div>
-        )}
+            <WebsitePreview
+              accountId={accountId}
+              schoolId={schoolId}
+              branchId={branchId}
+              websiteSettingId={draft.id}
+              draft={draft}
+              settings={settings}
+            />
+          </main>
+        </div>
 
-        <footer className="website-settings-actions">
-          <span>{message || "Changes remain local until saved and synced."}</span>
-          <div>
-            <button type="button" onClick={onClose}>
-              Close
-            </button>
-            <button
-              type="button"
-              className="primary"
-              disabled={!canSave || saving || loading}
-              onClick={() => void save()}
-            >
-              {saving ? "Saving…" : "Save Website"}
-            </button>
+        {message ? (
+          <div
+            className={`website-settings-message ${
+              /unable|error|enter/i.test(message) ? "error" : "success"
+            }`}
+            role="status"
+          >
+            {message}
           </div>
-        </footer>
+        ) : null}
+
+        <div className="ba-sheet-actions">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+          >
+            Close
+          </button>
+
+          <button
+            type="button"
+            className="primary"
+            onClick={save}
+            disabled={saving || loading}
+          >
+            {saving
+              ? "Saving…"
+              : draft.status === "published"
+                ? "Save & Publish"
+                : "Save Settings"}
+          </button>
+        </div>
+
+        <style jsx>{`
+          .website-settings-modal {
+            width: min(1180px, 100%);
+            max-height: min(92dvh, 900px);
+            padding: 14px;
+            overflow-y: auto;
+          }
+
+          .website-settings-status-row {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 34px;
+            margin-bottom: 10px;
+            padding: 7px 10px;
+            border: 1px solid var(--border, rgba(148, 163, 184, 0.22));
+            border-radius: 16px;
+            background: color-mix(
+              in srgb,
+              var(--muted, #64748b) 7%,
+              transparent
+            );
+            color: var(--muted, #64748b);
+            font-size: 11px;
+            font-weight: 800;
+          }
+
+          .website-settings-status-row strong {
+            color: var(--text, #0f172a);
+            font-size: 12px;
+            font-weight: 1000;
+          }
+
+          .website-settings-status-row > span:last-child {
+            margin-left: auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+
+          .website-settings-status-dot {
+            width: 9px;
+            height: 9px;
+            flex: 0 0 auto;
+            border-radius: 999px;
+            background: #f59e0b;
+            box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+          }
+
+          .website-settings-status-dot.published {
+            background: #22c55e;
+            box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.12);
+          }
+
+          .website-settings-tabs {
+            display: flex;
+            gap: 7px;
+            overflow-x: auto;
+            margin-bottom: 12px;
+            padding: 2px 1px 6px;
+            scrollbar-width: none;
+          }
+
+          .website-settings-tabs::-webkit-scrollbar {
+            display: none;
+          }
+
+          .website-settings-tabs button {
+            flex: 0 0 auto;
+            min-height: 36px;
+            padding: 0 12px;
+            border: 1px solid var(--border, rgba(148, 163, 184, 0.24));
+            border-radius: 999px;
+            background: var(--card-bg, var(--surface, #fff));
+            color: var(--muted, #64748b);
+            cursor: pointer;
+          }
+
+          .website-settings-tabs button strong {
+            font-size: 11px;
+            font-weight: 950;
+          }
+
+          .website-settings-tabs button.active {
+            border-color: var(--ba-primary, #2563eb);
+            background: var(--ba-primary, #2563eb);
+            color: #fff;
+            box-shadow: 0 10px 24px
+              color-mix(in srgb, var(--ba-primary, #2563eb) 22%, transparent);
+          }
+
+          .website-settings-workspace {
+            display: grid;
+            grid-template-columns: minmax(300px, 0.8fr) minmax(0, 1.2fr);
+            gap: 12px;
+            align-items: start;
+          }
+
+          .website-settings-controls,
+          .website-settings-preview {
+            min-width: 0;
+            border: 1px solid var(--border, rgba(148, 163, 184, 0.22));
+            border-radius: 20px;
+            background: var(--card-bg, var(--surface, #fff));
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+          }
+
+          .website-settings-controls {
+            overflow: hidden;
+          }
+
+          .website-settings-panel {
+            max-height: min(62dvh, 620px);
+            overflow-y: auto;
+            padding: 11px;
+          }
+
+          .website-settings-preview {
+            position: sticky;
+            top: 0;
+            overflow: hidden;
+          }
+
+          .website-settings-preview-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 11px;
+            border-bottom: 1px solid var(--border, rgba(148, 163, 184, 0.18));
+            background: color-mix(
+              in srgb,
+              var(--muted, #64748b) 5%,
+              transparent
+            );
+          }
+
+          .website-settings-preview-head strong,
+          .website-settings-preview-head span {
+            display: block;
+          }
+
+          .website-settings-preview-head strong {
+            color: var(--text, #0f172a);
+            font-size: 13px;
+            font-weight: 1000;
+          }
+
+          .website-settings-preview-head div > span {
+            margin-top: 2px;
+            color: var(--muted, #64748b);
+            font-size: 10px;
+            font-weight: 750;
+          }
+
+          .website-settings-preview-badge {
+            flex: 0 0 auto;
+            padding: 6px 9px;
+            border-radius: 999px;
+            background: color-mix(
+              in srgb,
+              var(--ba-primary, #2563eb) 12%,
+              transparent
+            );
+            color: var(--ba-primary, #2563eb);
+            font-size: 10px;
+            font-weight: 1000;
+          }
+
+          .website-settings-preview :global(.website-preview-shell) {
+            border: 0;
+            border-radius: 0;
+          }
+
+          .website-settings-state {
+            min-height: 180px;
+            display: grid;
+            place-items: center;
+            align-content: center;
+            gap: 9px;
+            color: var(--muted, #64748b);
+            text-align: center;
+          }
+
+          .website-settings-spinner {
+            width: 30px;
+            height: 30px;
+            border: 3px solid
+              color-mix(in srgb, var(--ba-primary, #2563eb) 18%, transparent);
+            border-top-color: var(--ba-primary, #2563eb);
+            border-radius: 999px;
+            animation: websiteSettingsSpin 0.8s linear infinite;
+          }
+
+          .website-settings-message {
+            margin-top: 10px;
+            padding: 10px 12px;
+            border-radius: 16px;
+            font-size: 11px;
+            font-weight: 850;
+          }
+
+          .website-settings-message.success {
+            background: rgba(34, 197, 94, 0.12);
+            color: #166534;
+          }
+
+          .website-settings-message.error {
+            background: rgba(239, 68, 68, 0.12);
+            color: #991b1b;
+          }
+
+          @keyframes websiteSettingsSpin {
+            to {
+              transform: rotate(360deg);
+            }
+          }
+
+          @media (max-width: 860px) {
+            .website-settings-modal {
+              width: min(760px, 100%);
+            }
+
+            .website-settings-workspace {
+              grid-template-columns: minmax(0, 1fr);
+            }
+
+            .website-settings-preview {
+              position: static;
+            }
+
+            .website-settings-panel {
+              max-height: none;
+            }
+          }
+
+          @media (max-width: 560px) {
+            .website-settings-modal {
+              max-height: 94dvh;
+              padding: 12px;
+              border-radius: 26px 26px 20px 20px;
+            }
+
+            .website-settings-tabs {
+              margin-inline: -2px;
+            }
+
+            .website-settings-workspace {
+              gap: 9px;
+            }
+
+            .website-settings-preview-head {
+              align-items: center;
+            }
+          }
+        `}</style>
       </section>
     </div>
   );
-}
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="website-field">
-      <span>{label}</span>
-      {children}
-      {hint ? <small>{hint}</small> : null}
-    </label>
-  );
 }
-
-const css = `
-.website-settings-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 120;
-  background: color-mix(in srgb, #020617 58%, transparent);
-  display: flex;
-  justify-content: flex-end;
-}
-.website-settings-sheet {
-  width: min(1120px, 100%);
-  height: 100%;
-  background: var(--surface, var(--card-bg, #fff));
-  color: var(--text, #111827);
-  display: flex;
-  flex-direction: column;
-  box-shadow: -18px 0 60px rgba(2, 6, 23, .25);
-}
-.website-settings-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 18px 20px 14px;
-  border-bottom: 1px solid var(--border, rgba(0,0,0,.10));
-}
-.website-settings-head small {
-  color: var(--website-primary);
-  font-weight: 800;
-  letter-spacing: .08em;
-}
-.website-settings-head h2 {
-  margin: 4px 0;
-  font-size: 1.2rem;
-}
-.website-settings-head p {
-  margin: 0;
-  color: var(--muted, #64748b);
-  max-width: 680px;
-  font-size: .88rem;
-}
-.website-settings-head > button {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  border: 1px solid var(--border, rgba(0,0,0,.1));
-  background: var(--surface-2, transparent);
-  color: inherit;
-}
-.website-settings-tabs {
-  display: flex;
-  gap: 6px;
-  padding: 10px 14px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border, rgba(0,0,0,.10));
-}
-.website-settings-tabs button {
-  white-space: nowrap;
-  border: 0;
-  border-radius: 999px;
-  padding: 9px 12px;
-  background: var(--surface-2, rgba(15,23,42,.05));
-  color: var(--muted, #64748b);
-  font-weight: 700;
-}
-.website-settings-tabs button.active {
-  background: color-mix(in srgb, var(--website-primary) 14%, transparent);
-  color: var(--website-primary);
-}
-.website-settings-state {
-  padding: 40px;
-  color: var(--muted, #64748b);
-}
-.website-settings-body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
-  gap: 18px;
-  padding: 18px;
-}
-.website-settings-fields {
-  min-width: 0;
-}
-.website-field {
-  display: grid;
-  gap: 7px;
-  margin-bottom: 14px;
-}
-.website-field > span {
-  font-size: .82rem;
-  font-weight: 800;
-}
-.website-field > small {
-  color: var(--muted, #64748b);
-  font-size: .76rem;
-}
-.website-field input,
-.website-field textarea,
-.website-field select {
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid var(--border, rgba(0,0,0,.12));
-  background: var(--input-bg, var(--surface, #fff));
-  color: inherit;
-  border-radius: 11px;
-  padding: 11px 12px;
-  outline: none;
-}
-.website-field input:focus,
-.website-field textarea:focus,
-.website-field select:focus {
-  border-color: var(--website-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--website-primary) 12%, transparent);
-}
-.website-two-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-.website-slug-control {
-  display: flex;
-  align-items: stretch;
-}
-.website-slug-control input {
-  border-radius: 11px 0 0 11px;
-}
-.website-slug-control span {
-  display: grid;
-  place-items: center;
-  padding: 0 12px;
-  border: 1px solid var(--border, rgba(0,0,0,.12));
-  border-left: 0;
-  border-radius: 0 11px 11px 0;
-  background: var(--surface-2, rgba(15,23,42,.05));
-  color: var(--muted, #64748b);
-  font-size: .8rem;
-  font-weight: 700;
-}
-.website-address-preview,
-.website-publish-note {
-  border: 1px solid color-mix(in srgb, var(--website-primary) 28%, var(--border, rgba(0,0,0,.1)));
-  background: color-mix(in srgb, var(--website-primary) 7%, var(--surface, #fff));
-  border-radius: 14px;
-  padding: 14px;
-  margin-bottom: 16px;
-}
-.website-address-preview small {
-  display: block;
-  color: var(--muted, #64748b);
-  font-size: .68rem;
-  font-weight: 800;
-  letter-spacing: .08em;
-}
-.website-address-preview strong {
-  display: block;
-  margin-top: 5px;
-  overflow-wrap: anywhere;
-}
-.website-publish-note p {
-  margin: 5px 0 0;
-  color: var(--muted, #64748b);
-  font-size: .83rem;
-}
-.website-template-grid {
-  display: grid;
-  gap: 10px;
-}
-.website-template-grid > button {
-  text-align: left;
-  padding: 14px;
-  border-radius: 14px;
-  border: 1px solid var(--border, rgba(0,0,0,.1));
-  background: var(--surface, #fff);
-  color: inherit;
-}
-.website-template-grid > button.selected {
-  border-color: var(--website-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--website-primary) 10%, transparent);
-}
-.website-template-grid span,
-.website-template-grid small,
-.website-template-grid em {
-  display: block;
-}
-.website-template-grid span {
-  font-weight: 900;
-}
-.website-template-grid small,
-.website-template-grid em {
-  color: var(--muted, #64748b);
-  font-size: .76rem;
-}
-.website-template-grid p {
-  margin: 7px 0;
-  font-size: .84rem;
-}
-.website-template-grid em {
-  font-style: normal;
-}
-.website-toggle-row {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  border: 1px solid var(--border, rgba(0,0,0,.1));
-  border-radius: 13px;
-  padding: 12px;
-  margin-bottom: 14px;
-}
-.website-toggle-row span {
-  display: grid;
-  gap: 3px;
-}
-.website-toggle-row small {
-  color: var(--muted, #64748b);
-}
-.website-mini-preview {
-  position: sticky;
-  top: 0;
-  min-height: 360px;
-  border: 1px solid var(--border, rgba(0,0,0,.1));
-  border-radius: 18px;
-  overflow: hidden;
-  background: var(--surface, #fff);
-  box-shadow: 0 15px 40px rgba(2,6,23,.08);
-}
-.website-mini-preview header {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 14px;
-  border-bottom: 1px solid var(--border, rgba(0,0,0,.08));
-}
-.website-mini-preview nav {
-  display: flex;
-  gap: 8px;
-  color: var(--muted, #64748b);
-  font-size: .68rem;
-}
-.website-mini-hero {
-  padding: 32px 20px;
-  background:
-    linear-gradient(135deg,
-      color-mix(in srgb, var(--website-preview-primary) 16%, var(--surface, #fff)),
-      var(--surface, #fff));
-}
-.website-mini-hero small {
-  color: var(--website-preview-primary);
-  font-weight: 800;
-}
-.website-mini-hero h3 {
-  margin: 8px 0;
-  font-size: 1.45rem;
-  line-height: 1.1;
-}
-.website-mini-hero p {
-  color: var(--muted, #64748b);
-  font-size: .82rem;
-}
-.website-mini-hero button {
-  border: 0;
-  border-radius: 10px;
-  padding: 9px 11px;
-  background: var(--website-preview-primary);
-  color: #fff;
-  font-weight: 800;
-}
-.website-mini-hero button.ghost {
-  margin-left: 7px;
-  background: transparent;
-  color: var(--website-preview-primary);
-  border: 1px solid color-mix(in srgb, var(--website-preview-primary) 35%, transparent);
-}
-.website-mini-sections {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  padding: 14px;
-}
-.website-mini-sections span {
-  border-radius: 10px;
-  padding: 13px;
-  background: var(--surface-2, rgba(15,23,42,.04));
-  font-size: .74rem;
-  font-weight: 800;
-}
-.website-settings-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 15px;
-  padding: 12px 18px;
-  border-top: 1px solid var(--border, rgba(0,0,0,.1));
-}
-.website-settings-actions > span {
-  color: var(--muted, #64748b);
-  font-size: .78rem;
-}
-.website-settings-actions button {
-  border: 1px solid var(--border, rgba(0,0,0,.1));
-  background: var(--surface, #fff);
-  color: inherit;
-  border-radius: 10px;
-  padding: 10px 13px;
-  font-weight: 800;
-}
-.website-settings-actions button.primary {
-  margin-left: 8px;
-  border-color: var(--website-primary);
-  background: var(--website-primary);
-  color: #fff;
-}
-.website-settings-actions button:disabled {
-  opacity: .55;
-}
-@media (max-width: 820px) {
-  .website-settings-body {
-    grid-template-columns: 1fr;
-  }
-  .website-settings-body aside {
-    order: -1;
-  }
-  .website-mini-preview {
-    position: static;
-    min-height: 300px;
-  }
-}
-
-.actual-website-template { border: 1px solid var(--border, rgba(0,0,0,.1)); border-radius: 18px; overflow: hidden; background: var(--surface, #fff); box-shadow: 0 15px 40px rgba(2,6,23,.08); }
-.actual-website-template header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; }
-.actual-website-template nav { display:flex; gap:10px; color:var(--muted,#64748b); font-size:.68rem; }
-.actual-website-template button { border:0; border-radius:10px; padding:9px 11px; background:var(--template-primary); color:#fff; font-weight:800; }
-.modern-academy .template-hero { display:grid; grid-template-columns:1.25fr .75fr; gap:14px; padding:28px 18px; background:linear-gradient(135deg,color-mix(in srgb,var(--template-primary) 14%,var(--surface,#fff)),var(--surface,#fff)); }
-.template-hero h3,.classic-banner h3,.bold-hero h3 { margin:7px 0; font-size:1.4rem; line-height:1.08; }
-.template-hero p,.classic-banner p,.bold-hero p { color:var(--muted,#64748b); font-size:.8rem; }
-.template-image-placeholder { min-height:150px; border-radius:16px; display:grid; place-items:center; background:color-mix(in srgb,var(--template-primary) 16%,#e2e8f0); color:var(--template-primary); font-weight:800; }
-.template-actions .ghost { margin-left:7px; background:transparent; color:var(--template-primary); border:1px solid color-mix(in srgb,var(--template-primary) 35%,transparent); }
-.template-feature-grid,.classic-columns,.bold-links { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:12px; }
-.template-feature-grid article,.classic-columns article,.bold-links article { padding:12px; border-radius:11px; background:var(--surface-2,rgba(15,23,42,.04)); font-size:.74rem; }
-.template-feature-grid small { display:block; margin-top:4px; color:var(--muted,#64748b); }
-.classic-topline { padding:6px 14px; background:var(--template-primary); color:#fff; font-size:.66rem; text-align:center; }
-.classic-banner { padding:34px 20px; text-align:center; border-top:4px double var(--template-primary); border-bottom:1px solid var(--border,rgba(0,0,0,.1)); }
-.classic-columns { grid-template-columns:1.4fr 1fr; }
-.bold-campus { background:linear-gradient(160deg,color-mix(in srgb,var(--template-primary) 11%,var(--surface,#fff)),var(--surface,#fff)); }
-.bold-hero { padding:34px 20px; }
-.bold-hero span { display:inline-block; padding:5px 8px; border-radius:999px; background:var(--template-primary); color:#fff; font-size:.65rem; font-weight:800; }
-.bold-links { grid-template-columns:1fr 1fr; }
-.bold-links article { background:var(--template-primary); color:#fff; font-weight:800; }
-.website-template-empty { padding:30px; border:1px dashed var(--border,rgba(0,0,0,.15)); border-radius:16px; color:var(--muted,#64748b); }
-@media (max-width: 560px) {
-  .website-settings-body {
-    padding: 12px;
-  }
-  .website-two-columns {
-    grid-template-columns: 1fr;
-  }
-  .website-settings-actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .website-settings-actions > div {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
-  .website-settings-head p {
-    display: none;
-  }
-}
-`;

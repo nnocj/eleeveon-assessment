@@ -3,225 +3,246 @@
 import React from "react";
 
 import type {
+  WebsiteTemplateComponentProps,
   WebsiteTemplateDefinition,
-  WebsiteTemplateRenderProps,
 } from "../../types";
+import {
+  getVisibleWebsiteSections,
+  getWebsiteSectionLabel,
+} from "../../sections/sectionRegistry";
+
+type WebsiteTemplateDefinitionV2 = Omit<
+  WebsiteTemplateDefinition,
+  "component" | "defaultSections"
+> & {
+  component: React.ComponentType<WebsiteTemplateComponentProps>;
+};
+
+function container(width: "narrow" | "standard" | "wide" | "full") {
+  const pixels =
+    width === "narrow"
+      ? 840
+      : width === "wide"
+        ? 1240
+        : width === "full"
+          ? 1440
+          : 1080;
+
+  return {
+    width: `min(${pixels}px, calc(100% - 32px))`,
+    margin: "0 auto",
+  } as React.CSSProperties;
+}
+
+function sectionPadding(
+  value: "compact" | "standard" | "spacious",
+) {
+  return value === "compact"
+    ? "36px 0"
+    : value === "spacious"
+      ? "76px 0"
+      : "54px 0";
+}
 
 export function ModernAcademyTemplate({
-  draft,
-  data,
-  schoolName,
-  branchName,
-  primaryColor,
+  dataset,
+  settings,
   compact = false,
-}: WebsiteTemplateRenderProps) {
+  previewMode = false,
+}: WebsiteTemplateComponentProps) {
   const name =
-    draft.siteName ||
-    data?.school.name ||
-    schoolName ||
+    dataset.website?.siteName ||
+    dataset.school.name ||
     "Your School";
 
-  const resolvedBranch =
-    data?.branch?.name ||
-    branchName ||
-    "Main Campus";
-
   const tagline =
-    draft.tagline ||
-    data?.school.motto ||
+    settings.heroHeading ||
+    dataset.website?.tagline ||
+    dataset.school.motto ||
     "Learning today. Leading tomorrow.";
 
   const description =
-    draft.description ||
-    data?.school.description ||
+    settings.heroBody ||
+    dataset.website?.description ||
+    dataset.school.description ||
     "A modern school community helping every learner grow with knowledge, confidence and character.";
 
-  const logo =
-    data?.branch?.logo ||
-    data?.school.logo;
-
+  const logo = dataset.branch?.logo || dataset.school.logo;
   const heroImage =
-    data?.branch?.banner ||
-    data?.school.banner ||
-    data?.gallery?.[0];
+    dataset.branch?.banner ||
+    dataset.school.banner ||
+    dataset.gallery[0];
+
+  const sections = getVisibleWebsiteSections(settings);
 
   return (
     <div
-      className={`actual-website-template modern-academy ${
+      className={`website-template modern-academy ${
         compact ? "compact" : ""
-      }`}
+      } ${previewMode ? "preview" : ""}`}
       style={
         {
-          "--template-primary":
-            primaryColor || "#2563eb",
+          "--website-primary": "#2563eb",
+          "--website-radius": "18px",
+          fontFamily: "Inter, system-ui, sans-serif",
         } as React.CSSProperties
       }
     >
-      <header>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            minWidth: 0,
-          }}
-        >
-          {logo?.url ? (
+      <header style={{ ...container(settings.contentWidth), padding: "18px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {settings.showLogo && logo?.url ? (
             <img
               src={logo.url}
               alt={logo.alt || `${name} logo`}
               style={{
-                width: 40,
-                height: 40,
+                width: 46,
+                height: 46,
+                borderRadius: 14,
                 objectFit: "cover",
-                borderRadius: 11,
-                flexShrink: 0,
               }}
             />
           ) : (
             <span
               style={{
-                width: 40,
-                height: 40,
+                width: 46,
+                height: 46,
                 display: "grid",
                 placeItems: "center",
-                borderRadius: 11,
-                background:
-                  "var(--template-primary)",
+                borderRadius: 14,
+                background: "var(--website-primary)",
                 color: "#fff",
                 fontWeight: 900,
-                flexShrink: 0,
               }}
             >
               {name.slice(0, 1).toUpperCase()}
             </span>
           )}
 
-          <div style={{ minWidth: 0 }}>
-            <strong
-              style={{
-                display: "block",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {name}
-            </strong>
-
-            <small
-              style={{
-                display: "block",
-                color: "var(--muted, #64748b)",
-              }}
-            >
-              {resolvedBranch}
-            </small>
-          </div>
+          <strong>{name}</strong>
         </div>
-
-        <nav>
-          <span>Home</span>
-          <span>About</span>
-          <span>Academics</span>
-          <span>Contact</span>
-        </nav>
       </header>
 
-      <section className="template-hero">
-        <div>
-          <small>{resolvedBranch}</small>
+      {settings.showHero ? (
+        <section
+          id="hero"
+          style={{
+            padding: sectionPadding(settings.sectionSpacing),
+            background:
+              "linear-gradient(135deg, color-mix(in srgb, var(--website-primary) 11%, #fff), #fff)",
+          }}
+        >
+          <div
+            style={{
+              ...container(settings.contentWidth),
+              display: "grid",
+              gridTemplateColumns:
+                settings.heroVariant === "centered"
+                  ? "1fr"
+                  : "1.1fr .9fr",
+              gap: 30,
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <small
+                style={{
+                  color: "var(--website-primary)",
+                  fontWeight: 800,
+                }}
+              >
+                {settings.heroEyebrow ||
+                  dataset.branch?.name ||
+                  "MODERN LEARNING COMMUNITY"}
+              </small>
 
-          <h3>{tagline}</h3>
+              <h1
+                style={{
+                  margin: "14px 0",
+                  fontSize: "clamp(42px, 6vw, 76px)",
+                  lineHeight: 1.02,
+                }}
+              >
+                {tagline}
+              </h1>
 
-          <p>{description}</p>
+              <p style={{ maxWidth: 680, fontSize: 18, lineHeight: 1.7 }}>
+                {description}
+              </p>
+            </div>
 
-          <div className="template-actions">
-            <button type="button">
-              Explore School
-            </button>
-
-            <button
-              type="button"
-              className="ghost"
-            >
-              Apply Now
-            </button>
+            {settings.showHeroImage && heroImage?.url ? (
+              <img
+                src={heroImage.url}
+                alt={heroImage.alt || name}
+                style={{
+                  width: "100%",
+                  minHeight: 320,
+                  maxHeight: 520,
+                  objectFit: "cover",
+                  borderRadius: 24,
+                  boxShadow: "0 24px 70px rgba(15, 23, 42, .15)",
+                }}
+              />
+            ) : null}
           </div>
-        </div>
+        </section>
+      ) : null}
 
-        <div className="template-image-placeholder">
-          {heroImage?.url ? (
-            <img
-              src={heroImage.url}
-              alt={
-                heroImage.alt ||
-                `${name} campus`
-              }
-              style={{
-                width: "100%",
-                height: "100%",
-                minHeight: 150,
-                objectFit: "cover",
-                borderRadius: 16,
-              }}
-            />
-          ) : (
-            <span>School hero image</span>
-          )}
-        </div>
-      </section>
+      {sections
+        .filter((section) => !["hero", "footer"].includes(section.key))
+        .map((section, index) => (
+          <section
+            key={section.key}
+            id={section.key}
+            style={{
+              padding: sectionPadding(settings.sectionSpacing),
+              background: index % 2 ? "#f8fafc" : "#fff",
+            }}
+          >
+            <div style={container(settings.contentWidth)}>
+              <h2 style={{ fontSize: "clamp(30px, 4vw, 50px)", margin: 0 }}>
+                {getWebsiteSectionLabel(section.key, settings)}
+              </h2>
+            </div>
+          </section>
+        ))}
 
-      <section className="template-feature-grid">
-        <article>
-          <b>Academic Excellence</b>
-          <small>
-            Strong subjects, programmes and learning pathways
-          </small>
-        </article>
-
-        <article>
-          <b>Whole-child Growth</b>
-          <small>
-            Character, creativity and confidence
-          </small>
-        </article>
-
-        <article>
-          <b>Connected Community</b>
-          <small>
-            Parents, teachers and learners working together
-          </small>
-        </article>
-      </section>
+      {settings.showFooter ? (
+        <footer style={{ borderTop: "1px solid #e2e8f0" }}>
+          <div
+            style={{
+              ...container(settings.contentWidth),
+              padding: "38px 0",
+            }}
+          >
+            <strong>{name}</strong>
+            <p>{settings.footerText}</p>
+          </div>
+        </footer>
+      ) : null}
     </div>
   );
 }
 
-export const websiteTemplate: WebsiteTemplateDefinition = {
+export const websiteTemplate: WebsiteTemplateDefinitionV2 = {
   key: "modern_academy",
   name: "Modern Academy",
-  version: "1.1.0",
+  version: "2.0.0",
   category: "modern",
   tone: "Modern · spacious · premium",
   description:
-    "A clean, image-led single-page school website with strong academic, admissions and community sections.",
-
-  defaultSections: [
-    "hero",
-    "statistics",
-    "about",
-    "principal",
-    "programmes",
-    "subjects",
-    "why_choose_us",
-    "teachers",
-    "announcements",
-    "events",
-    "gallery",
-    "contact",
-  ],
-
+    "A polished image-led school website with spacious sections and strong admissions presentation.",
+  defaults: {
+    contentWidth: "wide",
+    density: "comfortable",
+    sectionSpacing: "spacious",
+    headerVariant: "standard",
+    heroVariant: "split",
+    statisticsVariant: "cards",
+    teacherVariant: "cards",
+    galleryVariant: "grid",
+    footerVariant: "columns",
+  },
   component: ModernAcademyTemplate,
 };
 

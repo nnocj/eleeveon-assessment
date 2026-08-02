@@ -3,245 +3,253 @@
 import React from "react";
 
 import type {
+  WebsiteTemplateComponentProps,
   WebsiteTemplateDefinition,
-  WebsiteTemplateRenderProps,
 } from "../../types";
+import {
+  getVisibleWebsiteSections,
+  getWebsiteSectionLabel,
+} from "../../sections/sectionRegistry";
+
+type WebsiteTemplateDefinitionV2 = Omit<
+  WebsiteTemplateDefinition,
+  "component" | "defaultSections"
+> & {
+  component: React.ComponentType<WebsiteTemplateComponentProps>;
+};
+
+function container(width: "narrow" | "standard" | "wide" | "full") {
+  const pixels =
+    width === "narrow"
+      ? 840
+      : width === "wide"
+        ? 1240
+        : width === "full"
+          ? 1440
+          : 1080;
+
+  return {
+    width: `min(${pixels}px, calc(100% - 32px))`,
+    margin: "0 auto",
+  } as React.CSSProperties;
+}
+
+function sectionPadding(
+  value: "compact" | "standard" | "spacious",
+) {
+  return value === "compact"
+    ? "36px 0"
+    : value === "spacious"
+      ? "76px 0"
+      : "54px 0";
+}
 
 export function BoldCampusTemplate({
-  draft,
-  data,
-  schoolName,
-  branchName,
-  primaryColor,
+  dataset,
+  settings,
   compact = false,
-}: WebsiteTemplateRenderProps) {
+  previewMode = false,
+}: WebsiteTemplateComponentProps) {
   const name =
-    draft.siteName ||
-    data?.school.name ||
-    schoolName ||
+    dataset.website?.siteName ||
+    dataset.school.name ||
     "Your School";
 
-  const resolvedBranch =
-    data?.branch?.name ||
-    branchName ||
-    "Main Campus";
-
   const tagline =
-    draft.tagline ||
-    data?.school.motto ||
+    settings.heroHeading ||
+    dataset.website?.tagline ||
+    dataset.school.motto ||
     "Learn boldly. Grow fully.";
 
   const description =
-    draft.description ||
-    data?.school.description ||
-    "A vibrant learning community where knowledge, creativity, character and opportunity come alive.";
+    settings.heroBody ||
+    dataset.website?.description ||
+    dataset.school.description ||
+    "A vibrant learning community where knowledge, creativity and opportunity come alive.";
 
-  const logo =
-    data?.branch?.logo ||
-    data?.school.logo;
+  const logo = dataset.branch?.logo || dataset.school.logo;
+  const heroImage =
+    dataset.branch?.banner ||
+    dataset.school.banner ||
+    dataset.gallery[0];
 
-  const subjectsCount =
-    data?.subjects?.length || 0;
-
-  const teachersCount =
-    data?.teachers?.length || 0;
+  const sections = getVisibleWebsiteSections(settings);
 
   return (
     <div
-      className={`actual-website-template bold-campus ${
+      className={`website-template bold-campus ${
         compact ? "compact" : ""
-      }`}
+      } ${previewMode ? "preview" : ""}`}
       style={
         {
-          "--template-primary":
-            primaryColor || "#7c3aed",
+          "--website-primary": "#7c3aed",
+          "--website-radius": "22px",
         } as React.CSSProperties
       }
     >
-      <header>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            minWidth: 0,
-          }}
-        >
-          {logo?.url ? (
+      <header style={{ ...container(settings.contentWidth), padding: "18px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {settings.showLogo && logo?.url ? (
             <img
               src={logo.url}
               alt={logo.alt || `${name} logo`}
               style={{
-                width: 38,
-                height: 38,
-                borderRadius: 10,
+                width: 48,
+                height: 48,
                 objectFit: "cover",
-                flexShrink: 0,
+                borderRadius: 14,
               }}
             />
           ) : (
             <span
               style={{
-                width: 38,
-                height: 38,
-                borderRadius: 10,
+                width: 48,
+                height: 48,
                 display: "grid",
                 placeItems: "center",
-                background:
-                  "var(--template-primary)",
+                borderRadius: 14,
+                background: "var(--website-primary)",
                 color: "#fff",
                 fontWeight: 900,
-                flexShrink: 0,
               }}
             >
               {name.slice(0, 1).toUpperCase()}
             </span>
           )}
 
-          <div style={{ minWidth: 0 }}>
-            <strong
-              style={{
-                display: "block",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {name}
-            </strong>
-
-            <small
-              style={{
-                display: "block",
-                color: "var(--muted, #64748b)",
-              }}
-            >
-              {resolvedBranch}
-            </small>
+          <div>
+            <strong style={{ display: "block" }}>{name}</strong>
+            {settings.showBranchName && dataset.branch?.name ? (
+              <small>{dataset.branch.name}</small>
+            ) : null}
           </div>
         </div>
-
-        <button type="button">
-          Enquire
-        </button>
       </header>
 
-      <section className="bold-hero">
-        <span>{resolvedBranch}</span>
-
-        <h3>{tagline}</h3>
-
-        <p>{description}</p>
-
-        <div className="template-actions">
-          <button type="button">
-            Explore School
-          </button>
-
-          <button
-            type="button"
-            className="ghost"
-          >
-            Contact Us
-          </button>
-        </div>
-      </section>
-
-      {(subjectsCount > 0 ||
-        teachersCount > 0) && (
+      {settings.showHero ? (
         <section
+          id="hero"
           style={{
-            display: "grid",
-            gridTemplateColumns:
-              "repeat(2, minmax(0, 1fr))",
-            gap: 8,
-            padding: "0 12px 12px",
+            padding: sectionPadding(settings.sectionSpacing),
+            background:
+              "linear-gradient(145deg, color-mix(in srgb, var(--website-primary) 16%, #fff), #fff)",
           }}
         >
-          {subjectsCount > 0 ? (
-            <article
-              style={{
-                padding: 12,
-                borderRadius: 12,
-                background:
-                  "var(--surface-2, rgba(15,23,42,.04))",
-              }}
-            >
-              <strong
+          <div
+            style={{
+              ...container(settings.contentWidth),
+              display: "grid",
+              gridTemplateColumns:
+                settings.heroVariant === "centered"
+                  ? "1fr"
+                  : "1.15fr .85fr",
+              gap: 28,
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <span
                 style={{
-                  display: "block",
-                  color:
-                    "var(--template-primary)",
-                  fontSize: "1.1rem",
+                  display: "inline-flex",
+                  padding: "7px 11px",
+                  borderRadius: 999,
+                  background: "var(--website-primary)",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 12,
                 }}
               >
-                {subjectsCount}
-              </strong>
+                {settings.heroEyebrow ||
+                  dataset.branch?.name ||
+                  "School Community"}
+              </span>
 
-              <small>Subjects</small>
-            </article>
-          ) : null}
-
-          {teachersCount > 0 ? (
-            <article
-              style={{
-                padding: 12,
-                borderRadius: 12,
-                background:
-                  "var(--surface-2, rgba(15,23,42,.04))",
-              }}
-            >
-              <strong
+              <h1
                 style={{
-                  display: "block",
-                  color:
-                    "var(--template-primary)",
-                  fontSize: "1.1rem",
+                  margin: "16px 0 12px",
+                  fontSize: "clamp(42px, 7vw, 86px)",
+                  lineHeight: 0.98,
                 }}
               >
-                {teachersCount}
-              </strong>
+                {tagline}
+              </h1>
 
-              <small>Teachers</small>
-            </article>
-          ) : null}
+              <p style={{ maxWidth: 700, fontSize: 19, lineHeight: 1.7 }}>
+                {description}
+              </p>
+            </div>
+
+            {settings.showHeroImage && heroImage?.url ? (
+              <img
+                src={heroImage.url}
+                alt={heroImage.alt || name}
+                style={{
+                  width: "100%",
+                  minHeight: 320,
+                  maxHeight: 520,
+                  objectFit: "cover",
+                  borderRadius: 28,
+                }}
+              />
+            ) : null}
+          </div>
         </section>
-      )}
+      ) : null}
 
-      <section className="bold-links">
-        <article>Explore Programmes</article>
-        <article>Campus Life</article>
-        <article>Upcoming Events</article>
-        <article>Admissions</article>
-      </section>
+      {sections
+        .filter((section) => !["hero", "footer"].includes(section.key))
+        .map((section) => (
+          <section
+            key={section.key}
+            id={section.key}
+            style={{
+              padding: sectionPadding(settings.sectionSpacing),
+            }}
+          >
+            <div style={container(settings.contentWidth)}>
+              <h2 style={{ fontSize: "clamp(30px, 5vw, 52px)", margin: 0 }}>
+                {getWebsiteSectionLabel(section.key, settings)}
+              </h2>
+            </div>
+          </section>
+        ))}
+
+      {settings.showFooter ? (
+        <footer style={{ background: "#111827", color: "#fff" }}>
+          <div
+            style={{
+              ...container(settings.contentWidth),
+              padding: "34px 0",
+            }}
+          >
+            <strong>{name}</strong>
+            <p>{settings.footerText}</p>
+          </div>
+        </footer>
+      ) : null}
     </div>
   );
 }
 
-export const websiteTemplate: WebsiteTemplateDefinition = {
+export const websiteTemplate: WebsiteTemplateDefinitionV2 = {
   key: "bold_campus",
   name: "Bold Campus",
-  version: "1.1.0",
+  version: "2.0.0",
   category: "energetic",
   tone: "Bright · bold · active",
   description:
-    "A lively single-page school website with strong branding, quick navigation and dynamic school content.",
-
-  defaultSections: [
-    "hero",
-    "statistics",
-    "about",
-    "principal",
-    "programmes",
-    "subjects",
-    "school_life",
-    "teachers",
-    "announcements",
-    "events",
-    "gallery",
-    "contact",
-  ],
-
+    "A lively, high-energy school website with bold typography, strong colour and immersive media.",
+  defaults: {
+    contentWidth: "wide",
+    density: "compact",
+    sectionSpacing: "standard",
+    headerVariant: "bold",
+    heroVariant: "full_bleed",
+    statisticsVariant: "large_numbers",
+    teacherVariant: "portrait_cards",
+    galleryVariant: "masonry",
+    footerVariant: "dark",
+  },
   component: BoldCampusTemplate,
 };
 

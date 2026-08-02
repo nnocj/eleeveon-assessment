@@ -7,4 +7,4 @@ export const GENERATED_WEBSITE_TEMPLATES = [
   template0,
   template1,
   template2,
-];
+] as const;

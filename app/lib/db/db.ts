@@ -2,6 +2,7 @@ import Dexie, { Table } from "dexie";
 import { SyncStatus } from "../constants/syncStatus";
 import { APP_DB_VERSION, APP_DB_NAME } from "./db-version";
 import { LOCAL_PROTECTION_STORES, type DatabaseRecoveryBackup, type LocalMigrationJournal, type SyncQuarantineRecord } from "./db-migrations";
+import type { WebsiteTemplateSettings } from "../websites/types";
 
 // ======================================================
 // GLOBAL TYPES
@@ -3352,6 +3353,45 @@ export interface WebsiteSetting extends BaseSync {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Shared visual and content-control settings for a public website template.
+ *
+ * The template registry remains code-owned. This record stores only the
+ * school/branch-specific settings applied to a registered template.
+ */
+export interface WebsiteTemplateSetting extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+
+  templateKey: string;
+  templateVersion: string;
+  settings: WebsiteTemplateSettings;
+
+  active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Assigns a saved WebsiteTemplateSetting to the website or to a specific page.
+ *
+ * Keeping assignment separate allows safe template switching and future
+ * page-level overrides without duplicating the settings record.
+ */
+export interface WebsiteTemplateAssignment extends BaseSync {
+  schoolId: string;
+  branchId?: string | null;
+  websiteSettingId: string;
+  templateSettingId: string;
+
+  scopeType: "website" | "page";
+  scopeId?: string | null;
+
+  isDefault: boolean;
+  active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
 export interface WebsitePage extends BaseSync {
   schoolId: string;
   branchId?: string | null;
@@ -4376,6 +4416,12 @@ export const APP_DB_STORES_V1: Record<string, string> = {
       websiteSettings:
         "id,accountId,schoolId,branchId,eleeveonSlug,templateKey,status,primaryDomainId,homePageId,publishedAt,isDeleted,updatedAt,synced,&[accountId+eleeveonSlug],[schoolId+status]",
 
+      websiteTemplateSettings:
+        "id,accountId,schoolId,branchId,websiteSettingId,templateKey,templateVersion,active,isDeleted,updatedAt,synced,[websiteSettingId+active],[websiteSettingId+templateKey],[schoolId+branchId+active]",
+
+      websiteTemplateAssignments:
+        "id,accountId,schoolId,branchId,websiteSettingId,templateSettingId,scopeType,scopeId,isDefault,active,isDeleted,updatedAt,synced,[websiteSettingId+scopeType+scopeId],[websiteSettingId+isDefault+active],[templateSettingId+active]",
+
       websitePages:
         "id,accountId,schoolId,branchId,websiteSettingId,slug,pageType,status,displayOrder,parentPageId,showInNavigation,publishedAt,isDeleted,updatedAt,synced,&[websiteSettingId+slug],[websiteSettingId+status+displayOrder]",
 
@@ -4650,6 +4696,8 @@ export class EleeveonDatabase extends Dexie {
   portalHighlights!: Table<PortalHighlight, string>;
 
   websiteSettings!: Table<WebsiteSetting, string>;
+  websiteTemplateSettings!: Table<WebsiteTemplateSetting, string>;
+  websiteTemplateAssignments!: Table<WebsiteTemplateAssignment, string>;
   websitePages!: Table<WebsitePage, string>;
   websiteSections!: Table<WebsiteSection, string>;
   websiteNavigationItems!: Table<WebsiteNavigationItem, string>;
@@ -4716,6 +4764,25 @@ export class EleeveonDatabase extends Dexie {
 
   constructor() {
     super(APP_DB_NAME);
+
+    /**
+     * Version 1 remains registered as the historical baseline.
+     * Do not remove it after users have created an EleeveonDB database.
+     */
+    this.version(1).stores({
+      ...APP_DB_STORES_V1,
+      ...LOCAL_PROTECTION_STORES,
+    });
+
+    /**
+     * Version 2 activates the website template persistence stores:
+     * - websiteTemplateSettings
+     * - websiteTemplateAssignments
+     *
+     * APP_DB_STORES_V1 currently represents the complete schema inventory, so
+     * re-declaring it here lets Dexie compare the installed v1 database against
+     * the v2 schema and create any newly introduced stores and indexes safely.
+     */
     this.version(APP_DB_VERSION).stores({
       ...APP_DB_STORES_V1,
       ...LOCAL_PROTECTION_STORES,

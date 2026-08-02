@@ -136,7 +136,7 @@ import CumulativeReportBook from "./reports/components/CumulativeReportBook";
 import CumulativeTranscriptCard from "./reports/components/CumulativeTranscriptCard";
 import BroadsheetCard from "./reports/components/BroadsheetCard";
 import CredentialDesignSettings from "./identity/CredentialDesignSettings";
-import WebsiteSettingsSheet from "./website/settings/WebsiteSettingsSheet";
+import WebsiteSettingsSheet from "../../lib/websites/builder/settings/WebsiteSettingsSheet";
 
 import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
@@ -4477,8 +4477,8 @@ export default function Branchsettings() {
         key: "website" as SettingsSection,
         icon: "🌐",
         title: "School Website",
-        subtitle: "Template, domain and publishing",
-        detail: "Public website identity, SEO, analytics and status",
+        subtitle: "Template, display, labels and live preview",
+        detail: "Content order, domains, SEO and publishing controls",
         tone: "blue",
       },
       {
@@ -4880,6 +4880,7 @@ export default function Branchsettings() {
 
       {sectionOpen === "website" && (
         <WebsiteSettingsSheet
+          open
           accountId={selectedAccountId}
           schoolId={selectedSchoolId}
           branchId={selectedBranchId}
@@ -4895,8 +4896,14 @@ export default function Branchsettings() {
             activeBranch?.name ||
             "Main Campus"
           }
-          primaryColor={String(primary)}
-          onSaved={load}
+          rootDomain="eleeveon.com"
+          onSaved={() => {
+            void load();
+            setToast({
+              tone: "success",
+              message: "Website settings saved successfully.",
+            });
+          }}
           onClose={() => setSectionOpen(null)}
         />
       )}
