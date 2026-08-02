@@ -1756,6 +1756,10 @@ function assetPreviewKey(
   return `${ownerTable}:${ownerId}:${fieldKey}`;
 }
 
+function galleryAssetPreviewKey(assetId: unknown) {
+  return `${SETTINGS_MEDIA_OWNER_TABLE}:gallery:${idOf(assetId)}`;
+}
+
 function createSettingsMediaSessionKey() {
   return createSharedMediaSessionKey(SETTINGS_MEDIA_OWNER_TABLE);
 }
@@ -2514,14 +2518,22 @@ export default function Branchsettings() {
       : [];
 
     for (const assetId of galleryIds) {
+      /*
+       * Gallery assets share one fieldKey, so resolving by owner + field can
+       * repeatedly return the first matching image. Resolve each item by its
+       * own media ID and keep its URL in the lifecycle map under a unique key.
+       */
       const url = await resolveOwnedAssetUrl({
         ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
-        ownerId: settingIdValue,
-
+        ownerId: undefined,
         fieldKey: GALLERY_FIELD_KEY,
         fallbackMediaId: assetId,
       });
-      if (url) galleryUrls.push(url);
+
+      if (url) {
+        galleryUrls.push(url);
+        next[galleryAssetPreviewKey(assetId)] = url;
+      }
     }
 
     setMediaPreviewUrls((current) => {
@@ -3378,10 +3390,13 @@ export default function Branchsettings() {
     if (!requireTenant()) return;
 
     try {
-      const ownerId = settingsRow?.id || form.id || undefined;
-      const ownerTempKey = ownerId
-        ? undefined
-        : settingsMediaSessionKeyRef.current;
+      /*
+       * Match Students.tsx: uploads remain staged until Save. This prevents an
+       * edit from mutating the committed gallery before the settings record is
+       * successfully saved.
+       */
+      const ownerId = undefined;
+      const ownerTempKey = settingsMediaSessionKeyRef.current;
       const results = await Promise.all(
         Array.from(files).map((file) =>
           saveImageAsset(file, {
@@ -4923,8 +4938,10 @@ export default function Branchsettings() {
       {sectionOpen === "gallery" && (
         <GallerySheet
           images={form.schoolGalleryImages}
+          saving={savingSettings}
           handleGalleryUpload={handleGalleryUpload}
           removeGalleryImage={removeGalleryImage}
+          saveGallery={saveSchoolBranchSettings}
           onClose={() => setSectionOpen(null)}
         />
       )}
@@ -7351,13 +7368,17 @@ function MediaSheet({
 
 function GallerySheet({
   images,
+  saving,
   handleGalleryUpload,
   removeGalleryImage,
+  saveGallery,
   onClose,
 }: {
   images: string[];
-  handleGalleryUpload: (files: FileList | null) => void;
+  saving: boolean;
+  handleGalleryUpload: (files: FileList | null) => void | Promise<void>;
   removeGalleryImage: (index: number) => void;
+  saveGallery: (options?: boolean | SaveOptions) => Promise<boolean>;
   onClose: () => void;
 }) {
   return (
@@ -7383,7 +7404,11 @@ function GallerySheet({
             type="file"
             accept="image/*"
             multiple
-            onChange={(event) => handleGalleryUpload(event.target.files)}
+            onChange={async (event) => {
+              const input = event.currentTarget;
+              await handleGalleryUpload(input.files);
+              input.value = "";
+            }}
           />
         </div>
 
@@ -7401,8 +7426,19 @@ function GallerySheet({
         )}
 
         <div className="ba-sheet-actions">
-          <button type="button" className="primary" onClick={onClose}>
-            Done
+          <button type="button" onClick={onClose} disabled={saving}>
+            Close
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={saving}
+            onClick={async () => {
+              const saved = await saveGallery();
+              if (saved) onClose();
+            }}
+          >
+            {saving ? "Saving..." : "Save Gallery"}
           </button>
         </div>
       </section>
