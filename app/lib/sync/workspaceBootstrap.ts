@@ -167,7 +167,7 @@ const SETTINGS_CACHE_PREFIX =
  * Bump when the definition of a complete initial workspace changes.
  * Version 2 invalidates the earlier essential-table-only markers.
  */
-const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 1;
+const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 2;
 
 
 export type ScopedWorkspaceSettingsCache = {
