@@ -864,14 +864,12 @@ function cleanCreateAccountUserDto(
   };
 }
 
-function cleanUpdateAccountUserDto(form: FormState) {
-  return {
-    fullName: form.fullName.trim(),
-    phone: normalizePhone(form.phone) || undefined,
-    role: form.role,
-  };
-}
-
+/**
+ * Account-user identity updates are intentionally not performed from the
+ * Branch Admin portal. Branch Admins manage branch-scoped UserMembership
+ * access, while account-level AppUser changes remain restricted to higher
+ * administrative roles.
+ */
 function cleanMembershipDto(
   form: FormState,
   userId: string,
@@ -987,13 +985,15 @@ async function saveBackendBranchAccess(args: {
   let membershipsFromCreatedUser: UserMembership[] = [];
 
   if (user && userIdOf(user)) {
-    user = await authApi<AppUser>(
-      `/accounts/users/${encodeURIComponent(String(userIdOf(user)))}`,
-      {
-        method: "PATCH",
-        body: cleanUpdateAccountUserDto(args.form),
-      },
-    );
+    /*
+     * EXISTING USER:
+     * A Branch Admin manages branch-scoped access through UserMembership.
+     * Do not PATCH /accounts/users/:id here because that is an account-level
+     * identity endpoint and may be restricted to owner/admin roles.
+     *
+     * Keep the existing AppUser and continue below to create or update the
+     * matching membership for this school and branch.
+     */
     membershipsFromCreatedUser =
       extractBackendUsersAndMemberships(user).memberships;
   } else {
@@ -1060,11 +1060,19 @@ async function saveBackendBranchAccess(args: {
       ),
     );
 
+  const matchingMembershipId = String(
+    authTableId(matchingMembership) || "",
+  ).trim();
+  const hasRealMembershipId =
+    Boolean(matchingMembershipId) &&
+    !matchingMembershipId.startsWith("membership_");
+
   let membership: UserMembership;
-  if (matchingMembership?.id) {
-    // If the create-user endpoint already returned the exact membership, update it instead of creating another one.
+  if (matchingMembership && hasRealMembershipId) {
+    // Update only real backend memberships. Synthetic membership_* rows are
+    // local normalization helpers and must never be sent to the backend.
     membership = await authApi<UserMembership>(
-      `/memberships/${encodeURIComponent(String(authTableId(matchingMembership)))}`,
+      `/memberships/${encodeURIComponent(matchingMembershipId)}`,
       {
         method: "PATCH",
         body: cleanMembershipDto(
@@ -1082,15 +1090,8 @@ async function saveBackendBranchAccess(args: {
     });
   }
 
-  if (args.form.active === false && membership?.id) {
-    membership = await authApi<UserMembership>(
-      `/memberships/${encodeURIComponent(String(membership.id))}`,
-      {
-        method: "PATCH",
-        body: { active: false },
-      },
-    );
-  }
+  // cleanMembershipDto already sends the requested active state, so no
+  // second PATCH is necessary when access is being disabled.
 
   return { user, membership };
 }

@@ -1140,7 +1140,50 @@ export async function getMediaObjectUrl(assetId?: string | null) {
   if (!id) return "";
 
   const asset = await getMediaAsset(id);
-  if (!asset || asset.isDeleted || asset.active === false) {
+
+  /*
+   * A synchronized settings row can arrive before its mediaAssets cache row,
+   * while the local mediaBlobs row already exists. Resolve that blob directly
+   * instead of showing an unavailable gallery item.
+   */
+  if (!asset) {
+    const blobTable = tableSafe("mediaBlobs");
+    let blobRow: any = null;
+
+    if (blobTable) {
+      try {
+        blobRow = await blobTable
+          .where("assetId")
+          .equals(id)
+          .first();
+      } catch {
+        const rows = await blobTable.toArray();
+        blobRow =
+          rows.find(
+            (row: any) =>
+              cleanString(row?.assetId) === id &&
+              !row?.isDeleted &&
+              row?.active !== false,
+          ) || null;
+      }
+    }
+
+    if (blobRow?.blob instanceof Blob) {
+      return createObjectUrl(blobRow.blob);
+    }
+
+    if (blobRow?.arrayBuffer) {
+      return createObjectUrl(
+        new Blob([blobRow.arrayBuffer], {
+          type: blobRow.mimeType || "image/webp",
+        }),
+      );
+    }
+
+    return "";
+  }
+
+  if (asset.isDeleted || asset.active === false) {
     revokeCachedMediaObjectUrl(id);
     return "";
   }
@@ -1301,6 +1344,11 @@ export async function attachMediaAssetToOwner(params: {
   ownerId?: string | null;
   ownerTempKey?: string | null;
   /**
+   * Multi-image fields such as galleries must retain every attached asset.
+   * Single-image fields keep the default replacement cleanup behavior.
+   */
+  allowMultiple?: boolean;
+  /**
    * The destination owner field is authoritative during commit.
    * This repairs legacy assets whose fieldKey used an older alias such as
    * "schoolLogo" while the current owner row stores the media ID under "logo".
@@ -1337,10 +1385,9 @@ export async function attachMediaAssetToOwner(params: {
     isDeleted: false,
   } as any);
 
-  // Replacement cleanup for unsaved-form uploads that become attached later:
-  // once this asset has a permanent owner, deactivate older active assets for
-  // the same owner + field. The current asset is excluded.
-  if (fieldKey && ownerId) {
+  // Replacement cleanup applies only to single-image fields.
+  // Galleries and other multi-image fields must preserve all committed assets.
+  if (!params.allowMultiple && fieldKey && ownerId) {
     await softDeleteOwnerFieldAssets({
       accountId: asset.accountId,
       ownerTable,
@@ -1497,6 +1544,7 @@ export async function commitMediaAssetToOwner(params: {
     ownerId: params.ownerId,
     ownerTempKey: params.ownerTempKey,
     fieldKey: params.fieldKey,
+    allowMultiple: params.allowMultiple,
   });
 
   if (!params.allowMultiple) {

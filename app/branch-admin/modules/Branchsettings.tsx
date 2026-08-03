@@ -102,10 +102,17 @@ import {
 import {
   commitMediaAssetsToOwner,
   createMediaSessionKey as createSharedMediaSessionKey,
+  MediaFieldKeys,
+  MediaOwners,
   resolveOwnerMediaUrl,
   revokeMediaObjectUrl,
   saveImageAsset,
 } from "../../lib/media/mediaAssetUtils";
+
+import {
+  resolveMediaAssetUrlById,
+  revokeResolvedMediaUrl,
+} from "../../lib/media/mediaAssetResolver";
 
 import {
   createLocal,
@@ -278,8 +285,7 @@ type SettingsForm = {
   classroomPlaceholderImageMediaId?: string;
   subjectPlaceholderImage: string;
   subjectPlaceholderImageMediaId?: string;
-  schoolGalleryImages: string[];
-  schoolGalleryMediaIds?: string[];
+  schoolGalleryMediaIds: string[];
 };
 
 type TenantRow = {
@@ -529,7 +535,7 @@ const defaultForm = (
   teacherPortalImage: "",
   classroomPlaceholderImage: "",
   subjectPlaceholderImage: "",
-  schoolGalleryImages: [],
+  schoolGalleryMediaIds: [],
 });
 
 function studentReportTemplateDefinitionOptions(): ReportTemplateRow[] {
@@ -1608,10 +1614,10 @@ const cleanId = (value: unknown): string => idOf(value);
 
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 
-const SETTINGS_MEDIA_OWNER_TABLE = "schoolBranchSettings";
-const SCHOOL_MEDIA_OWNER_TABLE = "schools";
-const BRANCH_MEDIA_OWNER_TABLE = "branches";
-const GALLERY_FIELD_KEY = "schoolGalleryImages";
+const SETTINGS_MEDIA_OWNER_TABLE = MediaOwners.SCHOOL_BRANCH_SETTINGS;
+const SCHOOL_MEDIA_OWNER_TABLE = MediaOwners.SCHOOLS;
+const BRANCH_MEDIA_OWNER_TABLE = MediaOwners.BRANCHES;
+const GALLERY_FIELD_KEY = MediaFieldKeys.GALLERY;
 
 type OpenWorkspaceSession = {
   membership?: Record<string, any> | null;
@@ -1928,15 +1934,16 @@ function makeSettingsPayload(
     )
       ? (payload as any).subjectPlaceholderImageMediaId
       : (existing as any)?.subjectPlaceholderImageMediaId,
-    schoolGalleryImages: Array.isArray(payload.schoolGalleryImages)
-      ? payload.schoolGalleryImages
-      : Array.isArray(existing?.schoolGalleryImages)
-        ? existing?.schoolGalleryImages
-        : [],
-    schoolGalleryMediaIds: Array.isArray((payload as any).schoolGalleryMediaIds)
+    schoolGalleryMediaIds: Array.isArray(
+      (payload as any).schoolGalleryMediaIds,
+    )
       ? (payload as any).schoolGalleryMediaIds
+          .map((value: unknown) => idOf(value))
+          .filter(Boolean)
       : Array.isArray((existing as any)?.schoolGalleryMediaIds)
         ? (existing as any).schoolGalleryMediaIds
+            .map((value: unknown) => idOf(value))
+            .filter(Boolean)
         : [],
 
     createdAt: existing?.createdAt || payload.createdAt || now,
@@ -2318,6 +2325,13 @@ export default function Branchsettings() {
   const uploadedSettingsMediaIdsRef =
     useRef<Partial<Record<ImageField, string>>>({});
 
+  /**
+   * Gallery uploads create mediaAssets immediately, which increments the shared
+   * data revision before the settings row is saved. Keep their IDs separately
+   * so the automatic reload cannot discard unsaved gallery selections.
+   */
+  const stagedGalleryMediaIdsRef = useRef<Set<string>>(new Set());
+
   const uploadedSchoolMediaIdsRef =
     useRef<Record<string, string>>({});
 
@@ -2356,6 +2370,7 @@ export default function Branchsettings() {
     setBranchForm({});
     setReportTemplateForm(defaultReportTemplateForm());
     setPendingMediaRemovals([]);
+    stagedGalleryMediaIdsRef.current.clear();
     setForm(defaultForm(selectedSchoolId, selectedBranchId));
   };
 
@@ -2510,36 +2525,64 @@ export default function Branchsettings() {
       if (url) settingUrls[field] = url;
     }
 
-    const galleryUrls: string[] = [];
     const galleryIds = Array.isArray(
       (currentSetting as any)?.schoolGalleryMediaIds,
     )
       ? (currentSetting as any).schoolGalleryMediaIds
+          .map((value: unknown) => idOf(value))
+          .filter(Boolean)
       : [];
 
     for (const assetId of galleryIds) {
       /*
-       * Gallery assets share one fieldKey, so resolving by owner + field can
-       * repeatedly return the first matching image. Resolve each item by its
-       * own media ID and keep its URL in the lifecycle map under a unique key.
+       * A gallery is a multi-image field. Resolving by owner + fieldKey would
+       * repeatedly return the first matching asset, while resolving a fallback
+       * without owner identity is rejected by resolveOwnerMediaUrl().
+       *
+       * Resolve each saved media UUID directly so every gallery item receives
+       * its own local blob URL or synchronized remote URL.
        */
-      const url = await resolveOwnedAssetUrl({
-        ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
-        ownerId: undefined,
-        fieldKey: GALLERY_FIELD_KEY,
-        fallbackMediaId: assetId,
-      });
+      try {
+        const url = await resolveMediaAssetUrlById(assetId, {
+          accountId: selectedAccountId,
+          ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+          ownerId: settingIdValue || undefined,
+          fieldKey: GALLERY_FIELD_KEY,
+        });
 
-      if (url) {
-        galleryUrls.push(url);
-        next[galleryAssetPreviewKey(assetId)] = url;
+        if (url) {
+          next[galleryAssetPreviewKey(assetId)] = url;
+        }
+      } catch (error) {
+        console.error(
+          "Failed to resolve gallery media asset:",
+          {
+            assetId,
+            ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+            fieldKey: GALLERY_FIELD_KEY,
+            error,
+          },
+        );
       }
     }
 
     setMediaPreviewUrls((current) => {
-      Object.values(current).forEach((url) => {
-        if (!Object.values(next).includes(url)) revokeMediaObjectUrl(url);
+      /*
+       * Preserve previews for gallery assets staged during the current edit.
+       * saveImageAsset writes mediaAssets immediately and triggers dataRevision,
+       * so load() may run before Save Gallery commits those IDs to settings.
+       */
+      for (const assetId of stagedGalleryMediaIdsRef.current) {
+        const key = galleryAssetPreviewKey(assetId);
+        if (current[key] && !next[key]) {
+          next[key] = current[key];
+        }
+      }
+
+      Object.entries(current).forEach(([key, url]) => {
+        if (!next[key]) revokeMediaObjectUrl(url);
       });
+
       return next;
     });
 
@@ -2549,7 +2592,6 @@ export default function Branchsettings() {
       branchLogoUrl,
       branchBannerUrl,
       settingUrls,
-      galleryUrls,
     };
   };
 
@@ -2923,18 +2965,18 @@ export default function Branchsettings() {
           "",
         subjectPlaceholderImageMediaId: (currentSetting as any)
           ?.subjectPlaceholderImageMediaId,
-        schoolGalleryImages: mediaUrls.galleryUrls.length
-          ? mediaUrls.galleryUrls
-          : Array.isArray((currentSetting as any)?.schoolGalleryImages)
-            ? (currentSetting as any).schoolGalleryImages.filter(
-                (value: string) => !!safeRecordMediaValue(value),
-              )
-            : [],
-        schoolGalleryMediaIds: Array.isArray(
-          (currentSetting as any)?.schoolGalleryMediaIds,
-        )
-          ? (currentSetting as any).schoolGalleryMediaIds
-          : [],
+        schoolGalleryMediaIds: Array.from(
+          new Set([
+            ...(Array.isArray(
+              (currentSetting as any)?.schoolGalleryMediaIds,
+            )
+              ? (currentSetting as any).schoolGalleryMediaIds
+                  .map((value: unknown) => idOf(value))
+                  .filter(Boolean)
+              : []),
+            ...stagedGalleryMediaIdsRef.current,
+          ]),
+        ),
       });
 
       setReportTemplateForm({
@@ -3039,6 +3081,111 @@ export default function Branchsettings() {
     );
   }, [filteredAcademicPeriods, form.currentAcademicPeriodId]);
 
+  const refreshGalleryPreviews = async () => {
+    const assetIds = Array.from(
+      new Set(
+        (form.schoolGalleryMediaIds || [])
+          .map((value) => cleanId(value))
+          .filter(Boolean),
+      ),
+    );
+
+    if (!assetIds.length) return;
+
+    const ownerId = cleanId(settingsRow?.id || form.id) || undefined;
+    const ownerTempKey = settingsMediaSessionKeyRef.current;
+
+    const resolvedEntries = await Promise.all(
+      assetIds.map(async (assetId) => {
+        try {
+          const url = await resolveMediaAssetUrlById(assetId, {
+            accountId: selectedAccountId,
+            ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+            ownerId,
+            ownerTempKey,
+            fieldKey: GALLERY_FIELD_KEY,
+          });
+
+          return [assetId, url] as const;
+        } catch (error) {
+          console.warn("Gallery preview resolution failed:", {
+            assetId,
+            ownerId,
+            ownerTempKey,
+            error,
+          });
+
+          return [assetId, ""] as const;
+        }
+      }),
+    );
+
+    setMediaPreviewUrls((current) => {
+      const next = { ...current };
+
+      for (const [assetId, url] of resolvedEntries) {
+        if (!url) continue;
+
+        const key = galleryAssetPreviewKey(assetId);
+        const previous = next[key];
+
+        if (previous && previous !== url) {
+          revokeResolvedMediaUrl(previous);
+        }
+
+        next[key] = url;
+      }
+
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (sectionOpen !== "gallery" || !form.schoolGalleryMediaIds.length) {
+      return;
+    }
+
+    let cancelled = false;
+    const timers: number[] = [];
+
+    const run = async () => {
+      if (cancelled) return;
+      await refreshGalleryPreviews();
+    };
+
+    void run();
+
+    /*
+     * Retry after IndexedDB/sync hydration. A settings row and its media IDs
+     * may become available slightly before all mediaAssets/mediaBlobs rows.
+     */
+    timers.push(window.setTimeout(() => void run(), 300));
+    timers.push(window.setTimeout(() => void run(), 1200));
+
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [
+    sectionOpen,
+    dataRevision,
+    settingsRow?.id,
+    form.id,
+    selectedAccountId,
+    form.schoolGalleryMediaIds.join("|"),
+  ]);
+
+  const galleryItems = useMemo(
+    () =>
+      (form.schoolGalleryMediaIds || [])
+        .map((assetId) => ({
+          assetId,
+          url: mediaPreviewUrls[galleryAssetPreviewKey(assetId)] || "",
+        }))
+        .filter((item) => Boolean(item.assetId)),
+    [form.schoolGalleryMediaIds, mediaPreviewUrls],
+  );
+
   const assetCount =
     [
       schoolForm.logo,
@@ -3055,7 +3202,7 @@ export default function Branchsettings() {
       form.reportCardBackgroundImage,
       form.reportCardWatermark,
       form.reportCardSignatureImage,
-    ].filter(Boolean).length + (form.schoolGalleryImages?.length || 0);
+    ].filter(Boolean).length + (form.schoolGalleryMediaIds?.length || 0);
 
   const completion = useMemo(() => {
     const checks = [
@@ -3390,43 +3537,74 @@ export default function Branchsettings() {
     if (!requireTenant()) return;
 
     try {
-      /*
-       * Match Students.tsx: uploads remain staged until Save. This prevents an
-       * edit from mutating the committed gallery before the settings record is
-       * successfully saved.
-       */
-      const ownerId = undefined;
       const ownerTempKey = settingsMediaSessionKeyRef.current;
-      const results = await Promise.all(
-        Array.from(files).map((file) =>
-          saveImageAsset(file, {
-            accountId: selectedAccountId,
-            schoolId: cleanId(selectedSchoolId) || undefined,
-            branchId: cleanId(selectedBranchId) || undefined,
-            ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
-            ownerId,
-            ownerTempKey,
-            fieldKey: GALLERY_FIELD_KEY,
-            variant: "cover",
-            replaceExisting: false,
-          }),
+      const addedIds: string[] = [];
+
+      /*
+       * Process files sequentially and register each staged asset immediately.
+       * createLocal(mediaAssets) publishes a data revision for every image; if
+       * we wait for Promise.all, load() can run before the batch is registered
+       * and temporarily discard every preview.
+       */
+      for (const file of Array.from(files)) {
+        const result = await saveImageAsset(file, {
+          accountId: selectedAccountId,
+          schoolId: cleanId(selectedSchoolId) || undefined,
+          branchId: cleanId(selectedBranchId) || undefined,
+          ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+          ownerTempKey,
+          fieldKey: GALLERY_FIELD_KEY,
+          variant: "gallery",
+          replaceExisting: false,
+        });
+
+        const assetId = cleanId(result.assetId);
+        if (!assetId) continue;
+
+        addedIds.push(assetId);
+        stagedGalleryMediaIdsRef.current.add(assetId);
+
+        setMediaPreviewUrls((current) => {
+          const key = galleryAssetPreviewKey(assetId);
+          const previous = current[key];
+
+          if (previous && previous !== result.previewUrl) {
+            revokeMediaObjectUrl(previous);
+          }
+
+          return {
+            ...current,
+            [key]: result.previewUrl,
+          };
+        });
+
+        setForm((current) => ({
+          ...current,
+          schoolGalleryMediaIds: Array.from(
+            new Set([
+              ...(current.schoolGalleryMediaIds || []),
+              assetId,
+            ]),
+          ),
+        }));
+      }
+
+      if (!addedIds.length) {
+        throw new Error("No gallery media assets were created.");
+      }
+
+      setPendingMediaRemovals((current) =>
+        current.filter(
+          (removal) =>
+            !addedIds.includes(idOf(removal.assetId)) ||
+            removal.ownerTable !== SETTINGS_MEDIA_OWNER_TABLE ||
+            removal.fieldKey !== GALLERY_FIELD_KEY,
         ),
       );
 
-      setForm((prev) => ({
-        ...prev,
-        schoolGalleryImages: [
-          ...(prev.schoolGalleryImages || []),
-          ...results.map((result) => result.previewUrl),
-        ],
-        schoolGalleryMediaIds: [
-          ...(prev.schoolGalleryMediaIds || []),
-          ...results.map((result) => result.assetId),
-        ],
-      }));
       showToast(
         "success",
-        "Gallery image(s) optimized and stored as media assets.",
+        `${addedIds.length} gallery image(s) prepared. Click Save Gallery to commit them.`,
       );
     } catch (error: any) {
       console.error("Failed to process gallery images:", error);
@@ -3434,9 +3612,13 @@ export default function Branchsettings() {
     }
   };
 
-  const removeGalleryImage = (index: number) => {
-    const assetId = idOf(form.schoolGalleryMediaIds?.[index]);
-    const ownerId = settingsRow?.id || form.id || undefined;
+  const removeGalleryImage = (assetIdValue: string) => {
+    const assetId = cleanId(assetIdValue);
+    if (!assetId) return;
+
+    stagedGalleryMediaIdsRef.current.delete(assetId);
+
+    const ownerId = cleanId(settingsRow?.id || form.id) || undefined;
 
     queueMediaRemoval(
       createPendingRemoval({
@@ -3451,15 +3633,25 @@ export default function Branchsettings() {
       }),
     );
 
-    setForm((prev) => ({
-      ...prev,
-      schoolGalleryImages: (prev.schoolGalleryImages || []).filter(
-        (_, i) => i !== index,
-      ),
-      schoolGalleryMediaIds: (prev.schoolGalleryMediaIds || []).filter(
-        (_, i) => i !== index,
+    setForm((current) => ({
+      ...current,
+      schoolGalleryMediaIds: (current.schoolGalleryMediaIds || []).filter(
+        (currentAssetId) => cleanId(currentAssetId) !== assetId,
       ),
     }));
+
+    setMediaPreviewUrls((current) => {
+      const key = galleryAssetPreviewKey(assetId);
+      const url = current[key];
+
+      if (url) {
+        revokeResolvedMediaUrl(url);
+      }
+
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
   };
 
   // ======================================================
@@ -3624,9 +3816,6 @@ export default function Branchsettings() {
           safeRecordMediaValue(form.classroomPlaceholderImage) || "",
         subjectPlaceholderImage:
           safeRecordMediaValue(form.subjectPlaceholderImage) || "",
-        schoolGalleryImages: (form.schoolGalleryImages || [])
-          .map(safeRecordMediaValue)
-          .filter(Boolean) as string[],
         logoMediaId: mediaIdOrNull(form.logoMediaId),
         reportCardBackgroundImageMediaId: mediaIdOrNull(
           form.reportCardBackgroundImageMediaId,
@@ -3670,7 +3859,6 @@ export default function Branchsettings() {
           currentAcademicStructureId:
             form.currentAcademicStructureId || undefined,
           currentAcademicPeriodId: form.currentAcademicPeriodId || undefined,
-          schoolGalleryImages: settingsMediaPatch.schoolGalleryImages,
           schoolGalleryMediaIds: settingsMediaPatch.schoolGalleryMediaIds,
           isDeleted: false,
         } as Partial<SchoolBranchSetting>,
@@ -3718,23 +3906,6 @@ export default function Branchsettings() {
       }));
 
       if (savedSettingsId) {
-        const mediaIds = [
-          form.logoMediaId,
-          form.reportCardBackgroundImageMediaId,
-          form.reportCardWatermarkMediaId,
-          form.reportCardSignatureImageMediaId,
-          form.dashboardHeroImageMediaId,
-          form.dashboardBannerImageMediaId,
-          form.studentPortalImageMediaId,
-          form.teacherPortalImageMediaId,
-          form.classroomPlaceholderImageMediaId,
-          form.subjectPlaceholderImageMediaId,
-          ...(form.schoolGalleryMediaIds || []),
-        ].filter(Boolean);
-
-        const savedSettingsRow = await (db as any).schoolBranchSettings?.get?.(
-          savedSettingsId,
-        );
         const settingsFieldAssets = [
           { assetId: form.logoMediaId, fieldKey: "logo" },
           {
@@ -3790,6 +3961,7 @@ export default function Branchsettings() {
         });
 
         uploadedSettingsMediaIdsRef.current = {};
+        stagedGalleryMediaIdsRef.current.clear();
         settingsMediaSessionKeyRef.current = createSettingsMediaSessionKey();
       }
 
@@ -4508,9 +4680,9 @@ export default function Branchsettings() {
         key: "gallery" as SettingsSection,
         icon: "🌄",
         title: "Gallery",
-        subtitle: `${form.schoolGalleryImages.length} image(s)`,
+        subtitle: `${form.schoolGalleryMediaIds.length} image(s)`,
         detail: "Branch experience images",
-        tone: form.schoolGalleryImages.length ? "green" : "gray",
+        tone: form.schoolGalleryMediaIds.length ? "green" : "gray",
       },
     ];
 
@@ -4937,10 +5109,11 @@ export default function Branchsettings() {
 
       {sectionOpen === "gallery" && (
         <GallerySheet
-          images={form.schoolGalleryImages}
+          items={galleryItems}
           saving={savingSettings}
           handleGalleryUpload={handleGalleryUpload}
           removeGalleryImage={removeGalleryImage}
+          refreshGalleryPreviews={refreshGalleryPreviews}
           saveGallery={saveSchoolBranchSettings}
           onClose={() => setSectionOpen(null)}
         />
@@ -7367,17 +7540,19 @@ function MediaSheet({
 }
 
 function GallerySheet({
-  images,
+  items,
   saving,
   handleGalleryUpload,
   removeGalleryImage,
+  refreshGalleryPreviews,
   saveGallery,
   onClose,
 }: {
-  images: string[];
+  items: Array<{ assetId: string; url: string }>;
   saving: boolean;
   handleGalleryUpload: (files: FileList | null) => void | Promise<void>;
-  removeGalleryImage: (index: number) => void;
+  removeGalleryImage: (assetId: string) => void;
+  refreshGalleryPreviews: () => void | Promise<void>;
   saveGallery: (options?: boolean | SaveOptions) => Promise<boolean>;
   onClose: () => void;
 }) {
@@ -7388,8 +7563,8 @@ function GallerySheet({
           <div>
             <h2>Gallery</h2>
             <p>
-              Images stored on this branch settings row for dashboards and
-              future experiences.
+              Add multiple branch images. Each image is compressed, stored as
+              its own media asset, and committed only when you save.
             </p>
           </div>
           <button type="button" onClick={onClose} aria-label="Close gallery">
@@ -7399,11 +7574,15 @@ function GallerySheet({
 
         <div className="branch-media-block">
           <div className="branch-media-title">Gallery Images</div>
-          <p>Used to bring the selected school branch into the app.</p>
+          <p>
+            Select one or many images. Existing images remain until you remove
+            them and save the gallery.
+          </p>
           <input
             type="file"
             accept="image/*"
             multiple
+            disabled={saving}
             onChange={async (event) => {
               const input = event.currentTarget;
               await handleGalleryUpload(input.files);
@@ -7412,16 +7591,39 @@ function GallerySheet({
           />
         </div>
 
-        {!!images?.length && (
+        {items.length ? (
           <div className="branch-gallery-grid">
-            {images.map((image, index) => (
-              <div key={`${image}-${index}`} className="branch-gallery-item">
-                <img src={image} alt={`Gallery ${index + 1}`} />
-                <button type="button" onClick={() => removeGalleryImage(index)}>
+            {items.map((item, index) => (
+              <div key={item.assetId} className="branch-gallery-item">
+                {item.url ? (
+                  <img
+                    src={item.url}
+                    alt={`Gallery ${index + 1}`}
+                    loading="lazy"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="branch-media-empty"
+                    onClick={() => void refreshGalleryPreviews()}
+                  >
+                    Preview unavailable — tap to retry
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => removeGalleryImage(item.assetId)}
+                  aria-label={`Remove gallery image ${index + 1}`}
+                >
                   ×
                 </button>
               </div>
             ))}
+          </div>
+        ) : (
+          <div className="branch-media-empty">
+            No gallery images have been added.
           </div>
         )}
 

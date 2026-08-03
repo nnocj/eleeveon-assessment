@@ -8,3 +8,9 @@ app/lib/websites/templates/bold-campus/index.tsx
 app/lib/websites/templates/classic-school/index.tsx
 app/lib/websites/templates/modern-academy/index.tsx
 app/sites/[slug]/[[...path]]/page.tsx
+
+
+src/auth/auth.service.ts
+src/auth/strategies/jwt.strategy.ts
+src/common/auth-user.ts
+src/memberships/memberships.service.ts

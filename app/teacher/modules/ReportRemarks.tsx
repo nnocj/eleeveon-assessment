@@ -1,17 +1,17 @@
-//"use client";
+"use client";
 
 /**
  * app/teacher/modules/ReportRemarks.tsx
  * ---------------------------------------------------------
- * ELEEVEON TEACHER REPORT REMARKS
+ * ELEEVEON TEACHER REPORT REMARKS — CLASS TEACHERS ONLY
  * ---------------------------------------------------------
  *
  * Compact golden-standard report remarks center.
  *
  * Purpose:
- * - Teachers manage class-teacher remarks only.
- * - Rows are limited to classes where classTeachers.teacherId equals selected teacherLocalId.
- * - Teachers cannot edit headTeacherRemark or published status.
+ * - Teachers enter class-teacher remarks only for classes assigned to them in classTeachers.
+ * - Subject-teacher assignments do not grant report-remark access.
+ * - Head-teacher remarks and publishing remain protected from the teacher portal.
  *
  * Source rules:
  * - Workspace-session aligned: eleeveon_open_workspace first.
@@ -26,7 +26,7 @@
  * - Bottom sheet filters and More menu.
  * - Compact student rows with inline remark editor.
  */
-/*
+
 import React, { useEffect, useMemo, useState } from "react";
 
 import { useAccount } from "../../context/account-context";
@@ -40,6 +40,7 @@ import type {
   Class,
   ClassTeacher,
   ReportCard,
+  Teacher,
   Student,
   StudentEnrollment,
 } from "../../lib/db/db";
@@ -50,13 +51,20 @@ import {
   listActiveLocal,
 } from "../../lib/sync/syncUtils";
 
+import { useDataRevision } from "../../hooks/useDataRevision";
+import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
 type ViewMode = "single" | "group" | "analytics";
-type RemarkFilter = "all" | "missing" | "complete" | "published" | "unpublished";
+type RemarkFilter =
+  | "all"
+  | "missing"
+  | "complete"
+  | "published"
+  | "unpublished";
 
 type TenantRow = {
   accountId?: string;
-  schoolId?: number | null;
-  branchId?: number | null;
+  schoolId?: string | null;
+  branchId?: string | null;
   active?: boolean;
   isDeleted?: boolean;
 };
@@ -65,20 +73,20 @@ type OpenWorkspaceSession = {
   membership?: Record<string, any> | null;
   membershipId?: string | null;
   role?: string | null;
-  schoolId?: number | string | null;
-  branchId?: number | string | null;
-  teacherLocalId?: number | string | null;
+  schoolId?: string | null;
+  branchId?: string | null;
+  teacherId?: string | null;
   openedAt?: number;
 };
 
 type RemarkDraft = {
-  reportCardId?: number;
+  reportCardId?: string;
   classTeacherRemark: string;
   headTeacherRemark: string;
   published: boolean;
 };
 
-type DraftMap = Record<number, RemarkDraft>;
+type DraftMap = Record<string, RemarkDraft>;
 
 type StudentRemarkRow = {
   student: Student;
@@ -92,7 +100,9 @@ const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 function safeStorageRead(key: string) {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
+    return (
+      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
+    );
   } catch {
     return null;
   }
@@ -113,10 +123,9 @@ function readOpenWorkspaceSession() {
   return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
 }
 
-function idOf(value: unknown) {
-  if (value === undefined || value === null || value === "") return 0;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+function idOf(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
 }
 
 function cleanText(value: unknown) {
@@ -126,10 +135,13 @@ function cleanText(value: unknown) {
 function sameId(a: unknown, b: unknown) {
   const left = idOf(a);
   const right = idOf(b);
-  return left > 0 && right > 0 && left === right;
+  return !!left && !!right && left === right;
 }
 
-function accountMatches(rowAccountId: unknown, selectedAccountId?: string | null) {
+function accountMatches(
+  rowAccountId: unknown,
+  selectedAccountId?: string | null,
+) {
   if (!selectedAccountId) return true;
   if (!rowAccountId) return true;
   return String(rowAccountId) === String(selectedAccountId);
@@ -152,10 +164,10 @@ function countWords(text: string) {
 }
 
 function reportCardKey(
-  studentId: number,
-  classId: number,
-  academicStructureId: number,
-  academicPeriodId: number
+  studentId: string,
+  classId: string,
+  academicStructureId: string,
+  academicPeriodId: string,
 ) {
   return `${studentId}:${classId}:${academicStructureId}:${academicPeriodId}`;
 }
@@ -164,14 +176,23 @@ async function activeRows<T>(tableName: string): Promise<T[]> {
   return ((await listActiveLocal(tableName as any)) || []) as T[];
 }
 
-function labelOf<T extends { id?: number; name?: string; fullName?: string }>(rows: T[], id?: number) {
+function labelOf<T extends { id?: string; name?: string; fullName?: string }>(
+  rows: T[],
+  id?: string,
+) {
   if (!id) return "Not selected";
   const row = rows.find((item) => item.id === id);
   return row?.name || row?.fullName || "Not found";
 }
 
-export default function ReportRemarks() {
-  const { accountId, authenticated, loading: accountLoading } = useAccount() as any;
+export default function TeacherReportRemarks() {
+  const dataRevision = useDataRevision();
+
+  const {
+    accountId,
+    authenticated,
+    loading: accountLoading,
+  } = useAccount() as any;
   const { settings, loading: settingsLoading } = useSettings() as any;
   const { activeMembership } = useActiveMembership() as any;
 
@@ -191,7 +212,12 @@ export default function ReportRemarks() {
       cleanText(openWorkspace?.membership?.accountId) ||
       cleanText(activeMembership?.accountId) ||
       cleanText(settings?.accountId),
-    [accountId, activeMembership?.accountId, openWorkspace?.membership?.accountId, settings?.accountId]
+    [
+      accountId,
+      activeMembership?.accountId,
+      openWorkspace?.membership?.accountId,
+      settings?.accountId,
+    ],
   );
 
   const schoolId = useMemo(
@@ -214,7 +240,7 @@ export default function ReportRemarks() {
       openWorkspace?.membership?.schoolId,
       openWorkspace?.schoolId,
       settings?.schoolId,
-    ]
+    ],
   );
 
   const branchId = useMemo(
@@ -241,47 +267,60 @@ export default function ReportRemarks() {
       openWorkspace?.membership?.branchId,
       openWorkspace?.membership?.schoolBranchId,
       settings?.branchId,
-    ]
+    ],
   );
+
+  const role = cleanText(
+    openWorkspace?.role ||
+      openWorkspace?.membership?.role ||
+      activeMembership?.role,
+  ).toLowerCase();
 
   const teacherId = useMemo(
     () =>
-      idOf(openWorkspace?.teacherLocalId) ||
-      idOf(openWorkspace?.membership?.teacherLocalId) ||
+      idOf(openWorkspace?.teacherId) ||
       idOf(openWorkspace?.membership?.teacherId) ||
-      idOf(activeMembership?.teacherLocalId) ||
+      idOf(openWorkspace?.membership?.teacher?.id) ||
       idOf(activeMembership?.teacherId) ||
-      idOf(safeStorageRead("activeTeacherId")),
+      idOf(activeMembership?.teacher?.id) ||
+      idOf(safeStorageRead("activeTeacherId")) ||
+      idOf(safeStorageRead("teacherId")),
     [
+      activeMembership?.teacher?.id,
       activeMembership?.teacherId,
-      activeMembership?.teacherLocalId,
+      openWorkspace?.membership?.teacher?.id,
       openWorkspace?.membership?.teacherId,
-      openWorkspace?.membership?.teacherLocalId,
-      openWorkspace?.teacherLocalId,
-    ]
+      openWorkspace?.teacherId,
+    ],
   );
 
-  const primary = cleanText(settings?.primaryColor) || "var(--primary-color, #2563eb)";
+  const isTeacherMembership = role === "teacher";
 
-  const [loading, setLoading] = useState(true);
+  const primary =
+    cleanText(settings?.primaryColor) || "var(--primary-color, #2563eb)";
+
+  const { loading, setLoading } = useBackgroundLoader();
   const [saving, setSaving] = useState(false);
 
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
-  const [classTeachers, setClassTeachers] = useState<ClassTeacher[]>([]);
-  const [academicStructures, setAcademicStructures] = useState<AcademicStructure[]>([]);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [classTeacherRows, setClassTeacherRows] = useState<ClassTeacher[]>([]);
+  const [academicStructures, setAcademicStructures] = useState<
+    AcademicStructure[]
+  >([]);
   const [academicPeriods, setAcademicPeriods] = useState<AcademicPeriod[]>([]);
   const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
   const [reportCards, setReportCards] = useState<ReportCard[]>([]);
 
-  const [academicStructureId, setAcademicStructureId] = useState<number | undefined>(
-    idOf(settings?.currentAcademicStructureId) || undefined
+  const [academicStructureId, setAcademicStructureId] = useState<
+    string | undefined
+  >(idOf(settings?.currentAcademicStructureId) || undefined);
+  const [academicPeriodId, setAcademicPeriodId] = useState<string | undefined>(
+    idOf(settings?.currentAcademicPeriodId) || undefined,
   );
-  const [academicPeriodId, setAcademicPeriodId] = useState<number | undefined>(
-    idOf(settings?.currentAcademicPeriodId) || undefined
-  );
-  const [classId, setClassId] = useState<number | undefined>();
-  const [studentId, setStudentId] = useState<number | undefined>();
+  const [classId, setClassId] = useState<string | undefined>();
+  const [studentId, setStudentId] = useState<string | undefined>();
 
   const [viewMode, setViewMode] = useState<ViewMode>("single");
   const [remarkFilter, setRemarkFilter] = useState<RemarkFilter>("all");
@@ -302,7 +341,8 @@ export default function ReportRemarks() {
   const clearData = () => {
     setStudents([]);
     setClasses([]);
-    setClassTeachers([]);
+    setTeachers([]);
+    setClassTeacherRows([]);
     setAcademicStructures([]);
     setAcademicPeriods([]);
     setEnrollments([]);
@@ -310,12 +350,14 @@ export default function ReportRemarks() {
   };
 
   const load = async () => {
-    if (!authenticated || !selectedAccountId || !schoolId || !branchId) {
-      clearData();
-      setLoading(false);
-      return;
-    }
-    if (!teacherId) {
+    if (
+      !authenticated ||
+      !selectedAccountId ||
+      !schoolId ||
+      !branchId ||
+      !isTeacherMembership ||
+      !teacherId
+    ) {
       clearData();
       setLoading(false);
       return;
@@ -327,46 +369,66 @@ export default function ReportRemarks() {
       const loadResult = await Promise.all([
         activeRows<Student>("students"),
         activeRows<Class>("classes"),
+        activeRows<Teacher>("teachers"),
+        activeRows<ClassTeacher>("classTeachers"),
         activeRows<AcademicStructure>("academicStructures"),
         activeRows<AcademicPeriod>("academicPeriods"),
         activeRows<StudentEnrollment>("studentEnrollments"),
         activeRows<ReportCard>("reportCards"),
-        activeRows<ClassTeacher>("classTeachers"),
       ]);
 
       const studentRows = loadResult[0] as Student[];
       const classRows = loadResult[1] as Class[];
-      const structureRows = loadResult[2] as AcademicStructure[];
-      const periodRows = loadResult[3] as AcademicPeriod[];
-      const enrollmentRows = loadResult[4] as StudentEnrollment[];
-      const reportRows = loadResult[5] as ReportCard[];
-      const classTeacherRows = loadResult[6] as ClassTeacher[];
+      const teacherRows = loadResult[2] as Teacher[];
+      const classTeacherData = loadResult[3] as ClassTeacher[];
+      const structureRows = loadResult[4] as AcademicStructure[];
+      const periodRows = loadResult[5] as AcademicPeriod[];
+      const enrollmentRows = loadResult[6] as StudentEnrollment[];
+      const reportRows = loadResult[7] as ReportCard[];
 
       setStudents(
         studentRows
           .filter((row: any) => sameTenant(row) && row.status !== "withdrawn")
-          .sort((a, b) => cleanText(a.fullName).localeCompare(cleanText(b.fullName)))
+          .sort((a, b) =>
+            cleanText(a.fullName).localeCompare(cleanText(b.fullName)),
+          ),
       );
+
+      const scopedTeachers = teacherRows.filter((row: any) => sameTenant(row));
+      const scopedClassTeachers = classTeacherData.filter(
+        (row: any) =>
+          sameTenant(row) &&
+          sameId(row.teacherId, teacherId),
+      );
+      const assignedClassIds = new Set(
+        scopedClassTeachers.map((row: any) => idOf(row.classId)),
+      );
+
+      setTeachers(scopedTeachers);
+      setClassTeacherRows(scopedClassTeachers);
 
       setClasses(
         classRows
-          .filter((row: any) => sameTenant(row))
-          .sort((a, b) => cleanText(a.name).localeCompare(cleanText(b.name)))
+          .filter(
+            (row: any) =>
+              sameTenant(row) &&
+              assignedClassIds.has(idOf(row.id)),
+          )
+          .sort((a, b) => cleanText(a.name).localeCompare(cleanText(b.name))),
       );
-
-      setClassTeachers(classTeacherRows.filter((row: any) => sameTenant(row) && sameId(row.teacherId, teacherId)));
-
 
       setAcademicStructures(
         structureRows
           .filter((row: any) => sameTenant(row))
-          .sort((a, b) => cleanText(a.name).localeCompare(cleanText(b.name)))
+          .sort((a, b) => cleanText(a.name).localeCompare(cleanText(b.name))),
       );
 
       setAcademicPeriods(
         periodRows
           .filter((row: any) => sameTenant(row))
-          .sort((a: any, b: any) => Number(a.order || 0) - Number(b.order || 0))
+          .sort(
+            (a: any, b: any) => Number(a.order || 0) - Number(b.order || 0),
+          ),
       );
 
       setEnrollments(enrollmentRows.filter((row: any) => sameTenant(row)));
@@ -383,66 +445,143 @@ export default function ReportRemarks() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, selectedAccountId, schoolId, branchId, teacherId]);
+  }, [
+    authenticated,
+    selectedAccountId,
+    schoolId,
+    branchId,
+    teacherId,
+    isTeacherMembership,
+    dataRevision,
+  ]);
 
-  const studentMap = useMemo(() => new Map(students.map((row) => [row.id, row])), [students]);
-  const classMap = useMemo(() => new Map(classes.map((row) => [row.id, row])), [classes]);
+  const studentMap = useMemo(
+    () => new Map(students.map((row) => [row.id, row])),
+    [students],
+  );
+  const classMap = useMemo(
+    () => new Map(classes.map((row) => [row.id, row])),
+    [classes],
+  );
 
-  const teacherClassIds = useMemo(() => new Set(classTeachers.map((row) => row.classId).filter(Boolean)), [classTeachers]);
+  const teacherClassIds = useMemo(
+    () =>
+      new Set(
+        classTeacherRows
+          .filter((row: any) => sameId(row.teacherId, teacherId))
+          .map((row: any) => idOf(row.classId)),
+      ),
+    [classTeacherRows, teacherId],
+  );
+
+  const teacherRecord = useMemo(
+    () => teachers.find((row: any) => sameId(row.id, teacherId)) || null,
+    [teachers, teacherId],
+  );
+
+  const selectedClassIsAssigned =
+    !!classId && teacherClassIds.has(idOf(classId));
 
   const filteredPeriods = useMemo(() => {
     if (!academicStructureId) return academicPeriods;
-    return academicPeriods.filter((row) => sameId(row.academicStructureId, academicStructureId));
+    return academicPeriods.filter((row) =>
+      sameId(row.academicStructureId, academicStructureId),
+    );
   }, [academicPeriods, academicStructureId]);
 
   const availableClassIds = useMemo(() => {
-    const ids = new Set<number>();
+    const ids = new Set<string>();
 
     enrollments.forEach((row) => {
       if (row.status === "withdrawn") return;
-      if (teacherClassIds && !teacherClassIds.has(row.classId)) return;
-      if (academicStructureId && !sameId(row.academicStructureId, academicStructureId)) return;
-      if (academicPeriodId && !sameId(row.academicPeriodId, academicPeriodId)) return;
-      if (row.classId) ids.add(row.classId);
+      if (
+        academicStructureId &&
+        !sameId(row.academicStructureId, academicStructureId)
+      )
+        return;
+      if (academicPeriodId && !sameId(row.academicPeriodId, academicPeriodId))
+        return;
+      if (row.classId && teacherClassIds.has(idOf(row.classId))) ids.add(row.classId);
     });
 
     reportCards.forEach((row) => {
-      if (teacherClassIds && !teacherClassIds.has(row.classId)) return;
-      if (academicStructureId && !sameId(row.academicStructureId, academicStructureId)) return;
-      if (academicPeriodId && !sameId(row.academicPeriodId, academicPeriodId)) return;
-      if (row.classId) ids.add(row.classId);
+      if (
+        academicStructureId &&
+        !sameId(row.academicStructureId, academicStructureId)
+      )
+        return;
+      if (academicPeriodId && !sameId(row.academicPeriodId, academicPeriodId))
+        return;
+      if (row.classId && teacherClassIds.has(idOf(row.classId))) ids.add(row.classId);
     });
 
     return ids;
-  }, [academicPeriodId, academicStructureId, enrollments, reportCards, teacherClassIds]);
+  }, [
+    academicPeriodId,
+    academicStructureId,
+    enrollments,
+    reportCards,
+    teacherClassIds,
+  ]);
 
   const availableClasses = useMemo(() => {
     if (!academicStructureId && !academicPeriodId) {
-      return teacherClassIds ? classes.filter((row) => row.id && teacherClassIds.has(row.id)) : classes;
+      return classes.filter(
+        (row) => row.id && teacherClassIds.has(idOf(row.id)),
+      );
     }
 
-    return classes.filter((row) => row.id && availableClassIds.has(row.id));
-  }, [academicPeriodId, academicStructureId, availableClassIds, classes, teacherClassIds]);
+    return classes.filter(
+      (row) =>
+        row.id &&
+        teacherClassIds.has(idOf(row.id)) &&
+        availableClassIds.has(row.id),
+    );
+  }, [
+    academicPeriodId,
+    academicStructureId,
+    availableClassIds,
+    classes,
+    teacherClassIds,
+  ]);
 
   const reportCardMap = useMemo(() => {
     const map = new Map<string, ReportCard>();
 
     reportCards.forEach((row) => {
-      if (!row.studentId || !row.classId || !row.academicStructureId || !row.academicPeriodId) return;
-      map.set(reportCardKey(row.studentId, row.classId, row.academicStructureId, row.academicPeriodId), row);
+      if (
+        !row.studentId ||
+        !row.classId ||
+        !row.academicStructureId ||
+        !row.academicPeriodId
+      )
+        return;
+      map.set(
+        reportCardKey(
+          row.studentId,
+          row.classId,
+          row.academicStructureId,
+          row.academicPeriodId,
+        ),
+        row,
+      );
     });
 
     return map;
   }, [reportCards]);
 
   const studentRows = useMemo<StudentRemarkRow[]>(() => {
-    if (!academicStructureId || !academicPeriodId || !classId) return [];
+    if (
+      !academicStructureId ||
+      !academicPeriodId ||
+      !classId ||
+      !teacherClassIds.has(idOf(classId))
+    ) return [];
 
     return enrollments
       .filter((row) => {
         return (
           row.status !== "withdrawn" &&
-          teacherClassIds && !teacherClassIds.has(row.classId) ? false :
           sameId(row.academicStructureId, academicStructureId) &&
           sameId(row.academicPeriodId, academicPeriodId) &&
           sameId(row.classId, classId)
@@ -456,22 +595,30 @@ export default function ReportRemarks() {
           student.id,
           enrollment.classId,
           enrollment.academicStructureId,
-          enrollment.academicPeriodId
+          enrollment.academicPeriodId,
         );
 
         const reportCard = reportCardMap.get(key);
-        const draft =
-          drafts[student.id] || {
-            reportCardId: reportCard?.id,
-            classTeacherRemark: reportCard?.classTeacherRemark || "",
-            headTeacherRemark: reportCard?.headTeacherRemark || "",
-            published: !!reportCard?.published,
-          };
+        const draft = drafts[student.id] || {
+          reportCardId: reportCard?.id,
+          classTeacherRemark: reportCard?.classTeacherRemark || "",
+          headTeacherRemark: reportCard?.headTeacherRemark || "",
+          published: !!reportCard?.published,
+        };
 
         return { student, enrollment, reportCard, draft };
       })
       .filter(Boolean) as StudentRemarkRow[];
-  }, [academicPeriodId, academicStructureId, classId, drafts, enrollments, reportCardMap, studentMap, teacherClassIds]);
+  }, [
+    academicPeriodId,
+    academicStructureId,
+    classId,
+    drafts,
+    enrollments,
+    reportCardMap,
+    studentMap,
+    teacherClassIds,
+  ]);
 
   const visibleRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -481,17 +628,22 @@ export default function ReportRemarks() {
         const draft = row.draft;
         const complete = !!row.draft.classTeacherRemark.trim();
 
-        if (viewMode === "single" && studentId && row.student.id !== studentId) return false;
+        if (viewMode === "single" && studentId && row.student.id !== studentId)
+          return false;
         if (remarkFilter === "missing" && complete) return false;
         if (remarkFilter === "complete" && !complete) return false;
-        if (remarkFilter === "published" && !draft.published) return false;
-        if (remarkFilter === "unpublished" && draft.published) return false;
 
         if (!query) return true;
 
-        return `${row.student.fullName || ""} ${row.student.admissionNumber || ""}`.toLowerCase().includes(query);
+        return `${row.student.fullName || ""} ${row.student.admissionNumber || ""}`
+          .toLowerCase()
+          .includes(query);
       })
-      .sort((a, b) => cleanText(a.student.fullName).localeCompare(cleanText(b.student.fullName)));
+      .sort((a, b) =>
+        cleanText(a.student.fullName).localeCompare(
+          cleanText(b.student.fullName),
+        ),
+      );
   }, [remarkFilter, search, studentId, studentRows, viewMode]);
 
   const selectedRow = useMemo(() => {
@@ -524,14 +676,22 @@ export default function ReportRemarks() {
 
   const summary = useMemo(() => {
     const total = studentRows.length;
-    const classRemarked = studentRows.filter((row) => !!row.draft.classTeacherRemark.trim()).length;
-    const headRemarked = studentRows.filter((row) => !!row.draft.headTeacherRemark.trim()).length;
-    const complete = studentRows.filter((row) => !!row.draft.classTeacherRemark.trim()).length;
-    const published = studentRows.filter((row) => row.draft.published).length;
+    const classRemarked = studentRows.filter(
+      (row) => !!row.draft.classTeacherRemark.trim(),
+    ).length;
+    const complete = studentRows.filter(
+      (row) => !!row.draft.classTeacherRemark.trim(),
+    ).length;
     const missing = Math.max(0, total - complete);
     const completion = total ? Math.round((complete / total) * 100) : 0;
 
-    return { total, classRemarked, headRemarked, complete, published, missing, completion };
+    return {
+      total,
+      classRemarked,
+      complete,
+      missing,
+      completion,
+    };
   }, [studentRows]);
 
   const activeFilterCount = useMemo(() => {
@@ -543,15 +703,25 @@ export default function ReportRemarks() {
       remarkFilter !== "all" ? remarkFilter : undefined,
       viewMode !== "single" ? viewMode : undefined,
     ].filter(Boolean).length;
-  }, [academicPeriodId, academicStructureId, classId, remarkFilter, studentId, viewMode]);
+  }, [
+    academicPeriodId,
+    academicStructureId,
+    classId,
+    remarkFilter,
+    studentId,
+    viewMode,
+  ]);
 
-  const selectedStructureName = labelOf(academicStructures, academicStructureId);
+  const selectedStructureName = labelOf(
+    academicStructures,
+    academicStructureId,
+  );
   const selectedPeriodName = labelOf(academicPeriods, academicPeriodId);
   const selectedClassName = labelOf(classes, classId);
   const selectedStudentName = labelOf(students, studentId);
   const contextName = `${activeSchool?.name || "Selected School"} · ${activeBranch?.name || "Assigned Branch"}`;
 
-  const updateDraft = (studentIdValue: number, patch: Partial<RemarkDraft>) => {
+  const updateDraft = (studentIdValue: string, patch: Partial<RemarkDraft>) => {
     setDrafts((prev) => ({
       ...prev,
       [studentIdValue]: {
@@ -562,28 +732,30 @@ export default function ReportRemarks() {
   };
 
   const applyBulkRemarks = () => {
-    if (!visibleRows.length) return alert("No students match the current filters.");
-    if (!bulkClassRemark.trim()) return alert("Enter a class-teacher remark first.");
+    if (!selectedClassIsAssigned)
+      return alert("Only the assigned class teacher can enter remarks for this class.");
+    if (!visibleRows.length)
+      return alert("No students match the current filters.");
+    if (!bulkClassRemark.trim())
+      return alert("Enter a class teacher remark first.");
 
     const next: DraftMap = { ...drafts };
 
     visibleRows.forEach((row) => {
-      const sid = row.student.id || 0;
+      const sid = row.student.id || "";
       const current = next[sid] || row.draft || defaultDraft();
 
       next[sid] = {
         ...current,
         classTeacherRemark:
-          bulkClassRemark.trim() && (bulkOverwrite || !current.classTeacherRemark.trim())
+          bulkOverwrite || !current.classTeacherRemark.trim()
             ? bulkClassRemark.trim()
             : current.classTeacherRemark,
-        headTeacherRemark: current.headTeacherRemark,
       };
     });
 
     setDrafts(next);
   };
-
 
   const saveRows = async (rows: StudentRemarkRow[]) => {
     if (!authenticated || !selectedAccountId) return alert("Sign in first.");
@@ -592,6 +764,8 @@ export default function ReportRemarks() {
     if (!academicStructureId) return alert("Select academic structure.");
     if (!academicPeriodId) return alert("Select academic period.");
     if (!classId) return alert("Select class.");
+    if (!teacherClassIds.has(idOf(classId)))
+      return alert("Only the assigned class teacher can enter remarks for this class.");
     if (!rows.length) return alert("No students to save.");
 
     try {
@@ -604,35 +778,40 @@ export default function ReportRemarks() {
         const draft = drafts[sid] || row.draft || defaultDraft();
         const existing =
           row.reportCard ||
-          reportCardMap.get(reportCardKey(sid, classId, academicStructureId, academicPeriodId));
+          reportCardMap.get(
+            reportCardKey(sid, classId, academicStructureId, academicPeriodId),
+          );
 
         if (existing?.id) {
-          await updateLocal("reportCards" as any, Number(existing.id), {
+          await updateLocal("reportCards" as any, String(existing.id), {
             accountId: selectedAccountId,
-            schoolId: Number(schoolId),
-            branchId: Number(branchId),
+            schoolId: schoolId,
+            branchId: branchId,
             classTeacherRemark: draft.classTeacherRemark.trim() || undefined,
           } as Partial<ReportCard>);
         } else {
-          await createLocal("reportCards" as any, {
-            accountId: selectedAccountId,
-            schoolId: Number(schoolId),
-            branchId: Number(branchId),
-            studentId: sid,
-            classId: Number(classId),
-            academicStructureId: Number(academicStructureId),
-            academicPeriodId: Number(academicPeriodId),
-            total: 0,
-            average: 0,
-            classTeacherRemark: draft.classTeacherRemark.trim() || undefined,
-            headTeacherRemark: existing?.headTeacherRemark,
-            published: existing?.published || false,
-          } as Partial<ReportCard>);
+          await createLocal(
+            "reportCards" as any,
+            {
+              accountId: selectedAccountId,
+              schoolId: schoolId,
+              branchId: branchId,
+              studentId: sid,
+              classId: classId,
+              academicStructureId: academicStructureId,
+              academicPeriodId: academicPeriodId,
+              total: 0,
+              average: 0,
+              classTeacherRemark: draft.classTeacherRemark.trim() || undefined,
+              headTeacherRemark: undefined,
+              published: false,
+            } as Partial<ReportCard>,
+          );
         }
       }
 
       await load();
-      alert("Report remarks saved.");
+      alert("Class teacher remarks saved.");
     } catch (error) {
       console.error("Failed to save report remarks:", error);
       alert("Failed to save report remarks.");
@@ -652,32 +831,87 @@ export default function ReportRemarks() {
   };
 
   if (accountLoading || contextLoading || settingsLoading || loading) {
-    return <State primary={primary} title="Opening report remarks..." text="Checking workspace, classes, students and report cards." />;
+    return (
+      <State
+        primary={primary}
+        title="Opening class teacher remarks..."
+        text="Checking your teacher profile, class-teacher assignments, students and report cards."
+      />
+    );
   }
 
   if (!authenticated || !selectedAccountId) {
-    return <State primary={primary} title="Sign in required" text="You must sign in before managing report remarks." />;
+    return (
+      <State
+        primary={primary}
+        title="Sign in required"
+        text="You must sign in before managing report remarks."
+      />
+    );
   }
 
   if (!schoolId || !branchId) {
-    return <State primary={primary} title="Branch workspace required" text="Report remarks belong to one active school branch." />;
+    return (
+      <State
+        primary={primary}
+        title="Branch workspace required"
+        text="Report remarks belong to one active school branch."
+      />
+    );
+  }
+
+  if (!isTeacherMembership) {
+    return (
+      <State
+        primary={primary}
+        title="Teacher workspace required"
+        text="This report-remarks page is available only from a teacher membership."
+      />
+    );
   }
 
   if (!teacherId) {
-    return <State primary={primary} title="Teacher profile required" text="This page needs the selected teacher membership to include teacherLocalId." />;
+    return (
+      <State
+        primary={primary}
+        title="Teacher profile not linked"
+        text="Your membership must be linked to a permanent teacher profile before remarks can be entered."
+      />
+    );
+  }
+
+  if (!classTeacherRows.length) {
+    return (
+      <State
+        primary={primary}
+        title="No class-teacher assignment"
+        text={`${(teacherRecord as any)?.fullName || "This teacher"} is not assigned as class teacher to any class. Subject teaching assignments do not grant report-remark access.`}
+      />
+    );
   }
 
   return (
-    <main className="ba-page report-remarks-page" style={{ "--ba-primary": primary, "--primary-color": primary } as React.CSSProperties}>
+    <main
+      className="ba-page report-remarks-page"
+      style={
+        {
+          "--ba-primary": primary,
+          "--primary-color": primary,
+        } as React.CSSProperties
+      }
+    >
       <style>{css}</style>
 
-      <section className="ba-search-card" aria-label="Report remarks search and actions">
+      <section
+        className="ba-search-card"
+        aria-label="Class teacher remarks search and actions"
+      >
         <label className="ba-search">
           <span>⌕</span>
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search remarks..."
+            placeholder="Search class remarks..."
             aria-label="Search report remarks"
           />
         </label>
@@ -704,38 +938,92 @@ export default function ReportRemarks() {
           {activeFilterCount ? <b>{activeFilterCount}</b> : null}
         </button>
 
-        <button type="button" className="ba-icon-button" onClick={() => setMoreOpen(true)} aria-label="More options">
+        <button
+          type="button"
+          className="ba-icon-button"
+          onClick={() => setMoreOpen(true)}
+          aria-label="More options"
+        >
           ⋯
         </button>
       </section>
 
       {activeFilterCount > 0 && (
         <section className="ba-filter-chips" aria-label="Active remark filters">
-          {academicStructureId && <button type="button" onClick={() => { setAcademicStructureId(undefined); setAcademicPeriodId(undefined); setClassId(undefined); setStudentId(undefined); }}>Structure: {selectedStructureName} ×</button>}
-          {academicPeriodId && <button type="button" onClick={() => { setAcademicPeriodId(undefined); setClassId(undefined); setStudentId(undefined); }}>Period: {selectedPeriodName} ×</button>}
-          {classId && <button type="button" onClick={() => { setClassId(undefined); setStudentId(undefined); }}>Class: {selectedClassName} ×</button>}
-          {studentId && <button type="button" onClick={() => setStudentId(undefined)}>Student: {selectedStudentName} ×</button>}
-          {remarkFilter !== "all" && <button type="button" onClick={() => setRemarkFilter("all")}>Filter: {remarkFilter} ×</button>}
-          {viewMode !== "single" && <button type="button" onClick={() => setViewMode("single")}>Mode: {viewMode} ×</button>}
+          {academicStructureId && (
+            <button
+              type="button"
+              onClick={() => {
+                setAcademicStructureId(undefined);
+                setAcademicPeriodId(undefined);
+                setClassId(undefined);
+                setStudentId(undefined);
+              }}
+            >
+              Structure: {selectedStructureName} ×
+            </button>
+          )}
+          {academicPeriodId && (
+            <button
+              type="button"
+              onClick={() => {
+                setAcademicPeriodId(undefined);
+                setClassId(undefined);
+                setStudentId(undefined);
+              }}
+            >
+              Period: {selectedPeriodName} ×
+            </button>
+          )}
+          {classId && (
+            <button
+              type="button"
+              onClick={() => {
+                setClassId(undefined);
+                setStudentId(undefined);
+              }}
+            >
+              Class: {selectedClassName} ×
+            </button>
+          )}
+          {studentId && (
+            <button type="button" onClick={() => setStudentId(undefined)}>
+              Student: {selectedStudentName} ×
+            </button>
+          )}
+          {remarkFilter !== "all" && (
+            <button type="button" onClick={() => setRemarkFilter("all")}>
+              Filter: {remarkFilter} ×
+            </button>
+          )}
+          {viewMode !== "single" && (
+            <button type="button" onClick={() => setViewMode("single")}>
+              Mode: {viewMode} ×
+            </button>
+          )}
         </section>
       )}
 
       <section className="ba-summary-line">
         <div>
-          <strong>{viewMode === "single" ? (selectedRow ? 1 : 0) : visibleRows.length}</strong>
-          <span>{viewMode === "single" ? "student selected" : "students shown"}</span>
+          <strong>
+            {viewMode === "single" ? (selectedRow ? 1 : 0) : visibleRows.length}
+          </strong>
+          <span>
+            {viewMode === "single" ? "student selected" : "students shown"}
+          </span>
         </div>
-        <p>{contextName} · {selectedStructureName} · {selectedPeriodName}</p>
+        <p>
+          {contextName} · {selectedStructureName} · {selectedPeriodName}
+        </p>
       </section>
 
       {viewMode === "analytics" && (
         <section className="ba-filter-chips">
           <SummaryChip label="Students" value={summary.total} />
           <SummaryChip label="Class remarks" value={summary.classRemarked} />
-
           <SummaryChip label="Complete" value={summary.complete} />
           <SummaryChip label="Missing" value={summary.missing} />
-          <SummaryChip label="Published" value={summary.published} />
           <SummaryChip label="Done" value={`${summary.completion}%`} />
         </section>
       )}
@@ -745,27 +1033,42 @@ export default function ReportRemarks() {
           <div className="ba-remark-head">
             <div>
               <h3>Group tools</h3>
-              <p>Apply remarks to the students currently shown.</p>
+              <p>Apply a class teacher remark to the students currently shown.</p>
             </div>
             <label className="ba-publish-line">
-              <input type="checkbox" checked={bulkOverwrite} onChange={(event) => setBulkOverwrite(event.target.checked)} />
+              <input
+                type="checkbox"
+                checked={bulkOverwrite}
+                onChange={(event) => setBulkOverwrite(event.target.checked)}
+              />
               Overwrite
             </label>
           </div>
 
-          <div className="ba-remark-grid two">
+          <div className="ba-remark-grid">
             <label className="ba-remark-field">
-              <span><b>Class Teacher Remark</b><em>{countWords(bulkClassRemark)} words</em></span>
-              <textarea value={bulkClassRemark} onChange={(event) => setBulkClassRemark(event.target.value)} placeholder="Class teacher remark..." />
+              <span>
+                <b>Class Teacher Remark</b>
+                <em>{countWords(bulkClassRemark)} words</em>
+              </span>
+              <textarea
+                value={bulkClassRemark}
+                onChange={(event) => setBulkClassRemark(event.target.value)}
+                placeholder="Class teacher remark..."
+              />
             </label>
-
-<div className="ba-publish-line">Teacher scope: head-teacher remarks and publishing stay branch-admin controlled.</div>
           </div>
 
           <div className="ba-sheet-actions">
-            <button type="button" onClick={applyBulkRemarks}>Apply to shown</button>
-
-            <button type="button" className="primary" onClick={() => saveRows(visibleRows)} disabled={saving}>
+            <button type="button" onClick={applyBulkRemarks}>
+              Apply to shown
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => saveRows(visibleRows)}
+              disabled={saving}
+            >
               {saving ? "Saving..." : "Save shown"}
             </button>
           </div>
@@ -775,8 +1078,8 @@ export default function ReportRemarks() {
       {viewMode === "single" && selectedRow && (
         <RemarkEditor
           row={selectedRow}
-          className={classMap.get(classId)?.name}
-          draft={drafts[selectedRow.student.id || 0] || selectedRow.draft}
+          className={classId ? classMap.get(classId)?.name : undefined}
+          draft={drafts[selectedRow.student.id || ""] || selectedRow.draft}
           updateDraft={updateDraft}
           canEditHeadRemark={false}
           canPublish={false}
@@ -790,16 +1093,31 @@ export default function ReportRemarks() {
               key={row.student.id}
               type="button"
               className={`ba-student-row ${studentId === row.student.id ? "active" : ""}`}
-              onClick={() => { setStudentId(row.student.id || undefined); setViewMode("single"); }}
+              onClick={() => {
+                setStudentId(row.student.id || undefined);
+                setViewMode("single");
+              }}
             >
-              <span className="ba-avatar">{cleanText(row.student.fullName).slice(0, 1).toUpperCase() || "S"}</span>
+              <span className="ba-avatar">
+                {cleanText(row.student.fullName).slice(0, 1).toUpperCase() ||
+                  "S"}
+              </span>
               <span className="ba-student-main">
                 <strong>{row.student.fullName}</strong>
-                <small>{row.student.admissionNumber || "No admission no."} · {classMap.get(row.enrollment.classId)?.name || "Class"}</small>
-                <em>{row.draft.classTeacherRemark ? "Class remark entered" : "Class remark missing"}</em>
+                <small>
+                  {row.student.admissionNumber || "No admission no."} ·{" "}
+                  {classMap.get(row.enrollment.classId)?.name || "Class"}
+                </small>
+                <em>
+                  {row.draft.classTeacherRemark
+                    ? "Class remark entered"
+                    : "Class remark missing"}
+                </em>
               </span>
               <span className="ba-student-side">
-                <Chip tone={row.draft.classTeacherRemark ? "green" : "orange"}>{row.draft.classTeacherRemark ? "Ready" : "Missing"}</Chip>
+                <Chip tone={row.draft.classTeacherRemark ? "green" : "orange"}>
+                  {row.draft.classTeacherRemark ? "Ready" : "Missing"}
+                </Chip>
                 <i>›</i>
               </span>
             </button>
@@ -807,8 +1125,14 @@ export default function ReportRemarks() {
         </section>
       )}
 
-      {!studentRows.length && viewMode !== "analytics" && <Empty text="Choose academic structure, academic period and class to load students for report remarks." />}
-      {studentRows.length > 0 && !visibleRows.length && viewMode === "group" && <Empty text="No students match the current filters." />}
+      {!studentRows.length && viewMode !== "analytics" && (
+        <Empty text="Choose academic structure, academic period and class to load students for report remarks." />
+      )}
+      {studentRows.length > 0 &&
+        !visibleRows.length &&
+        viewMode === "group" && (
+          <Empty text="No students match the current filters." />
+        )}
 
       {filterOpen && (
         <FilterSheet
@@ -834,10 +1158,22 @@ export default function ReportRemarks() {
 
       {moreOpen && (
         <MoreSheet
-          onRefresh={async () => { setMoreOpen(false); await load(); }}
-          onSingle={() => { setViewMode("single"); setMoreOpen(false); }}
-          onGroup={() => { setViewMode("group"); setMoreOpen(false); }}
-          onAnalytics={() => { setViewMode("analytics"); setMoreOpen(false); }}
+          onRefresh={async () => {
+            setMoreOpen(false);
+            await load();
+          }}
+          onSingle={() => {
+            setViewMode("single");
+            setMoreOpen(false);
+          }}
+          onGroup={() => {
+            setViewMode("group");
+            setMoreOpen(false);
+          }}
+          onAnalytics={() => {
+            setViewMode("analytics");
+            setMoreOpen(false);
+          }}
           onClose={() => setMoreOpen(false)}
         />
       )}
@@ -845,9 +1181,25 @@ export default function ReportRemarks() {
   );
 }
 
-function State({ primary, title, text }: { primary: string; title: string; text: string }) {
+function State({
+  primary,
+  title,
+  text,
+}: {
+  primary: string;
+  title: string;
+  text: string;
+}) {
   return (
-    <main className="ba-page" style={{ "--ba-primary": primary, "--primary-color": primary } as React.CSSProperties}>
+    <main
+      className="ba-page"
+      style={
+        {
+          "--ba-primary": primary,
+          "--primary-color": primary,
+        } as React.CSSProperties
+      }
+    >
       <style>{css}</style>
       <section className="ba-state">
         <div className="ba-spinner" />
@@ -869,40 +1221,73 @@ function RemarkEditor({
   row: StudentRemarkRow;
   className?: string;
   draft: RemarkDraft;
-  updateDraft: (studentIdValue: number, patch: Partial<RemarkDraft>) => void;
+  updateDraft: (studentIdValue: string, patch: Partial<RemarkDraft>) => void;
   canEditHeadRemark: boolean;
   canPublish: boolean;
 }) {
-  const sid = row.student.id || 0;
-  const complete = !!draft.classTeacherRemark.trim() && (!canEditHeadRemark || !!draft.headTeacherRemark.trim());
+  const sid = row.student.id || "";
+  const complete =
+    !!draft.classTeacherRemark.trim() &&
+    (!canEditHeadRemark || !!draft.headTeacherRemark.trim());
 
   return (
     <section className="ba-remark-card">
       <div className="ba-remark-head">
         <div>
           <h3>{row.student.fullName}</h3>
-          <p>{row.student.admissionNumber || "No admission no."}{className ? ` · ${className}` : ""}</p>
+          <p>
+            {row.student.admissionNumber || "No admission no."}
+            {className ? ` · ${className}` : ""}
+          </p>
         </div>
-        <Chip tone={complete ? "green" : "orange"}>{complete ? "Complete" : "Needs remarks"}</Chip>
+        <Chip tone={complete ? "green" : "orange"}>
+          {complete ? "Complete" : "Needs remarks"}
+        </Chip>
       </div>
 
-      <div className={canEditHeadRemark ? "ba-remark-grid two" : "ba-remark-grid"}>
+      <div
+        className={canEditHeadRemark ? "ba-remark-grid two" : "ba-remark-grid"}
+      >
         <label className="ba-remark-field">
-          <span><b>Class Teacher Remark</b><em>{countWords(draft.classTeacherRemark)} words</em></span>
-          <textarea value={draft.classTeacherRemark || ""} onChange={(event) => updateDraft(sid, { classTeacherRemark: event.target.value })} placeholder="Enter class teacher remark..." />
+          <span>
+            <b>Class Teacher Remark</b>
+            <em>{countWords(draft.classTeacherRemark)} words</em>
+          </span>
+          <textarea
+            value={draft.classTeacherRemark || ""}
+            onChange={(event) =>
+              updateDraft(sid, { classTeacherRemark: event.target.value })
+            }
+            placeholder="Enter class teacher remark..."
+          />
         </label>
 
         {canEditHeadRemark && (
           <label className="ba-remark-field">
-            <span><b>Head Teacher Remark</b><em>{countWords(draft.headTeacherRemark)} words</em></span>
-            <textarea value={draft.headTeacherRemark || ""} onChange={(event) => updateDraft(sid, { headTeacherRemark: event.target.value })} placeholder="Enter head teacher / principal remark..." />
+            <span>
+              <b>Head Teacher Remark</b>
+              <em>{countWords(draft.headTeacherRemark)} words</em>
+            </span>
+            <textarea
+              value={draft.headTeacherRemark || ""}
+              onChange={(event) =>
+                updateDraft(sid, { headTeacherRemark: event.target.value })
+              }
+              placeholder="Enter head teacher / principal remark..."
+            />
           </label>
         )}
       </div>
 
       {canPublish && (
         <label className="ba-publish-line">
-          <input type="checkbox" checked={!!draft.published} onChange={(event) => updateDraft(sid, { published: event.target.checked })} />
+          <input
+            type="checkbox"
+            checked={!!draft.published}
+            onChange={(event) =>
+              updateDraft(sid, { published: event.target.checked })
+            }
+          />
           Publish this report card
         </label>
       )}
@@ -915,14 +1300,14 @@ function FilterSheet(props: {
   setViewMode: (mode: ViewMode) => void;
   remarkFilter: RemarkFilter;
   setRemarkFilter: (filter: RemarkFilter) => void;
-  academicStructureId?: number;
-  setAcademicStructureId: (id?: number) => void;
-  academicPeriodId?: number;
-  setAcademicPeriodId: (id?: number) => void;
-  classId?: number;
-  setClassId: (id?: number) => void;
-  studentId?: number;
-  setStudentId: (id?: number) => void;
+  academicStructureId?: string;
+  setAcademicStructureId: (id?: string) => void;
+  academicPeriodId?: string;
+  setAcademicPeriodId: (id?: string) => void;
+  classId?: string;
+  setClassId: (id?: string) => void;
+  studentId?: string;
+  setStudentId: (id?: string) => void;
   academicStructures: AcademicStructure[];
   academicPeriods: AcademicPeriod[];
   classes: Class[];
@@ -935,15 +1320,28 @@ function FilterSheet(props: {
         <div className="ba-sheet-head">
           <div>
             <h2>Filters</h2>
-            <p>Choose the report remarks scope. School and branch stay locked.</p>
+            <p>
+              Choose the class-teacher remarks scope. Only your assigned classes are available.
+            </p>
           </div>
-          <button type="button" onClick={props.onClose} aria-label="Close filters">✕</button>
+          <button
+            type="button"
+            onClick={props.onClose}
+            aria-label="Close filters"
+          >
+            ✕
+          </button>
         </div>
 
         <div className="ba-form">
           <label>
             <span>View Mode</span>
-            <select value={props.viewMode} onChange={(event) => props.setViewMode(event.target.value as ViewMode)}>
+            <select
+              value={props.viewMode}
+              onChange={(event) =>
+                props.setViewMode(event.target.value as ViewMode)
+              }
+            >
               <option value="single">Single student</option>
               <option value="group">Group remarks</option>
               <option value="analytics">Analytics</option>
@@ -952,53 +1350,115 @@ function FilterSheet(props: {
 
           <label>
             <span>Academic Structure</span>
-            <select value={props.academicStructureId || ""} onChange={(event) => { props.setAcademicStructureId(idOf(event.target.value) || undefined); props.setAcademicPeriodId(undefined); props.setClassId(undefined); props.setStudentId(undefined); }}>
+            <select
+              value={props.academicStructureId || ""}
+              onChange={(event) => {
+                props.setAcademicStructureId(
+                  idOf(event.target.value) || undefined,
+                );
+                props.setAcademicPeriodId(undefined);
+                props.setClassId(undefined);
+                props.setStudentId(undefined);
+              }}
+            >
               <option value="">Select structure</option>
-              {props.academicStructures.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {props.academicStructures.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
             </select>
           </label>
 
           <label>
             <span>Academic Period</span>
-            <select value={props.academicPeriodId || ""} onChange={(event) => { props.setAcademicPeriodId(idOf(event.target.value) || undefined); props.setClassId(undefined); props.setStudentId(undefined); }}>
+            <select
+              value={props.academicPeriodId || ""}
+              onChange={(event) => {
+                props.setAcademicPeriodId(
+                  idOf(event.target.value) || undefined,
+                );
+                props.setClassId(undefined);
+                props.setStudentId(undefined);
+              }}
+            >
               <option value="">Select period</option>
-              {props.academicPeriods.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {props.academicPeriods.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
             </select>
           </label>
 
           <label>
             <span>Class</span>
-            <select value={props.classId || ""} onChange={(event) => { props.setClassId(idOf(event.target.value) || undefined); props.setStudentId(undefined); }}>
-              <option value="">Select class</option>
-              {props.classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            <select
+              value={props.classId || ""}
+              onChange={(event) => {
+                props.setClassId(idOf(event.target.value) || undefined);
+                props.setStudentId(undefined);
+              }}
+            >
+              <option value="">Select assigned class</option>
+              {props.classes.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
             </select>
           </label>
 
           {props.viewMode === "single" && (
             <label>
               <span>Student</span>
-              <select value={props.studentId || ""} onChange={(event) => props.setStudentId(idOf(event.target.value) || undefined)}>
+              <select
+                value={props.studentId || ""}
+                onChange={(event) =>
+                  props.setStudentId(idOf(event.target.value) || undefined)
+                }
+              >
                 <option value="">Auto select</option>
-                {props.students.map((item) => <option key={item.id} value={item.id}>{item.fullName}</option>)}
+                {props.students.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.fullName}
+                  </option>
+                ))}
               </select>
             </label>
           )}
 
           <label>
             <span>Remark Filter</span>
-            <select value={props.remarkFilter} onChange={(event) => props.setRemarkFilter(event.target.value as RemarkFilter)}>
+            <select
+              value={props.remarkFilter}
+              onChange={(event) =>
+                props.setRemarkFilter(event.target.value as RemarkFilter)
+              }
+            >
               <option value="all">All remarks</option>
               <option value="missing">Missing remarks</option>
               <option value="complete">Complete remarks</option>
-              <option value="published">Published</option>
-              <option value="unpublished">Unpublished</option>
             </select>
           </label>
         </div>
 
         <div className="ba-sheet-actions">
-          <button type="button" onClick={() => { props.setAcademicStructureId(undefined); props.setAcademicPeriodId(undefined); props.setClassId(undefined); props.setStudentId(undefined); props.setRemarkFilter("all"); }}>Clear</button>
-          <button type="button" className="primary" onClick={props.onClose}>Apply</button>
+          <button
+            type="button"
+            onClick={() => {
+              props.setAcademicStructureId(undefined);
+              props.setAcademicPeriodId(undefined);
+              props.setClassId(undefined);
+              props.setStudentId(undefined);
+              props.setRemarkFilter("all");
+            }}
+          >
+            Clear
+          </button>
+          <button type="button" className="primary" onClick={props.onClose}>
+            Apply
+          </button>
         </div>
       </section>
     </div>
@@ -1024,16 +1484,34 @@ function MoreSheet({
         <div className="ba-sheet-head">
           <div>
             <h2>More</h2>
-            <p>Quick report remarks actions.</p>
+            <p>Quick class teacher remark actions.</p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close menu">✕</button>
+          <button type="button" onClick={onClose} aria-label="Close menu">
+            ✕
+          </button>
         </div>
 
         <div className="ba-menu-list">
-          <button type="button" onClick={onRefresh}><span>↻</span><b>Refresh</b><small>Reload local report remark records</small></button>
-          <button type="button" onClick={onSingle}><span>👤</span><b>Single student</b><small>Edit one selected student</small></button>
-          <button type="button" onClick={onGroup}><span>👥</span><b>Group remarks</b><small>Apply or save remarks in batches</small></button>
-          <button type="button" onClick={onAnalytics}><span>📊</span><b>Analytics</b><small>View completion and publishing status</small></button>
+          <button type="button" onClick={onRefresh}>
+            <span>↻</span>
+            <b>Refresh</b>
+            <small>Reload local report remark records</small>
+          </button>
+          <button type="button" onClick={onSingle}>
+            <span>👤</span>
+            <b>Single student</b>
+            <small>Edit one selected student</small>
+          </button>
+          <button type="button" onClick={onGroup}>
+            <span>👥</span>
+            <b>Group remarks</b>
+            <small>Apply or save remarks in batches</small>
+          </button>
+          <button type="button" onClick={onAnalytics}>
+            <span>📊</span>
+            <b>Analytics</b>
+            <small>View completion and publishing status</small>
+          </button>
         </div>
       </section>
     </div>
@@ -1053,12 +1531,28 @@ function SliderIcon() {
   );
 }
 
-function Chip({ children, tone = "gray" }: { children: React.ReactNode; tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple" }) {
+function Chip({
+  children,
+  tone = "gray",
+}: {
+  children: React.ReactNode;
+  tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple";
+}) {
   return <span className={`ba-chip ${tone}`}>{children}</span>;
 }
 
-function SummaryChip({ label, value }: { label: string; value: string | number }) {
-  return <button type="button">{label}: {value}</button>;
+function SummaryChip({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <button type="button">
+      {label}: {value}
+    </button>
+  );
 }
 
 function Empty({ text }: { text: string }) {
@@ -1070,7 +1564,6 @@ function Empty({ text }: { text: string }) {
     </section>
   );
 }
-
 
 const css = `
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1513,5 +2006,3 @@ const css = `
   .ba-summary-line { display: grid; }
 }
 `;
-
-*/

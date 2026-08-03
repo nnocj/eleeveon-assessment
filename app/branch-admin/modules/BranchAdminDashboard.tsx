@@ -79,6 +79,9 @@ type CountMetric = {
 const HIDDEN_DASHBOARD_KEYS = new Set(["branchAdminDashboard"]);
 
 const TABLE_NAMES = [
+  "schools",
+  "branches",
+  "appUsers",
   "students",
   "teachers",
   "parents",
@@ -126,6 +129,8 @@ const TABLE_NAMES = [
   "userMemberships",
   "memberships",
   "schoolBranchSettings",
+  "portalHighlights",
+  "mediaAssets",
 ] as const;
 
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
@@ -804,40 +809,19 @@ export default function BranchAdminDashboard({
   navSections,
 }: RouteProps) {
   const dataRevision = useDataRevision();
-
   const router = useRouter();
   const { accountId, authenticated, loading: accountLoading } = useAccount();
   const { settings, loading: settingsLoading } = useSettings();
-  const { activeSchoolId, activeBranchId, activeSchool, activeBranch } =
-    useActiveBranch();
+  const { activeSchoolId, activeBranchId, activeSchool, activeBranch } = useActiveBranch();
   const { activeMembership } = useActiveMembership();
   const primary = settings?.primaryColor || "var(--primary-color,#2563eb)";
-
   const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedSchoolId({
-    openWorkspace,
-    activeMembership,
-    activeSchoolId,
-    activeSchool,
-    settings: settings as AnyRow,
-  });
-
-  const branchId = selectedBranchId({
-    openWorkspace,
-    activeMembership,
-    activeBranchId,
-    activeBranch,
-    settings: settings as AnyRow,
-  });
-
+  const schoolId = selectedSchoolId({ openWorkspace, activeMembership, activeSchoolId, activeSchool, settings: settings as AnyRow });
+  const branchId = selectedBranchId({ openWorkspace, activeMembership, activeBranchId, activeBranch, settings: settings as AnyRow });
   const { loading, setLoading } = useBackgroundLoader();
-  const [view, setView] = useState<ViewMode>("cards");
   const [query, setQuery] = useState("");
-  const [area, setArea] = useState<AreaFilter>("all");
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [rowsByTable, setRowsByTable] = useState<Record<string, AnyRow[]>>({});
+  const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
     if (accountLoading) return;
@@ -850,22 +834,14 @@ export default function BranchAdminDashboard({
       setLoading(false);
       return;
     }
-
     setLoading(true);
-
     try {
       const loaded = await Promise.all(
         TABLE_NAMES.map(async (tableName) => {
-          const rows = await safeArray(tableName);
-          return [
-            tableName,
-            rows.filter((row) =>
-              branchScoped(row, accountId, schoolId, branchId),
-            ),
-          ] as const;
+          const tableRows = await safeArray(tableName);
+          return [tableName, tableRows.filter((row) => branchScoped(row, accountId, schoolId, branchId))] as const;
         }),
       );
-
       setRowsByTable(Object.fromEntries(loaded));
     } catch (error) {
       console.error("Failed to load branch admin dashboard:", error);
@@ -878,17 +854,107 @@ export default function BranchAdminDashboard({
     if (accountLoading || settingsLoading) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    authenticated,
-    accountId,
-    schoolId,
-    branchId,
-    accountLoading,
-    settingsLoading,
-    dataRevision,
-  ]);
+  }, [authenticated, accountId, schoolId, branchId, accountLoading, settingsLoading, dataRevision]);
 
   const rows = rowsByTable;
+
+  const identity = useMemo(() => {
+    const membership = workspaceMembership(openWorkspace, activeMembership);
+    const storedUser =
+      safeJson<AnyRow>("currentUser") ||
+      safeJson<AnyRow>("authUser") ||
+      safeJson<AnyRow>("user");
+
+    const possibleBranchIds = [
+      branchId,
+      openWorkspace?.branchId,
+      membership?.branchId,
+      membership?.schoolBranchId,
+      membership?.branch?.id,
+      (activeBranch as AnyRow)?.id,
+      (settings as AnyRow)?.branchId,
+      safeRead("activeBranchId"),
+    ].map(cleanId).filter(Boolean);
+
+    const possibleSchoolIds = [
+      schoolId,
+      openWorkspace?.schoolId,
+      membership?.schoolId,
+      membership?.school?.id,
+      (activeSchool as AnyRow)?.id,
+      (settings as AnyRow)?.schoolId,
+      safeRead("activeSchoolId"),
+    ].map(cleanId).filter(Boolean);
+
+    const branchRows = (rows.branches || []).filter(activeRow);
+    const schoolRows = (rows.schools || []).filter(activeRow);
+
+    const branch =
+      branchRows.find((row) => possibleBranchIds.includes(idOf(row))) ||
+      branchRows.find((row) => possibleSchoolIds.includes(cleanId(row.schoolId))) ||
+      branchRows[0] ||
+      (activeBranch as AnyRow) ||
+      membership?.branch ||
+      null;
+
+    const resolvedSchoolId = cleanId(branch?.schoolId) || possibleSchoolIds[0] || "";
+    const school =
+      schoolRows.find((row) => idOf(row) === resolvedSchoolId) ||
+      schoolRows.find((row) => possibleSchoolIds.includes(idOf(row))) ||
+      schoolRows[0] ||
+      (activeSchool as AnyRow) ||
+      membership?.school ||
+      null;
+
+    const userId = cleanId(
+      membership?.userId ||
+      membership?.appUserId ||
+      openWorkspace?.membership?.userId ||
+      storedUser?.id,
+    );
+    const appUser =
+      (rows.appUsers || []).find((row) => idOf(row) === userId) ||
+      (rows.appUsers || []).find((row) => cleanId(row.email) === cleanId(membership?.email)) ||
+      storedUser ||
+      membership?.user ||
+      membership?.appUser ||
+      null;
+
+    return {
+      branch,
+      school,
+      branchName: text(
+        branch?.name || membership?.branchName || (settings as AnyRow)?.branchName,
+        "Branch",
+      ),
+      schoolName: text(
+        school?.name || membership?.schoolName || (settings as AnyRow)?.schoolName,
+        "School",
+      ),
+      userName: text(
+        appUser?.fullName ||
+          appUser?.name ||
+          openWorkspace?.fullName ||
+          openWorkspace?.userName ||
+          openWorkspace?.memberName ||
+          membership?.fullName ||
+          membership?.userName ||
+          membership?.name,
+        "Administrator",
+      ),
+    };
+  }, [
+    rows.branches,
+    rows.schools,
+    rows.appUsers,
+    branchId,
+    schoolId,
+    openWorkspace,
+    activeMembership,
+    activeBranch,
+    activeSchool,
+    settings,
+  ]);
 
   const summary = useMemo(() => {
     const today = todayKey();
@@ -896,694 +962,207 @@ export default function BranchAdminDashboard({
     const teachers = rows.teachers || [];
     const parents = rows.parents || [];
     const classes = rows.classes || [];
-    const classSubjects = rows.classSubjects || [];
     const enrollments = rows.studentEnrollments || [];
     const studentAttendance = rows.attendance || [];
     const teacherAttendance = rows.teacherAttendance || [];
-    const fees = [
-      ...(rows.feeStructures || []),
-      ...(rows.studentFeeInvoices || []),
-    ];
-    const payments = [
-      ...(rows.payments || []),
-      ...(rows.studentFeePayments || []),
-      ...(rows.paymentTransactions || []),
-    ];
-    const memberships = (rows.userMemberships || []).filter(activeRow).length
-      ? (rows.userMemberships || []).filter(activeRow)
-      : (rows.memberships || []).filter(activeRow);
-    const todayStudentAttendance = studentAttendance.filter((row) =>
-      String(row.date || row.createdAt || "").startsWith(today),
-    );
-    const presentToday = todayStudentAttendance.filter(
-      (row) => String(row.status || "").toLowerCase() === "present",
-    ).length;
-    const todayTeacherAttendance = teacherAttendance.filter((row) =>
-      String(row.date || row.createdAt || "").startsWith(today),
-    );
-    const teacherPresentToday = todayTeacherAttendance.filter(
-      (row) =>
-        String(row.status || row.clockIn || "")
-          .toLowerCase()
-          .includes("present") || row.clockIn,
-    ).length;
-    const pendingFees = fees.filter(
-      (row) =>
-        !["paid", "void", "cancelled"].includes(
-          String(row.status || "").toLowerCase(),
-        ),
-    ).length;
-
+    const todayStudents = studentAttendance.filter((row) => String(row.date || row.createdAt || "").startsWith(today));
+    const todayTeachers = teacherAttendance.filter((row) => String(row.date || row.createdAt || "").startsWith(today));
+    const statusCount = (value: string) => todayStudents.filter((row) => String(row.status || "").toLowerCase() === value).length;
     return {
       students: count(students),
       teachers: count(teachers),
       parents: count(parents),
       classes: count(classes),
-      classSubjects: count(classSubjects),
       enrollments: count(enrollments),
       uniqueEnrolledStudents: uniqueCount(enrollments, "studentId"),
-      studentAttendance: count(studentAttendance),
-      teacherAttendance: count(teacherAttendance),
-      presentToday,
-      todayStudentAttendance: todayStudentAttendance.length,
-      teacherPresentToday,
-      todayTeacherAttendance: todayTeacherAttendance.length,
+      presentToday: statusCount("present"),
+      absentToday: statusCount("absent"),
+      lateToday: statusCount("late"),
+      todayStudentAttendance: todayStudents.length,
+      teacherPresentToday: todayTeachers.filter((row) => String(row.status || row.clockIn || "").toLowerCase().includes("present") || row.clockIn).length,
+      todayTeacherAttendance: todayTeachers.length,
       announcements: count(rows.announcements || []),
-      messages: count(rows.messageThreads || []),
       events: count(rows.calendarEvents || []),
-      timetables: count(rows.scheduleTimetables || []),
-      sessions: count(rows.scheduleSessions || []),
-      resources: count(rows.scheduleResources || []),
-      organizations: count(rows.organizations || []),
-      subjects: count(rows.subjects || []),
-      curriculums: count(rows.curriculums || []),
-      pathways: count(rows.curriculumPathways || []),
-      curriculumSubjects: count(rows.curriculumSubjects || []),
-      academicStructures: count(rows.academicStructures || []),
-      academicPeriods: count(rows.academicPeriods || []),
-      assessmentStructures: count(rows.assessmentStructures || []),
-      assessmentItems: count(rows.assessmentStructureItems || []),
-      assessmentApplicabilities: count(rows.assessmentApplicabilities || []),
-      gradingSystems: count(rows.gradingSystems || []),
-      gradingRules: count(rows.gradeRules || []),
       reports: count(rows.reportCards || []),
       broadsheets: count(rows.computedResults || []),
-      promotions: count(rows.studentPromotions || []),
-      cumulativeRecords: count([
-        ...(rows.studentReportSnapshots || []),
-        ...(rows.computedResults || []),
-      ]),
-      incomeTotal: sum(rows.incomes || [], "amount"),
-      expenseTotal: sum(rows.expenses || [], "amount"),
-      paymentTotal: payments.reduce(
-        (total, row) => total + n(row.amount || row.total),
-        0,
-      ),
-      fees: count(fees),
-      pendingFees,
-      settlements: count(rows.paymentSettlements || []),
-      withdrawals: count(rows.withdrawalRequests || []),
-      payoutSettings: count(rows.schoolPayoutSettings || []),
-      payrollProfiles: count(rows.staffPayrollProfiles || []),
-      payrollRuns: count(rows.payrollRuns || []),
-      payrollItems: count(rows.payrollItems || []),
-      usersRoles: uniqueUsersRoleCount(memberships),
-      settings: count(rows.schoolBranchSettings || []),
-      branchName: selectedBranchName({
-        openWorkspace,
-        activeMembership,
-        activeBranch,
-      }),
+      branchName: identity.branchName,
+      schoolName: identity.schoolName,
     };
-  }, [activeBranch, rows, openWorkspace, activeMembership]);
+  }, [rows, identity]);
 
-  const modules = useMemo<DashboardModule[]>(() => {
-    const navModules = buildNavModules(navSections);
+  const modules = useMemo<DashboardModule[]>(() => buildNavModules(navSections).map((module) => ({ ...module, ...metricFor(module.routeKey, rows, summary) })), [navSections, rows, summary]);
+  const q = query.trim().toLowerCase();
+  const searchResults = useMemo(() => {
+    if (!q) return [];
+    return modules.filter((item) => `${item.label} ${item.note} ${item.area}`.toLowerCase().includes(q)).slice(0, 12);
+  }, [modules, q]);
 
-    return navModules.map((module) => {
-      const metric = metricFor(module.routeKey, rows, summary);
-      return {
-        ...module,
-        ...metric,
-      };
-    });
-  }, [navSections, rows, summary]);
-
-  const filteredModules = useMemo(() => {
-    const q = query.toLowerCase().trim();
-    return modules.filter((item) => {
-      if (area !== "all" && item.area !== area) return false;
-      if (!q) return true;
-      return `${item.label} ${item.note} ${item.value} ${item.area}`
-        .toLowerCase()
-        .includes(q);
-    });
-  }, [area, modules, query]);
-
+  const announcements = useMemo(() => (rows.announcements || []).filter(activeRow).sort((a,b)=>n(b.publishAt || b.sentAt || b.updatedAt || b.createdAt)-n(a.publishAt || a.sentAt || a.updatedAt || a.createdAt)).slice(0,4), [rows.announcements]);
+  const events = useMemo(() => (rows.calendarEvents || []).filter(activeRow).sort((a,b)=>n(a.startAt || a.startDate || a.date)-n(b.startAt || b.startDate || b.date)).slice(0,5), [rows.calendarEvents]);
   const recent = useMemo(() => {
-    const students = rows.students || [];
-    const teachers = rows.teachers || [];
-    const classes = rows.classes || [];
-    const announcements = rows.announcements || [];
-    const threads = rows.messageThreads || [];
-    const payments = [
-      ...(rows.payments || []),
-      ...(rows.studentFeePayments || []),
-      ...(rows.paymentTransactions || []),
+    const source: AnyRow[] = [
+      ...(rows.students || []).map(row=>({...row,_kind:"Student",_icon:"🧑‍🎓",_title:rowName(row),_date:row.updatedAt||row.createdAt})),
+      ...(rows.teachers || []).map(row=>({...row,_kind:"Teacher",_icon:"👨‍🏫",_title:rowName(row),_date:row.updatedAt||row.createdAt})),
+      ...(rows.announcements || []).map(row=>({...row,_kind:"Announcement",_icon:"📣",_title:text(row.title,"Announcement"),_date:row.sentAt||row.publishAt||row.updatedAt||row.createdAt})),
+      ...(rows.reportCards || []).map(row=>({...row,_kind:"Report",_icon:"📄",_title:text(row.title||row.studentName,"Student report"),_date:row.updatedAt||row.createdAt})),
     ];
-
-    const recentRows: AnyRow[] = [
-      ...students.map((row) => ({
-        ...row,
-        _kind: "Student",
-        _icon: "🧑‍🎓",
-        _title: rowName(row),
-        _date: row.updatedAt || row.createdAt,
-      })),
-      ...teachers.map((row) => ({
-        ...row,
-        _kind: "Teacher",
-        _icon: "👨‍🏫",
-        _title: rowName(row),
-        _date: row.updatedAt || row.createdAt,
-      })),
-      ...classes.map((row) => ({
-        ...row,
-        _kind: "Class",
-        _icon: "🏫",
-        _title: rowName(row),
-        _date: row.updatedAt || row.createdAt,
-      })),
-      ...announcements.map((row) => ({
-        ...row,
-        _kind: "Announcement",
-        _icon: "📣",
-        _title: text(row.title, "Announcement"),
-        _date: row.sentAt || row.publishAt || row.updatedAt || row.createdAt,
-      })),
-      ...threads.map((row) => ({
-        ...row,
-        _kind: "Message",
-        _icon: "💬",
-        _title: text(row.subject || row.title, "Message thread"),
-        _date: row.lastMessageAt || row.updatedAt || row.createdAt,
-      })),
-      ...payments.map((row) => ({
-        ...row,
-        _kind: "Payment",
-        _icon: "💰",
-        _title: money(row.amount || row.total, row.currency || "GHS"),
-        _date: row.paidAt || row.updatedAt || row.createdAt,
-      })),
-    ];
-
-    return recentRows.sort((a, b) => n(b._date) - n(a._date)).slice(0, 8);
+    return source.sort((a,b)=>n(b._date)-n(a._date)).slice(0,6);
   }, [rows]);
 
-  const activeFilterCount = area !== "all" ? 1 : 0;
+  const heroImage = useMemo(() => {
+    const highlights = (rows.portalHighlights || [])
+      .filter(activeRow)
+      .filter((row) => ["published", "scheduled"].includes(String(row.status || "").toLowerCase()))
+      .sort((a, b) => n(a.displayOrder) - n(b.displayOrder));
+    const media = (rows.mediaAssets || []).filter(activeRow);
+    const branchRecord = identity.branch;
+    const schoolRecord = identity.school;
+
+    const mediaUrl = (mediaId: unknown) => {
+      const asset = media.find((row) => idOf(row) === cleanId(mediaId));
+      return text(
+        asset?.publicUrl ||
+          asset?.remoteUrl ||
+          asset?.previewDataUrl ||
+          asset?.thumbnailDataUrl ||
+          asset?.localObjectUrl,
+      );
+    };
+
+    const candidates = [
+      ...highlights.flatMap((row) => [
+        mediaUrl(row.mediaAssetId),
+        mediaUrl(row.posterMediaAssetId),
+        row.fallbackImageUrl,
+      ]),
+      mediaUrl(branchRecord?.bannerImageMediaId),
+      branchRecord?.bannerImage,
+      mediaUrl(branchRecord?.photoMediaId),
+      branchRecord?.photo,
+      mediaUrl(schoolRecord?.bannerImageMediaId),
+      schoolRecord?.bannerImage,
+      mediaUrl(schoolRecord?.photoMediaId),
+      schoolRecord?.photo,
+      mediaUrl((settings as AnyRow)?.dashboardHeroImageMediaId),
+      (settings as AnyRow)?.dashboardHeroImage,
+      mediaUrl((settings as AnyRow)?.dashboardBannerImageMediaId),
+      (settings as AnyRow)?.dashboardBannerImage,
+      (settings as AnyRow)?.bannerImage,
+      (settings as AnyRow)?.photo,
+      ...media
+        .filter((row) => String(row.assetKind || "") === "image")
+        .map((row) =>
+          row.publicUrl ||
+          row.remoteUrl ||
+          row.previewDataUrl ||
+          row.thumbnailDataUrl ||
+          row.localObjectUrl,
+        ),
+    ]
+      .map((value) => text(value))
+      .filter(Boolean);
+
+    return candidates[0] || "";
+  }, [
+    rows.portalHighlights,
+    rows.mediaAssets,
+    rows.branches,
+    rows.schools,
+    settings,
+    activeBranch,
+    activeSchool,
+    branchId,
+    schoolId,
+    identity,
+  ]);
+
+  const branchRecord = identity.branch;
+  const schoolRecord = identity.school;
+  const motto = text(
+    (settings as AnyRow)?.motto ||
+      branchRecord?.motto ||
+      schoolRecord?.motto,
+    "Learning today. Leading tomorrow.",
+  );
+  const userName = identity.userName;
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
   function openRoute(routeKey: string) {
-    if (navigate) {
-      navigate(routeKey);
-      return;
-    }
-
+    if (navigate) return navigate(routeKey);
     try {
-      window.dispatchEvent(
-        new CustomEvent("eleeveon:portal-route", { detail: { key: routeKey } }),
-      );
-      window.dispatchEvent(
-        new CustomEvent("role-portal:navigate", { detail: { key: routeKey } }),
-      );
-      window.dispatchEvent(
-        new CustomEvent("portal:navigate", { detail: routeKey }),
-      );
-    } catch {
-      // RolePortalShell navigation events are optional; the cards remain safe if unsupported.
-    }
+      window.dispatchEvent(new CustomEvent("eleeveon:portal-route", { detail: { key: routeKey } }));
+      window.dispatchEvent(new CustomEvent("role-portal:navigate", { detail: { key: routeKey } }));
+      window.dispatchEvent(new CustomEvent("portal:navigate", { detail: routeKey }));
+    } catch {}
   }
 
-  if (loading || accountLoading || settingsLoading) {
-    return (
-      <State
-        primary={primary}
-        title="Opening branch dashboard..."
-        text="Loading branch students, staff, academics, finance and communication records."
-      />
-    );
-  }
+  if (loading || accountLoading || settingsLoading) return <State primary={primary} title="Opening branch dashboard..." text="Preparing your school home, attendance, announcements and activity." />;
+  if (!authenticated || !accountId) return <State primary={primary} title="Redirecting to login..." text="You must sign in before viewing the branch dashboard." />;
 
-  if (!authenticated || !accountId) {
-    return (
-      <State
-        primary={primary}
-        title="Redirecting to login..."
-        text="You must sign in before viewing the branch dashboard."
-      />
-    );
-  }
+  const quickActions = [
+    ["students","＋","Student"],
+    ["studentAttendance","✓","Attendance"],
+    ["assessmentEntry","✎","Assessment"],
+    ["studentReports","▤","Reports"],
+    ["announcements","📣","Announce"],
+  ] as const;
 
-  return (
-    <main
-      className="bd-page"
-      style={{ "--bd-primary": primary } as React.CSSProperties}
-    >
-      <style>{css}</style>
-
-      <section
-        className="bd-search-card"
-        aria-label="Branch dashboard search and actions"
-      >
-        <span
-          className={`status-dot-mini ${summary.students || summary.classes ? "green" : "gray"}`}
-          title={`${summary.branchName}: ${summary.students} student(s), ${summary.classes} class(es)`}
-        />
-
-        <label className="bd-search">
-          <span>⌕</span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search branch modules..."
-            aria-label="Search branch dashboard"
-          />
-        </label>
-
-        <button
-          type="button"
-          className="bd-add-inline"
-          onClick={load}
-          aria-label="Refresh branch dashboard"
-          title="Refresh"
-        >
-          ↻
-        </button>
-
-        <button
-          type="button"
-          className={`bd-filter-button ${activeFilterCount ? "active" : ""}`}
-          onClick={() => setFilterOpen(true)}
-          aria-label="Open filters"
-          title="Filters"
-        >
-          <SliderIcon />
-          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
-        </button>
-
-        <button
-          type="button"
-          className="bd-icon-button"
-          onClick={() => setMoreOpen(true)}
-          aria-label="More options"
-        >
-          ⋯
-        </button>
-      </section>
-
-      {(area !== "all" || query.trim()) && (
-        <section className="bd-filter-chips" aria-label="Active filters">
-          {area !== "all" && (
-            <button type="button" onClick={() => setArea("all")}>
-              Area: {areaLabel(area)} ×
-            </button>
-          )}
-          {query.trim() && (
-            <button type="button" onClick={() => setQuery("")}>
-              Search: {query.trim()} ×
-            </button>
-          )}
-        </section>
-      )}
-
-      {view === "analytics" ? (
-        <AnalyticsView summary={summary} modules={modules} recent={recent} />
-      ) : null}
-
-      {view === "table" ? (
-        <TableView modules={filteredModules} openRoute={openRoute} />
-      ) : null}
-
-      {view === "cards" ? (
-        <section className="bd-list">
-          {filteredModules.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className="branch-row"
-              onClick={() => openRoute(item.routeKey)}
-            >
-              <span className="branch-avatar">{item.icon}</span>
-              <span className="branch-main">
-                <strong>{item.label}</strong>
-                <small>{item.note}</small>
-                <em>{areaLabel(item.area)}</em>
-              </span>
-              <span className="branch-side">
-                <Chip tone={item.tone}>{item.value}</Chip>
-                <i>›</i>
-              </span>
-            </button>
-          ))}
-
-          {!filteredModules.length ? (
-            <Empty
-              title="No matching branch modules"
-              text="Clear filters or search to show your branch modules."
-            />
-          ) : null}
-        </section>
-      ) : null}
-
-      {recent.length ? (
-        <section className="bd-recent">
-          <div className="bd-section-head">
-            <h2>Recent Activity</h2>
-            <span>{recent.length}</span>
-          </div>
-          <div className="bd-recent-list">
-            {recent.map((item, index) => (
-              <article
-                key={`${item._kind}-${idOf(item) || index}`}
-                className="recent-row"
-              >
-                <span>{item._icon}</span>
-                <b>{item._title}</b>
-                <small>
-                  {item._kind} · {dateLabel(item._date)}
-                </small>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      {filterOpen ? (
-        <FilterSheet
-          area={area}
-          setArea={setArea}
-          onClose={() => setFilterOpen(false)}
-        />
-      ) : null}
-
-      {moreOpen ? (
-        <MoreSheet
-          view={view}
-          setView={(mode) => {
-            setView(mode);
-            setMoreOpen(false);
-          }}
-          summary={summary}
-          onRefresh={async () => {
-            setMoreOpen(false);
-            await load();
-          }}
-          onClose={() => setMoreOpen(false)}
-        />
-      ) : null}
-    </main>
-  );
-}
-
-function State({
-  primary,
-  title,
-  text: body,
-}: {
-  primary: string;
-  title: string;
-  text: string;
-}) {
-  return (
-    <main
-      className="bd-page"
-      style={{ "--bd-primary": primary } as React.CSSProperties}
-    >
-      <style>{css}</style>
-      <section className="bd-state">
-        <div className="bd-spinner" />
-        <h2>{title}</h2>
-        <p>{body}</p>
-      </section>
-    </main>
-  );
-}
-
-function FilterSheet({
-  area,
-  setArea,
-  onClose,
-}: {
-  area: AreaFilter;
-  setArea: (value: AreaFilter) => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="bd-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="bd-sheet small">
-        <div className="bd-sheet-head">
-          <div>
-            <h2>Filters</h2>
-            <p>Choose which branch area to show.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close filters">
-            ✕
-          </button>
-        </div>
-
-        <div className="bd-form compact">
-          <label>
-            <span>Area</span>
-            <select
-              value={area}
-              onChange={(event) => setArea(event.target.value as AreaFilter)}
-            >
-              <option value="all">All areas</option>
-              <option value="administration">Administration</option>
-              <option value="attendance">Attendance</option>
-              <option value="communication">Communication</option>
-              <option value="timetable">Calendar & Timetable</option>
-              <option value="setup">Setup</option>
-              <option value="records">Academic Records</option>
-              <option value="finance">Finance</option>
-              <option value="control">Branch Control</option>
-              <option value="other">Other</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="bd-sheet-actions">
-          <button type="button" onClick={() => setArea("all")}>
-            Reset
-          </button>
-          <button type="button" className="primary" onClick={onClose}>
-            Apply
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function MoreSheet({
-  view,
-  setView,
-  summary,
-  onRefresh,
-  onClose,
-}: {
-  view: ViewMode;
-  setView: (value: ViewMode) => void;
-  summary: AnyRow;
-  onRefresh: () => void | Promise<void>;
-  onClose: () => void;
-}) {
-  return (
-    <div className="bd-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="bd-sheet small">
-        <div className="bd-sheet-head">
-          <div>
-            <h2>More</h2>
-            <p>Advanced views stay here so the branch home remains compact.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close menu">
-            ✕
-          </button>
-        </div>
-
-        <div className="bd-menu-list">
-          <button
-            type="button"
-            className={view === "cards" ? "active" : ""}
-            onClick={() => setView("cards")}
-          >
-            <span>☰</span>
-            <b>List view</b>
-            <small>Compact branch modules</small>
-          </button>
-          <button
-            type="button"
-            className={view === "table" ? "active" : ""}
-            onClick={() => setView("table")}
-          >
-            <span>☷</span>
-            <b>Table view</b>
-            <small>Dense laptop-friendly module list</small>
-          </button>
-          <button
-            type="button"
-            className={view === "analytics" ? "active" : ""}
-            onClick={() => setView("analytics")}
-          >
-            <span>◔</span>
-            <b>Analytics</b>
-            <small>
-              {summary.students} students · {summary.teachers} teachers ·{" "}
-              {summary.classes} classes
-            </small>
-          </button>
-          <button type="button" onClick={onRefresh}>
-            <span>↻</span>
-            <b>Refresh</b>
-            <small>Reload local branch dashboard data</small>
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function TableView({
-  modules,
-  openRoute,
-}: {
-  modules: DashboardModule[];
-  openRoute: (routeKey: string) => void;
-}) {
-  return (
-    <section className="bd-table-card">
-      <div className="bd-table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Branch Modules ({modules.length})</th>
-              <th>Area</th>
-              <th>Value</th>
-              <th>Status</th>
-              <th>Note</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {modules.map((item) => (
-              <tr key={item.key}>
-                <td>
-                  <strong>
-                    {item.icon} {item.label}
-                  </strong>
-                  <span>{item.routeKey}</span>
-                </td>
-                <td>{areaLabel(item.area)}</td>
-                <td>{item.value}</td>
-                <td>
-                  <Chip tone={item.tone}>{item.tone}</Chip>
-                </td>
-                <td>{item.note}</td>
-                <td>
-                  <div className="bd-table-actions">
-                    <button
-                      type="button"
-                      onClick={() => openRoute(item.routeKey)}
-                    >
-                      Open
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!modules.length ? (
-          <div className="bd-empty-table">
-            No branch module matches your filters.
-          </div>
-        ) : null}
-      </div>
+  return <main className="bd-page" style={{"--bd-primary":primary} as React.CSSProperties}>
+    <style>{css}</style>
+    <section className="bd-search-card">
+      <span className={`status-dot-mini ${summary.students || summary.classes ? "green" : "gray"}`} title={summary.branchName}/>
+      <label className="bd-search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search students, attendance, reports..." aria-label="Search branch modules"/></label>
+      {query ? <button className="bd-clear" onClick={()=>setQuery("")} aria-label="Clear search">×</button> : null}
+      <button className="bd-refresh" onClick={load} aria-label="Refresh dashboard">↻</button>
+      <button className="bd-more" onClick={()=>setMoreOpen(true)} aria-label="More options">⋯</button>
     </section>
-  );
+
+    {q ? <section className="bd-search-results">
+      <div className="bd-section-head"><div><span>Search results</span><h2>{searchResults.length ? `Matching “${query.trim()}”` : "No matches found"}</h2></div><b>{searchResults.length}</b></div>
+      {searchResults.map(item=><button key={item.key} className="branch-row" onClick={()=>openRoute(item.routeKey)}><span className="branch-avatar">{item.icon}</span><span className="branch-main"><strong>{item.label}</strong><small>{item.note}</small><em>{areaLabel(item.area)}</em></span><span className="branch-side"><Chip tone={item.tone}>{item.value}</Chip><i>›</i></span></button>)}
+      {!searchResults.length ? <Empty title="Nothing matches that search" text="Try a module name such as students, attendance, reports, fees or settings."/> : null}
+    </section> : <>
+      <section className={`bd-hero ${heroImage ? "has-image" : ""}`} style={heroImage ? {backgroundImage:`linear-gradient(90deg,rgba(7,15,32,.88),rgba(7,15,32,.32)),url(${JSON.stringify(heroImage).slice(1,-1)})`} : undefined}>
+        <div className="bd-hero-copy"><span>{greeting}</span><h1>{userName}</h1><p>Welcome to <strong>{summary.schoolName}</strong><small className="bd-branch-name">{summary.branchName}</small></p><blockquote>“{motto}”</blockquote></div>
+        <div className="bd-hero-stats"><span><b>{summary.students}</b> Students</span><span><b>{summary.teachers}</b> Teachers</span><span><b>{summary.classes}</b> Classes</span></div>
+      </section>
+
+      <section className="bd-quick-actions" aria-label="Quick actions">{quickActions.map(([route,icon,label])=><button key={route} onClick={()=>openRoute(route)}><span>{icon}</span><b>{label}</b></button>)}</section>
+
+      <section className="bd-dashboard-grid">
+        <article className="bd-card attendance-card"><div className="bd-section-head"><div><span>Today</span><h2>Attendance</h2></div><button onClick={()=>openRoute("studentAttendance")}>Open</button></div><div className="attendance-main"><strong>{summary.presentToday}</strong><span>students present</span></div><div className="attendance-grid"><div><b>{summary.absentToday}</b><small>Absent</small></div><div><b>{summary.lateToday}</b><small>Late</small></div><div><b>{summary.teacherPresentToday}</b><small>Teachers</small></div><div><b>{summary.todayStudentAttendance}</b><small>Recorded</small></div></div></article>
+
+        <article className="bd-card"><div className="bd-section-head"><div><span>School day</span><h2>Upcoming</h2></div><button onClick={()=>openRoute("calendar")}>Calendar</button></div><div className="bd-stack">{events.length ? events.map((event,index)=><button key={idOf(event)||index} onClick={()=>openRoute("calendar")} className="event-row"><time>{dateLabel(event.startAt||event.startDate||event.date).split(",")[0]}</time><span><b>{text(event.title||event.name,"School event")}</b><small>{text(event.location||event.venue,"School calendar")}</small></span></button>) : <MiniEmpty icon="🗓️" text="No upcoming events yet."/>}</div></article>
+
+        <article className="bd-card announcements-card"><div className="bd-section-head"><div><span>Notice board</span><h2>Announcements</h2></div><button onClick={()=>openRoute("announcements")}>View all</button></div><div className="bd-stack">{announcements.length ? announcements.map((item,index)=><button key={idOf(item)||index} onClick={()=>openRoute("announcements")} className="notice-row"><span>📣</span><div><b>{text(item.title,"Announcement")}</b><small>{text(item.message||item.body||item.content,"Open to read this school update.").slice(0,100)}</small></div></button>) : <MiniEmpty icon="📣" text="No announcements published."/>}</div></article>
+
+        <article className="bd-card"><div className="bd-section-head"><div><span>At a glance</span><h2>School community</h2></div></div><div className="community-grid"><Metric label="Students" value={summary.students} icon="🧑‍🎓"/><Metric label="Teachers" value={summary.teachers} icon="👨‍🏫"/><Metric label="Parents" value={summary.parents} icon="👪"/><Metric label="Reports" value={summary.reports} icon="📄"/></div></article>
+      </section>
+
+      <section className="bd-card bd-recent"><div className="bd-section-head"><div><span>Latest changes</span><h2>Recent activity</h2></div><b>{recent.length}</b></div><div className="bd-recent-list">{recent.length ? recent.map((item,index)=><article key={`${item._kind}-${idOf(item)||index}`} className="recent-row"><span>{item._icon}</span><b>{item._title}</b><small>{item._kind} · {dateLabel(item._date)}</small></article>) : <MiniEmpty icon="✨" text="School activity will appear here."/>}</div></section>
+    </>}
+
+    {moreOpen ? <div className="bd-sheet-backdrop" role="dialog" aria-modal="true"><section className="bd-sheet"><div className="bd-sheet-head"><div><h2>Branch home</h2><p>Useful dashboard controls and direct destinations.</p></div><button onClick={()=>setMoreOpen(false)}>✕</button></div><div className="bd-menu-list"><button onClick={()=>{setMoreOpen(false);load()}}><span>↻</span><b>Refresh dashboard</b><small>Reload branch data from this device</small></button><button onClick={()=>{setMoreOpen(false);openRoute("branchSettings")}}><span>⚙</span><b>Branch identity</b><small>Update branding, motto and report settings</small></button><button onClick={()=>{setMoreOpen(false);openRoute("calendar")}}><span>🗓</span><b>School calendar</b><small>Manage dates, events and reminders</small></button></div></section></div> : null}
+  </main>;
 }
 
-function AnalyticsView({
-  summary,
-  modules,
-  recent,
-}: {
-  summary: AnyRow;
-  modules: DashboardModule[];
-  recent: AnyRow[];
-}) {
-  const areaRows = [
-    "administration",
-    "attendance",
-    "communication",
-    "timetable",
-    "setup",
-    "records",
-    "finance",
-    "control",
-    "other",
-  ]
-    .map((area) => ({
-      label: areaLabel(area),
-      value: modules.filter((module) => module.area === area).length,
-    }))
-    .filter((row) => row.value > 0);
-
-  return (
-    <section className="bd-analysis-grid">
-      <article className="bd-analysis">
-        <span>Students</span>
-        <strong>{summary.students}</strong>
-        <p>
-          {summary.classes} class(es), {summary.enrollments} enrollment
-          record(s), {summary.uniqueEnrolledStudents} unique enrolled
-          student(s).
-        </p>
-      </article>
-      <article className="bd-analysis">
-        <span>Staff</span>
-        <strong>{summary.teachers}</strong>
-        <p>
-          {summary.todayTeacherAttendance} teacher attendance record(s) today.
-        </p>
-      </article>
-      <article className="bd-analysis">
-        <span>Attendance Today</span>
-        <strong>{summary.presentToday}</strong>
-        <p>
-          {summary.todayStudentAttendance} student attendance record(s) today.
-        </p>
-      </article>
-      <article className="bd-analysis">
-        <span>Finance</span>
-        <strong>{money(summary.incomeTotal + summary.paymentTotal)}</strong>
-        <p>{summary.pendingFees} pending fee/invoice record(s).</p>
-      </article>
-      <article className="bd-analysis wide">
-        <span>Module Areas</span>
-        <strong>{modules.length}</strong>
-        <div className="bd-analysis-list">
-          {areaRows.map((row) => (
-            <section key={row.label}>
-              <div>
-                <b>{row.label}</b>
-                <small>{row.value}</small>
-              </div>
-              <div className="bd-progress">
-                <i
-                  style={{
-                    width: `${Math.max(6, Math.round((row.value / Math.max(1, modules.length)) * 100))}%`,
-                  }}
-                />
-              </div>
-            </section>
-          ))}
-        </div>
-      </article>
-      <article className="bd-analysis wide">
-        <span>Recent Activity</span>
-        <strong>{recent.length}</strong>
-        <p>
-          Recent records from students, teachers, classes, announcements,
-          messages and payments.
-        </p>
-      </article>
-    </section>
-  );
-}
+function Metric({label,value,icon}:{label:string;value:string|number;icon:string}){return <div className="metric"><span>{icon}</span><strong>{value}</strong><small>{label}</small></div>}
+function MiniEmpty({icon,text:body}:{icon:string;text:string}){return <div className="mini-empty"><span>{icon}</span><p>{body}</p></div>}
+function State({primary,title,text:body}:{primary:string;title:string;text:string}){return <main className="bd-page" style={{"--bd-primary":primary} as React.CSSProperties}><style>{css}</style><section className="bd-state"><div className="bd-spinner"/><h2>{title}</h2><p>{body}</p></section></main>}
 
 const css = `
-
-@keyframes spin { to { transform: rotate(360deg); } }
-.bd-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;width:100%;max-width:100%;min-width:0;padding:calc(8px * var(--local-density-scale,1));padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--bd-primary) 9%,transparent),transparent 30rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:var(--font-size,14px);overflow-x:hidden}.bd-page *,.bd-page *::before,.bd-page *::after{box-sizing:border-box;min-width:0}.bd-page button,.bd-page input,.bd-page select{font:inherit;max-width:100%}.bd-page button{-webkit-tap-highlight-color:transparent}.bd-page input,.bd-page select{width:100%;min-height:44px;border:1px solid var(--input-border,var(--border,rgba(0,0,0,.10)));border-radius:16px;padding:0 12px;background:var(--input-bg,var(--surface,#fff));color:var(--input-text,var(--text,#111827));outline:none;font-weight:750}.bd-page input:focus,.bd-page select:focus{border-color:color-mix(in srgb,var(--bd-primary) 52%,var(--border,rgba(0,0,0,.10)));box-shadow:0 0 0 4px color-mix(in srgb,var(--bd-primary) 12%,transparent)}.bd-state,.bd-search-card,.branch-row,.bd-table-card,.bd-analysis,.bd-empty,.bd-sheet,.bd-recent,.recent-row{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.10));box-shadow:0 12px 28px rgba(15,23,42,.045)}.bd-state{min-height:min(420px,calc(100dvh - 32px));width:min(520px,100%);margin:0 auto;display:grid;place-items:center;align-content:center;gap:10px;padding:22px;border-radius:28px;text-align:center}.bd-spinner{width:38px;height:38px;border-radius:999px;border:4px solid color-mix(in srgb,var(--bd-primary) 18%,transparent);border-top-color:var(--bd-primary);animation:spin .8s linear infinite}.bd-state h2{margin:0;font-size:22px;font-weight:1000;letter-spacing:-.04em}.bd-state p{max-width:34rem;margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.bd-search-card{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;gap:8px;align-items:center;margin-top:2px;padding:8px;border-radius:24px}.bd-search{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:44px;padding:0 11px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.bd-search span{color:var(--muted,#64748b);font-size:17px;font-weight:1000}.bd-search input{min-height:42px;border:0;padding:0;border-radius:0;background:transparent;box-shadow:none;font-size:14px}.bd-icon-button,.bd-filter-button,.bd-add-inline{width:42px;height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;display:grid;place-items:center;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);font-size:18px;font-weight:1000;cursor:pointer;box-shadow:0 10px 22px rgba(15,23,42,.045)}.bd-add-inline{border-color:var(--bd-primary);background:var(--bd-primary);color:#fff;box-shadow:0 12px 28px color-mix(in srgb,var(--bd-primary) 22%,transparent)}.bd-slider-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.bd-filter-button{position:relative;background:color-mix(in srgb,var(--bd-primary) 8%,var(--card-bg,#fff));color:var(--bd-primary)}.bd-filter-button.active{background:var(--bd-primary);color:#fff;border-color:var(--bd-primary)}.bd-filter-button b{position:absolute;top:-4px;right:-4px;min-width:19px;height:19px;display:grid;place-items:center;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;border:2px solid var(--card-bg,#fff)}.status-dot-mini{width:10px;height:10px;border-radius:999px;display:inline-flex;box-shadow:0 0 0 4px color-mix(in srgb,var(--muted,#64748b) 10%,transparent)}.status-dot-mini.green{background:#22c55e}.status-dot-mini.orange{background:#f59e0b}.status-dot-mini.gray{background:var(--muted,#64748b)}.bd-filter-chips{display:flex;gap:7px;overflow-x:auto;padding:8px 1px 0;scrollbar-width:none}.bd-filter-chips::-webkit-scrollbar{display:none}.bd-filter-chips button{flex:0 0 auto;min-height:31px;border:0;border-radius:999px;padding:0 10px;background:color-mix(in srgb,var(--bd-primary) 11%,transparent);color:var(--bd-primary);font-size:11px;font-weight:950;white-space:nowrap;cursor:pointer}.bd-list{display:grid;gap:7px;margin-top:10px}.branch-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:22px;text-align:left;cursor:pointer;color:inherit}.branch-avatar{width:48px;height:48px;display:grid;place-items:center;border-radius:18px;background:color-mix(in srgb,var(--bd-primary) 12%,var(--surface,#fff));font-size:22px}.branch-main,.branch-main strong,.branch-main small,.branch-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.branch-main strong{color:var(--text,#111827);font-size:14px;font-weight:1000;letter-spacing:-.02em}.branch-main small{margin-top:3px;color:var(--muted,#64748b);font-size:12px;font-weight:850}.branch-main em{margin-top:3px;color:color-mix(in srgb,var(--muted,#64748b) 86%,var(--text,#111827));font-size:11px;font-weight:750;font-style:normal}.branch-side{display:flex;align-items:center;gap:7px}.branch-side i{color:var(--muted,#64748b);font-style:normal;font-weight:1000}.bd-chip{max-width:100%;display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}.bd-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.bd-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.bd-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.bd-chip.gray{background:color-mix(in srgb,var(--muted,#64748b) 14%,transparent);color:var(--muted,#64748b)}.bd-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.bd-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.bd-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.50);backdrop-filter:blur(12px)}.bd-sheet{width:min(760px,100%);max-height:min(88dvh,760px);overflow-y:auto;padding:14px;border-radius:28px 28px 22px 22px;box-shadow:0 30px 90px rgba(15,23,42,.32);animation:sheetIn .18s var(--ease)}.bd-sheet.small{width:min(520px,100%)}@keyframes sheetIn{from{transform:translateY(16px);opacity:.7}to{transform:translateY(0);opacity:1}}.bd-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:12px}.bd-sheet-head h2{margin:0;color:var(--text,#111827);font-size:21px;font-weight:1000;letter-spacing:-.05em}.bd-sheet-head p{margin:5px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5;font-weight:750}.bd-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;background:var(--surface,#fff);color:var(--text,#111827);font-weight:1000;cursor:pointer;flex:0 0 auto}.bd-form{display:grid;gap:10px}.bd-form label{display:grid;gap:6px}.bd-form span{color:var(--muted,#64748b);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em}.bd-menu-list{display:grid;gap:8px}.bd-menu-list button{width:100%;display:grid;grid-template-columns:42px minmax(0,1fr);column-gap:10px;align-items:center;min-height:58px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:18px;padding:9px;background:var(--surface,#fff);color:var(--text,#111827);text-align:left;cursor:pointer}.bd-menu-list button span{grid-row:span 2;width:42px;height:42px;display:grid;place-items:center;border-radius:16px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent);color:var(--bd-primary);font-weight:1000}.bd-menu-list button b,.bd-menu-list button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bd-menu-list button b{font-size:13px;font-weight:1000}.bd-menu-list button small{margin-top:2px;color:var(--muted,#64748b);font-size:11px;font-weight:750}.bd-menu-list button.active{border-color:color-mix(in srgb,var(--bd-primary) 34%,var(--border,rgba(0,0,0,.10)));background:color-mix(in srgb,var(--bd-primary) 8%,var(--surface,#fff))}.bd-sheet-actions{position:sticky;bottom:-14px;display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:14px;padding:12px 0 2px;background:linear-gradient(to top,var(--card-bg,var(--surface,#fff)) 70%,transparent)}.bd-sheet-actions button{min-height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;padding:0 16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff));color:var(--text,#111827);font-size:12px;font-weight:950;cursor:pointer}.bd-sheet-actions button.primary{border-color:var(--bd-primary);background:var(--bd-primary);color:#fff;box-shadow:0 14px 32px color-mix(in srgb,var(--bd-primary) 25%,transparent)}.bd-table-card,.bd-analysis,.bd-empty{padding:13px;border-radius:24px}.bd-table-card{margin-top:10px}.bd-table-scroll{width:100%;max-width:100%;overflow-x:auto;border-radius:18px;border:1px solid var(--border,rgba(0,0,0,.08))}.bd-table-scroll table{width:100%;min-width:920px;border-collapse:collapse;background:var(--card-bg,var(--surface,var(--bg,transparent)))}.bd-table-scroll th,.bd-table-scroll td{padding:10px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));vertical-align:top;text-align:left;font-size:13px}.bd-table-scroll th{background:var(--table-header-bg,color-mix(in srgb,var(--bd-primary) 6%,var(--card-bg,var(--surface,var(--bg,transparent)))));color:var(--table-header-text,var(--muted,var(--text)));font-size:11px;font-weight:1000;text-transform:uppercase;letter-spacing:.07em}.bd-table-scroll td strong,.bd-table-scroll td span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bd-table-scroll td span{margin-top:3px;color:var(--muted,#64748b);font-size:11px}.bd-table-actions{display:flex;gap:7px;overflow-x:auto}.bd-table-actions button{flex:0 0 auto;min-height:34px;border:1px solid var(--bd-primary);border-radius:999px;padding:0 12px;background:var(--bd-primary);color:#fff;font-size:11px;font-weight:950;cursor:pointer}.bd-empty-table{padding:22px;text-align:center;color:var(--muted,#64748b);font-weight:850}.bd-analysis-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin-top:10px}.bd-analysis span,.bd-section-head span{color:var(--muted,#64748b);font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.bd-analysis strong{display:block;margin-top:8px;font-size:clamp(22px,7vw,30px);line-height:1;font-weight:1000;letter-spacing:-.06em;overflow-wrap:anywhere}.bd-analysis p{margin:8px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5}.bd-analysis-list{display:grid;gap:10px;margin-top:12px}.bd-analysis-list section{display:grid;gap:6px;padding:10px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent)}.bd-analysis-list section>div:first-child{display:flex;justify-content:space-between;gap:10px}.bd-analysis-list b,.bd-analysis-list small{font-size:12px}.bd-analysis-list small{color:var(--muted,#64748b);font-weight:850}.bd-progress{height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted,#64748b) 18%,transparent);overflow:hidden}.bd-progress i{display:block;height:100%;border-radius:inherit;background:var(--bd-primary)}.bd-empty{display:grid;place-items:center;align-content:center;gap:8px;min-height:220px;text-align:center;border-style:dashed}.bd-empty div{width:56px;height:56px;display:grid;place-items:center;border-radius:22px;background:color-mix(in srgb,var(--bd-primary) 12%,var(--surface,#fff));font-size:28px}.bd-empty h3{margin:0;font-size:18px;font-weight:1000}.bd-empty p{margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.bd-recent{margin-top:10px;border-radius:24px;padding:12px}.bd-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.bd-section-head h2{margin:0;color:var(--text,#111827);font-size:15px;font-weight:1000;letter-spacing:-.03em}.bd-recent-list{display:grid;gap:7px}.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;border-radius:18px;padding:9px}.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent)}.recent-row b,.recent-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row b{font-size:12px;font-weight:1000}.recent-row small{font-size:11px;color:var(--muted,#64748b);font-weight:800}@media (min-width:680px){.bd-page{padding:calc(12px * var(--local-density-scale,1));padding-bottom:44px}.bd-search-card{grid-template-columns:auto minmax(0,1fr) 48px 48px 48px}.bd-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.branch-row{border-radius:24px;padding:12px}.bd-analysis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-analysis.wide{grid-column:span 2}.bd-sheet-backdrop{place-items:center;padding:18px}.bd-sheet{border-radius:28px;padding:18px}.bd-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:1040px){.bd-page{padding:calc(16px * var(--local-density-scale,1));padding-bottom:48px}.bd-search-card,.bd-list,.bd-analysis-grid,.bd-table-card,.bd-filter-chips,.bd-recent{max-width:1180px;margin-left:auto;margin-right:auto}.bd-list{grid-template-columns:repeat(3,minmax(0,1fr))}.bd-analysis-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.bd-analysis.wide{grid-column:span 2}.bd-recent-list{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (max-width:520px){.bd-page{padding:calc(7px * var(--local-density-scale,1));padding-bottom:max(38px,env(safe-area-inset-bottom))}.bd-icon-button,.bd-filter-button,.bd-add-inline{width:40px;height:40px}.branch-row{grid-template-columns:auto minmax(0,1fr);align-items:start}.branch-side{grid-column:1/-1;justify-content:flex-end}.bd-sheet{border-radius:24px 24px 18px 18px;padding:12px}.bd-sheet-actions{display:grid;grid-template-columns:minmax(0,1fr)}.bd-sheet-actions button{width:100%}}
-
+@keyframes spin{to{transform:rotate(360deg)}}
+.bd-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;padding:8px;padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--bd-primary) 10%,transparent),transparent 34rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overflow-x:hidden}.bd-page *{box-sizing:border-box;min-width:0}.bd-page button,.bd-page input{font:inherit}.bd-page button{cursor:pointer;-webkit-tap-highlight-color:transparent}.bd-search-card,.bd-card,.bd-state,.bd-search-results,.branch-row,.bd-sheet{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.1));box-shadow:0 12px 30px rgba(15,23,42,.05)}
+.bd-search-card{position:sticky;top:6px;z-index:20;display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;align-items:center;gap:7px;padding:7px;border-radius:22px;backdrop-filter:blur(16px)}.status-dot-mini{width:9px;height:9px;border-radius:99px}.status-dot-mini.green{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.12)}.status-dot-mini.gray{background:#94a3b8}.bd-search{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:43px;padding:0 12px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.bd-search>span{font-size:18px;color:var(--muted,#64748b);font-weight:1000}.bd-search input{width:100%;border:0;outline:0;background:transparent;color:var(--text,#111827);font-size:14px;font-weight:750}.bd-search input::placeholder{color:var(--muted,#64748b)}.bd-clear,.bd-refresh,.bd-more{width:40px;height:40px;border-radius:99px;border:1px solid var(--border,rgba(0,0,0,.1));background:var(--surface,#fff);color:var(--text,#111827);font-size:18px;font-weight:1000}.bd-refresh{background:var(--bd-primary);border-color:var(--bd-primary);color:#fff}
+.bd-hero{position:relative;min-height:270px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--bd-primary) 95%,#111827),color-mix(in srgb,var(--bd-primary) 55%,#0f172a));box-shadow:0 22px 60px color-mix(in srgb,var(--bd-primary) 20%,transparent);background-position:center;background-size:cover}.bd-hero:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.18),transparent 26%);pointer-events:none}.bd-hero-copy,.bd-hero-stats{position:relative;z-index:1}.bd-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}.bd-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}.bd-hero p{margin:0;font-size:14px}.bd-branch-name{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}.bd-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}.bd-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}.bd-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}.bd-hero-stats b{font-size:15px}
+.bd-quick-actions{display:grid;grid-template-columns:repeat(5,minmax(74px,1fr));gap:8px;margin-top:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}.bd-quick-actions::-webkit-scrollbar{display:none}.bd-quick-actions button{min-height:76px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:22px;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);display:grid;place-items:center;align-content:center;gap:7px;box-shadow:0 10px 24px rgba(15,23,42,.04)}.bd-quick-actions span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 11%,transparent);color:var(--bd-primary);font-size:17px;font-weight:1000}.bd-quick-actions b{font-size:11px;font-weight:950;white-space:nowrap}
+.bd-dashboard-grid{display:grid;gap:10px;margin-top:10px}.bd-card{padding:14px;border-radius:26px}.bd-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}.bd-section-head span{display:block;color:var(--muted,#64748b);font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.bd-section-head h2{margin:3px 0 0;font-size:17px;font-weight:1000;letter-spacing:-.035em}.bd-section-head>button,.bd-section-head>b{border:0;border-radius:999px;padding:7px 10px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent);color:var(--bd-primary);font-size:10px;font-weight:950}.attendance-card{background:linear-gradient(145deg,color-mix(in srgb,var(--bd-primary) 7%,var(--surface,#fff)),var(--surface,#fff))}.attendance-main strong{display:block;font-size:46px;line-height:1;font-weight:1000;letter-spacing:-.07em}.attendance-main span{color:var(--muted,#64748b);font-size:12px;font-weight:850}.attendance-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:15px}.attendance-grid div{padding:10px 7px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);text-align:center}.attendance-grid b,.attendance-grid small{display:block}.attendance-grid b{font-size:17px}.attendance-grid small{margin-top:3px;color:var(--muted,#64748b);font-size:9px;font-weight:850}
+.bd-stack{display:grid;gap:7px}.event-row,.notice-row{width:100%;border:0;border-radius:17px;padding:9px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:left}.event-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:9px;align-items:center}.event-row time{font-size:10px;font-weight:950;color:var(--bd-primary)}.event-row b,.event-row small,.notice-row b,.notice-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-row b,.notice-row b{font-size:12px;font-weight:1000}.event-row small,.notice-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}.notice-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;align-items:center}.notice-row>span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent)}.community-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.metric{padding:13px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent)}.metric span,.metric strong,.metric small{display:block}.metric span{font-size:18px}.metric strong{margin-top:10px;font-size:24px;line-height:1;font-weight:1000;letter-spacing:-.05em}.metric small{margin-top:4px;color:var(--muted,#64748b);font-size:10px;font-weight:850}
+.bd-recent{margin-top:10px}.bd-recent-list{display:grid;gap:7px}.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;padding:9px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 5%,transparent)}.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent)}.recent-row b,.recent-row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row b{font-size:12px}.recent-row small{font-size:10px;color:var(--muted,#64748b);font-weight:750}.mini-empty{min-height:110px;display:grid;place-items:center;align-content:center;text-align:center;color:var(--muted,#64748b)}.mini-empty span{font-size:26px}.mini-empty p{margin:6px 0 0;font-size:11px;font-weight:800}
+.bd-search-results{margin-top:10px;padding:12px;border-radius:26px}.branch-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;margin-top:7px;padding:10px;border-radius:20px;text-align:left;color:inherit}.branch-avatar{width:46px;height:46px;display:grid;place-items:center;border-radius:17px;background:color-mix(in srgb,var(--bd-primary) 11%,transparent);font-size:21px}.branch-main strong,.branch-main small,.branch-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.branch-main strong{font-size:13px;font-weight:1000}.branch-main small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:800}.branch-main em{margin-top:3px;color:var(--bd-primary);font-size:9px;font-style:normal;font-weight:900}.branch-side{display:flex;align-items:center;gap:7px}.branch-side i{font-style:normal;color:var(--muted,#64748b)}.bd-chip{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:950}.bd-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.bd-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.bd-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.bd-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.bd-chip.gray{background:rgba(100,116,139,.12);color:#64748b}.bd-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.bd-empty{min-height:220px;display:grid;place-items:center;align-content:center;text-align:center}.bd-empty div{font-size:28px}.bd-empty h3{margin:8px 0 0}.bd-empty p{max-width:30rem;margin:5px 0 0;color:var(--muted,#64748b);font-size:12px}
+.bd-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.5);backdrop-filter:blur(12px)}.bd-sheet{width:min(520px,100%);padding:14px;border-radius:28px}.bd-sheet-head{display:flex;justify-content:space-between;gap:10px}.bd-sheet-head h2{margin:0;font-size:20px}.bd-sheet-head p{margin:4px 0 0;color:var(--muted,#64748b);font-size:11px}.bd-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:99px;background:var(--surface,#fff);color:inherit}.bd-menu-list{display:grid;gap:8px;margin-top:12px}.bd-menu-list button{display:grid;grid-template-columns:40px minmax(0,1fr);column-gap:10px;align-items:center;width:100%;padding:9px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:18px;background:var(--surface,#fff);color:inherit;text-align:left}.bd-menu-list button>span{grid-row:span 2;width:40px;height:40px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent);color:var(--bd-primary)}.bd-menu-list b,.bd-menu-list small{display:block}.bd-menu-list b{font-size:12px}.bd-menu-list small{color:var(--muted,#64748b);font-size:10px}.bd-state{min-height:min(420px,calc(100dvh - 20px));display:grid;place-items:center;align-content:center;text-align:center;border-radius:28px}.bd-spinner{width:38px;height:38px;border:4px solid color-mix(in srgb,var(--bd-primary) 18%,transparent);border-top-color:var(--bd-primary);border-radius:99px;animation:spin .8s linear infinite}.bd-state h2{margin:10px 0 0}.bd-state p{max-width:32rem;margin:5px 0 0;color:var(--muted,#64748b);font-size:12px}
+@media(min-width:700px){.bd-page{padding:12px}.bd-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-sheet-backdrop{place-items:center}.bd-hero{min-height:320px;padding:30px}.community-grid{grid-template-columns:repeat(4,1fr)}}
+@media(min-width:1080px){.bd-page{padding:16px}.bd-search-card,.bd-hero,.bd-quick-actions,.bd-dashboard-grid,.bd-recent,.bd-search-results{max-width:1180px;margin-left:auto;margin-right:auto}.bd-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-recent-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.bd-page{padding:7px}.bd-search-card{grid-template-columns:auto minmax(0,1fr) auto auto}.bd-clear{display:none}.bd-quick-actions{grid-template-columns:repeat(5,82px)}.bd-hero{min-height:290px;padding:18px}.bd-hero-stats{gap:6px}.attendance-grid{grid-template-columns:repeat(2,1fr)}.branch-row{grid-template-columns:auto minmax(0,1fr)}.branch-side{grid-column:1/-1;justify-content:flex-end}}
 `;

@@ -1,21 +1,16 @@
 "use client";
 
 /**
- * app/teacher/modules/Teacherdashboard.tsx
+ * app/teacher/modules/TeacherDashboard.tsx
  * ---------------------------------------------------------
- * ELEEVEON TEACHER DASHBOARD V2
+ * ELEEVEON TEACHER DASHBOARD V1
  * ---------------------------------------------------------
- * Golden Standard Teacher Home.
- * Teacher-scoped, offline-first, mobile-first, theme-safe.
+ * School-first, teacher-focused, offline-first and theme-safe.
  *
- * Workspace-session aligned:
- * - Prefer the selected workspace session written by /select-role and opened
- *   by RolePortalShell.
- * - Uses selected teacherLocalId, schoolId and branchId first.
- * - Falls back to ActiveMembershipProvider and ActiveBranchContext only if
- *   the selected workspace does not provide a value.
- * - Receives NAV_SECTIONS from app/teacher/page.tsx so dashboard modules
- *   always match the actual Teacher Portal menu.
+ * - Empty search shows a useful teacher home, not module cards.
+ * - Typing searches the same navSections used by RolePortalShell.
+ * - Teacher, school and branch identity resolve from workspace/context/Dexie.
+ * - Dashboard data is restricted to the active teacher where possible.
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -27,84 +22,83 @@ import { useActiveBranch } from "../../context/active-branch-context";
 import { useActiveMembership } from "../../context/active-membership-context";
 import { db } from "../../lib/db/db";
 import type { RoleNavSection } from "../../components/role-portals/RolePortalShell";
+import { useDataRevision } from "../../hooks/useDataRevision";
+import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
 
 type AnyRow = Record<string, any>;
-type ViewMode = "cards" | "table" | "analytics";
-type AreaFilter = "all" | "teaching" | "learners" | "records" | "communication" | "timetable" | "finance" | "account" | "other";
-type Tone = "green" | "red" | "blue" | "gray" | "orange" | "purple";
+type Tone = "green" | "blue" | "orange" | "purple" | "gray" | "red";
 
 type RouteProps = {
   navigate?: (key: string) => void;
   navSections?: RoleNavSection[];
 };
 
-type DashboardModule = {
+type SearchModule = {
   key: string;
   label: string;
   icon: string;
-  area: Exclude<AreaFilter, "all">;
-  value: string | number;
+  section: string;
   note: string;
-  tone: Tone;
-  routeKey: string;
 };
 
-type CountMetric = {
-  value: string | number;
-  note: string;
-  tone: Tone;
-};
-
-const HIDDEN_DASHBOARD_KEYS = new Set(["teacherDashboard"]);
+const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
+const HIDDEN_KEYS = new Set(["teacherHome", "teacherDashboard"]);
 
 const TABLE_NAMES = [
+  "schools",
+  "branches",
+  "appUsers",
   "teachers",
   "classes",
-  "subjects",
   "classTeachers",
   "classSubjects",
+  "subjects",
   "studentEnrollments",
-  "students",
   "attendance",
   "teacherAttendance",
-  "assignments",
-  "assignmentSubmissions",
-  "courseOutlines",
-  "lessonNotes",
   "assessmentEntries",
   "computedResults",
   "reportCards",
-  "reportCardItems",
-  "teacherRemarks",
-  "studentRemarks",
   "announcements",
-  "messageThreads",
-  "messages",
   "calendarEvents",
   "scheduleTimetables",
   "scheduleSessions",
-  "staffPayrollProfiles",
-  "payrollRuns",
+  "assignments",
+  "courseOutlines",
   "payrollItems",
   "staffPaymentRecords",
+  "userMemberships",
+  "memberships",
+  "schoolBranchSettings",
+  "portalHighlights",
+  "mediaAssets",
 ] as const;
 
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
+function clean(value: unknown) {
+  return value === null || value === undefined ? "" : String(value).trim();
+}
 
-type OpenWorkspaceSession = {
-  membership?: AnyRow | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: number | string | null;
-  branchId?: number | string | null;
-  teacherLocalId?: number | string | null;
-  studentLocalId?: number | string | null;
-  parentLocalId?: number | string | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
-};
+function sameId(a: unknown, b: unknown) {
+  const left = clean(a);
+  const right = clean(b);
+  return Boolean(left && right && left === right);
+}
+
+function n(value: unknown) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function text(value: unknown, fallback = "") {
+  return clean(value) || fallback;
+}
+
+function active(row?: AnyRow | null) {
+  if (!row || row.isDeleted === true || row.active === false) return false;
+  return !["deleted", "archived", "inactive", "disabled", "cancelled"].includes(
+    clean(row.status).toLowerCase(),
+  );
+}
 
 function safeRead(key: string) {
   if (typeof window === "undefined") return null;
@@ -118,7 +112,6 @@ function safeRead(key: string) {
 function safeJson<T>(key: string): T | null {
   const raw = safeRead(key);
   if (!raw) return null;
-
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -126,481 +119,120 @@ function safeJson<T>(key: string): T | null {
   }
 }
 
-function readOpenWorkspaceSession(): OpenWorkspaceSession | null {
-  return safeJson<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership(): AnyRow | null {
-  return safeJson<AnyRow>("activeMembership");
-}
-
-function toPositiveNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function firstPositiveNumber(...values: unknown[]) {
-  for (const value of values) {
-    const parsed = toPositiveNumber(value);
-    if (parsed) return parsed;
-  }
-  return null;
-}
-
-function workspaceMembership(openWorkspace?: OpenWorkspaceSession | null, activeMembership?: AnyRow | null) {
-  return openWorkspace?.membership || activeMembership || readStoredActiveMembership() || null;
-}
-
-function selectedTeacherId(openWorkspace?: OpenWorkspaceSession | null, activeMembership?: AnyRow | null) {
-  const membership = workspaceMembership(openWorkspace, activeMembership);
-
-  return firstPositiveNumber(
-    openWorkspace?.teacherLocalId,
-    membership?.teacherLocalId,
-    membership?.localTeacherId,
-    membership?.teacherId,
-    membership?.teacher?.id,
-    membership?.staffLocalId,
-    safeRead("activeTeacherId")
-  );
-}
-
-function selectedSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: AnyRow | null;
-  activeSchoolId?: any;
-  activeSchool?: AnyRow | null;
-  settings?: AnyRow | null;
-}) {
-  const membership = workspaceMembership(args.openWorkspace, args.activeMembership);
-
-  return firstPositiveNumber(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeRead("activeSchoolId")
-  );
-}
-
-function selectedBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: AnyRow | null;
-  activeBranchId?: any;
-  activeBranch?: AnyRow | null;
-  settings?: AnyRow | null;
-}) {
-  const membership = workspaceMembership(args.openWorkspace, args.activeMembership);
-
-  return firstPositiveNumber(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeRead("activeBranchId")
-  );
-}
-
-function selectedTeacherName(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: AnyRow | null;
-  teacher?: AnyRow | null;
-  user?: AnyRow | null;
-}) {
-  const membership = workspaceMembership(args.openWorkspace, args.activeMembership);
-
-  return text(
-    args.teacher?.fullName ||
-      args.teacher?.name ||
-      args.openWorkspace?.memberName ||
-      args.openWorkspace?.fullName ||
-      args.openWorkspace?.userName ||
-      membership?.fullName ||
-      membership?.memberName ||
-      membership?.userName ||
-      args.user?.fullName ||
-      args.user?.name ||
-      args.user?.email,
-    "Teacher"
-  );
-}
-
-function n(value: any) {
-  const parsed = Number(value || 0);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function text(value: any, fallback = "") {
-  return String(value || "").trim() || fallback;
-}
-
-function idOf(row?: AnyRow | null) {
-  return row?.id ?? row?.localId ?? row?.cloudId ?? row?.payload?.id ?? row?.payload?.localId;
-}
-
-function sameId(a: any, b: any) {
-  return String(a ?? "") === String(b ?? "");
-}
-
-function sameAccount(row: AnyRow, accountId?: string | null) {
-  return row && row.isDeleted !== true && (!row.accountId || !accountId || row.accountId === accountId);
-}
-
-function scoped(row: AnyRow, args: { accountId?: string | null; schoolId?: any; branchId?: any }) {
-  if (!sameAccount(row, args.accountId)) return false;
-
-  const rowSchoolId = row.schoolId ?? row.schoolLocalId ?? row.payload?.schoolId;
-  const rowBranchId = row.branchId ?? row.branchLocalId ?? row.payload?.branchId;
-
-  if (args.schoolId && rowSchoolId && !sameId(rowSchoolId, args.schoolId)) return false;
-  if (args.branchId && rowBranchId && !sameId(rowBranchId, args.branchId)) return false;
-
-  return true;
-}
-
-function activeRow(row: AnyRow) {
-  const status = String(row?.status || "").toLowerCase();
-  return (
-    row?.isDeleted !== true &&
-    row?.active !== false &&
-    row?.disabled !== true &&
-    !["deleted", "archived", "inactive", "disabled", "withdrawn", "cancelled"].includes(status)
-  );
-}
-
-function rowName(row?: AnyRow | null) {
-  return text(row?.fullName || row?.name || row?.title || row?.label || row?.email, "Unnamed");
-}
-
-function dateLabel(value?: number | string | null) {
-  if (!value) return "Not set";
-  const time = typeof value === "number" ? value : new Date(value).getTime();
-  if (!Number.isFinite(time)) return "Not set";
-
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(new Date(time));
-  } catch {
-    return "Not set";
-  }
-}
-
-function money(value: any, currency = "GHS") {
-  const amount = n(value);
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: currency || "GHS",
-      maximumFractionDigits: 0,
-    }).format(amount);
-  } catch {
-    return `${currency || "GHS"} ${amount.toLocaleString()}`;
-  }
-}
-
-function todayKey() {
-  try {
-    return new Date().toISOString().slice(0, 10);
-  } catch {
-    return "";
-  }
-}
-
-async function safeArray<T = AnyRow>(tableName: string): Promise<T[]> {
+async function safeArray(tableName: string): Promise<AnyRow[]> {
   const table = (db as any)[tableName];
   return table?.toArray ? table.toArray() : [];
 }
 
-function count(rows: AnyRow[]) {
-  return rows.filter(activeRow).length;
-}
-
-function uniqueCount(rows: AnyRow[], key: string) {
-  return new Set(
-    rows
-      .filter(activeRow)
-      .map((row) => row[key])
-      .filter((value) => value !== undefined && value !== null && value !== "")
-  ).size;
-}
-
-function average(rows: AnyRow[], fields: string[]) {
-  const values = rows
-    .map((row) => fields.map((field) => n(row[field])).find((value) => value > 0) || 0)
-    .filter((value) => value > 0);
-
-  if (!values.length) return 0;
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
-}
-
-function teacherLinkedRows(rows: AnyRow[], teacherId?: any) {
-  if (!teacherId) return [];
-  return rows.filter((row) =>
-    sameId(row.teacherId, teacherId) ||
-    sameId(row.teacherLocalId, teacherId) ||
-    sameId(row.staffId, teacherId) ||
-    sameId(row.staffLocalId, teacherId) ||
-    sameId(row.primaryTeacherId, teacherId)
+function fullName(row?: AnyRow | null, fallback = "Teacher") {
+  return text(
+    row?.fullName ||
+      row?.name ||
+      [row?.firstName, row?.middleName, row?.lastName].filter(Boolean).join(" ") ||
+      row?.email,
+    fallback,
   );
 }
 
-function statusTone(status?: string): Tone {
-  const value = String(status || "").toLowerCase();
-  if (["active", "paid", "present", "submitted", "completed", "published", "approved", "success"].includes(value)) return "green";
-  if (["failed", "overdue", "cancelled", "absent", "withdrawn", "rejected"].includes(value)) return "red";
-  if (["pending", "processing", "draft", "late", "partial"].includes(value)) return "orange";
-  if (["scheduled", "issued", "promoted"].includes(value)) return "blue";
-  return "gray";
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
 }
 
-function areaFromSectionTitle(title: string): Exclude<AreaFilter, "all"> {
-  const value = String(title || "").toLowerCase().trim();
-  if (value.includes("teaching")) return "teaching";
-  if (value.includes("learner")) return "learners";
-  if (value.includes("record")) return "records";
-  if (value.includes("communication")) return "communication";
-  if (value.includes("timetable")) return "timetable";
-  if (value.includes("finance")) return "finance";
-  if (value.includes("account")) return "account";
-  return "other";
+function dateTime(value: unknown) {
+  if (!value) return "Not scheduled";
+  const date = new Date(value as any);
+  if (!Number.isFinite(date.getTime())) return "Not scheduled";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
-function areaLabel(area: string) {
-  const labels: Record<string, string> = {
-    all: "All areas",
-    teaching: "Teaching",
-    learners: "Learners",
-    records: "Records",
-    communication: "Communication",
-    timetable: "Timetable",
-    finance: "Finance",
-    account: "Account",
-    other: "Other",
+function greeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
+function moduleNote(key: string) {
+  const notes: Record<string, string> = {
+    mySubjects: "Open subjects and class-subject assignments.",
+    myClasses: "View the classes assigned to you.",
+    studentAttendance: "Record attendance for your learners.",
+    assessmentEntry: "Enter and review assessment scores.",
+    courseOutline: "Plan and follow teaching progress.",
+    reportRemarks: "Prepare student report remarks.",
+    myAttendance: "Review your attendance and clock records.",
+    salary: "View salary, payroll and payment records.",
+    announcements: "Read school and branch announcements.",
+    calendar: "Open events, reminders and academic dates.",
+    teacherTimetable: "Review your teaching timetable.",
+    messages: "Open conversations and school messages.",
   };
-  return labels[area] || area;
+  return notes[key] || "Open this teacher workspace module.";
+}
+
+function resolveMediaUrl(asset?: AnyRow | null) {
+  return text(
+    asset?.publicUrl ||
+      asset?.remoteUrl ||
+      asset?.previewDataUrl ||
+      asset?.thumbnailDataUrl ||
+      asset?.localObjectUrl,
+  );
+}
+
+function imageFromRecord(record: AnyRow | null, assets: AnyRow[]) {
+  if (!record) return "";
+  const direct = text(
+    record.dashboardHeroImage ||
+      record.dashboardBannerImage ||
+      record.bannerImage ||
+      record.photo ||
+      record.image ||
+      record.fallbackImageUrl,
+  );
+  if (direct) return direct;
+
+  const ids = [
+    record.dashboardHeroImageMediaId,
+    record.dashboardBannerImageMediaId,
+    record.bannerImageMediaId,
+    record.photoMediaId,
+    record.mediaAssetId,
+    record.posterMediaAssetId,
+  ].filter(Boolean);
+
+  for (const id of ids) {
+    const asset = assets.find((item) => sameId(item.id, id));
+    const url = resolveMediaUrl(asset);
+    if (url) return url;
+  }
+  return "";
 }
 
 function Chip({ children, tone = "gray" }: { children: React.ReactNode; tone?: Tone }) {
   return <span className={`td-chip ${tone}`}>{children}</span>;
 }
 
-function SliderIcon() {
-  return (
-    <svg className="td-slider-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 7h9" />
-      <path d="M17 7h3" />
-      <circle cx="15" cy="7" r="2" />
-      <path d="M4 17h3" />
-      <path d="M11 17h9" />
-      <circle cx="9" cy="17" r="2" />
-    </svg>
-  );
-}
-
-function Empty({ title, text: body }: { title: string; text: string }) {
-  return (
-    <section className="td-empty">
-      <div>👨‍🏫</div>
-      <h3>{title}</h3>
-      <p>{body}</p>
-    </section>
-  );
-}
-
-function buildNavModules(navSections?: RoleNavSection[]): Omit<DashboardModule, "value" | "note" | "tone">[] {
-  const unique = new Map<string, Omit<DashboardModule, "value" | "note" | "tone">>();
-
-  (navSections || []).forEach((section) => {
-    const area = areaFromSectionTitle(section.title);
-
-    section.items.forEach((item) => {
-      if (HIDDEN_DASHBOARD_KEYS.has(item.key)) return;
-      if (unique.has(item.key)) return;
-
-      unique.set(item.key, {
-        key: item.key,
-        label: item.label,
-        icon: item.icon,
-        area,
-        routeKey: item.key,
-      });
-    });
-  });
-
-  return [...unique.values()];
-}
-
-function metricFor(routeKey: string, rows: Record<string, AnyRow[]>, summary: AnyRow): CountMetric {
-  const metricMap: Record<string, CountMetric> = {
-    teacherClasses: {
-      value: summary.classes,
-      note: `${summary.students} student(s) connected through your classes.`,
-      tone: summary.classes ? "blue" : "gray",
-    },
-    teacherSubjects: {
-      value: summary.subjects,
-      note: `${summary.classSubjects} class-subject assignment(s).`,
-      tone: summary.subjects ? "green" : "gray",
-    },
-    attendance: {
-      value: summary.presentToday || summary.attendance,
-      note: `${summary.todayAttendance} attendance record(s) today, ${summary.absent} absent/excused total.`,
-      tone: summary.absent ? "orange" : summary.attendance ? "green" : "gray",
-    },
-    assessmentEntry: {
-      value: summary.assessments,
-      note: `${summary.averageScore ? `${summary.averageScore}% average score. ` : ""}${summary.results} computed result(s).`,
-      tone: summary.assessments ? "blue" : "gray",
-    },
-    assignments: {
-      value: summary.assignments,
-      note: `${summary.submissions} submission record(s).`,
-      tone: summary.assignments ? "purple" : "gray",
-    },
-    courseOutline: {
-      value: summary.courseOutlines,
-      note: "Course outlines assigned or created for your subjects/classes.",
-      tone: summary.courseOutlines ? "blue" : "gray",
-    },
-    teacherStudents: {
-      value: summary.students,
-      note: "Students connected through your class/subject assignments.",
-      tone: summary.students ? "green" : "gray",
-    },
-    studentProgress: {
-      value: summary.averageScore ? `${summary.averageScore}%` : summary.results,
-      note: `${summary.results} computed result record(s).`,
-      tone: summary.results ? "blue" : "gray",
-    },
-    teacherRemarks: {
-      value: summary.remarks,
-      note: "Behaviour, report remarks and teacher comments.",
-      tone: summary.remarks ? "green" : "gray",
-    },
-    teacherReports: {
-      value: summary.reports,
-      note: `${summary.reportItems} report card item(s).`,
-      tone: summary.reports ? "blue" : "gray",
-    },
-    teacherBroadsheets: {
-      value: summary.results,
-      note: "Compiled student result records for broadsheet views.",
-      tone: summary.results ? "purple" : "gray",
-    },
-    lessonNotes: {
-      value: summary.lessonNotes,
-      note: "Lesson notes and teaching preparation records.",
-      tone: summary.lessonNotes ? "green" : "gray",
-    },
-    announcements: {
-      value: summary.announcements,
-      note: "School and branch announcements visible to teachers.",
-      tone: summary.announcements ? "blue" : "gray",
-    },
-    messages: {
-      value: summary.messages,
-      note: "Teacher conversations and communication threads.",
-      tone: summary.messages ? "green" : "gray",
-    },
-    calendar: {
-      value: summary.events,
-      note: "Calendar events in your school/branch.",
-      tone: summary.events ? "blue" : "gray",
-    },
-    classTimetable: {
-      value: summary.classSessions,
-      note: "Class timetable sessions connected to your classes.",
-      tone: summary.classSessions ? "purple" : "gray",
-    },
-    teacherTimetable: {
-      value: summary.teacherSessions,
-      note: "Your personal timetable sessions.",
-      tone: summary.teacherSessions ? "green" : "gray",
-    },
-    teacherSalary: {
-      value: summary.salaryAmount ? money(summary.salaryAmount, summary.currencyCode) : "Open",
-      note: `${summary.payrollItems} payroll item(s), ${summary.salaryPayments} payment record(s).`,
-      tone: summary.salaryPayments ? "green" : summary.salaryAmount ? "orange" : "gray",
-    },
-    teacherPaymentHistory: {
-      value: summary.salaryPayments,
-      note: `${money(summary.salaryPaid, summary.currencyCode)} total salary payment records.`,
-      tone: summary.salaryPayments ? "green" : "gray",
-    },
-    teacherProfile: {
-      value: "Open",
-      note: "Your teacher identity and contact profile.",
-      tone: "purple",
-    },
-    teacherSettings: {
-      value: "Open",
-      note: "Your local teacher portal preferences.",
-      tone: "gray",
-    },
-  };
-
-  if (metricMap[routeKey]) return metricMap[routeKey];
-
-  const guessedRows = rows[routeKey] || [];
-  if (guessedRows.length) {
-    return { value: count(guessedRows), note: "Auto-counted from matching local table.", tone: count(guessedRows) ? "green" : "gray" };
-  }
-
-  return { value: "Open", note: "Module is listed from Teacher navigation. Add a metric mapping when data is ready.", tone: "gray" };
-}
-
-export default function Teacherdashboard({ navigate, navSections }: RouteProps) {
+export default function TeacherDashboard({ navigate, navSections }: RouteProps) {
   const router = useRouter();
-  const { accountId, authenticated, loading: accountLoading, user } = useAccount() as any;
+  const revision = useDataRevision();
+  const { loading, setLoading } = useBackgroundLoader();
+  const { accountId, authenticated, loading: accountLoading, user } = useAccount();
   const { settings, loading: settingsLoading } = useSettings();
   const { activeSchoolId, activeBranchId, activeSchool, activeBranch } = useActiveBranch();
-  const { activeTeacherId, activeMembership } = useActiveMembership();
+  const { activeMembership } = useActiveMembership();
+
   const primary = settings?.primaryColor || "var(--primary-color,#2563eb)";
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedSchoolId({
-    openWorkspace,
-    activeMembership,
-    activeSchoolId,
-    activeSchool,
-    settings: settings as AnyRow,
-  });
-
-  const branchId = selectedBranchId({
-    openWorkspace,
-    activeMembership,
-    activeBranchId,
-    activeBranch,
-    settings: settings as AnyRow,
-  });
-
-  const teacherId =
-    selectedTeacherId(openWorkspace, activeMembership) ||
-    toPositiveNumber(activeTeacherId);
-
-  const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<ViewMode>("cards");
   const [query, setQuery] = useState("");
-  const [area, setArea] = useState<AreaFilter>("all");
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [rowsByTable, setRowsByTable] = useState<Record<string, AnyRow[]>>({});
 
   useEffect(() => {
-    if (accountLoading) return;
-    if (!authenticated || !accountId) router.replace("/login");
+    if (!accountLoading && (!authenticated || !accountId)) router.replace("/login");
   }, [accountLoading, authenticated, accountId, router]);
 
   async function load() {
@@ -609,18 +241,12 @@ export default function Teacherdashboard({ navigate, navSections }: RouteProps) 
       setLoading(false);
       return;
     }
-
     setLoading(true);
-
     try {
-      const loaded = await Promise.all(
-        TABLE_NAMES.map(async (tableName) => {
-          const rows = await safeArray(tableName);
-          return [tableName, rows.filter((row) => scoped(row, { accountId, schoolId, branchId }))] as const;
-        })
+      const entries = await Promise.all(
+        TABLE_NAMES.map(async (tableName) => [tableName, await safeArray(tableName)] as const),
       );
-
-      setRowsByTable(Object.fromEntries(loaded));
+      setRowsByTable(Object.fromEntries(entries));
     } catch (error) {
       console.error("Failed to load teacher dashboard:", error);
     } finally {
@@ -632,429 +258,397 @@ export default function Teacherdashboard({ navigate, navSections }: RouteProps) 
     if (accountLoading || settingsLoading) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, accountId, schoolId, branchId, teacherId, accountLoading, settingsLoading]);
+  }, [authenticated, accountId, accountLoading, settingsLoading, revision]);
 
-  const rows = rowsByTable;
+  const resolved = useMemo(() => {
+    const rows = rowsByTable;
+    const openWorkspace = safeJson<AnyRow>(OPEN_WORKSPACE_KEY);
+    const storedMembership = safeJson<AnyRow>("activeMembership");
+    const membership = openWorkspace?.membership || activeMembership || storedMembership || null;
 
-  const teacher = useMemo(() => {
-    const teachers = rows.teachers || [];
-    const membership = workspaceMembership(openWorkspace, activeMembership);
-    const memberEmail = membership?.email || membership?.teacherEmail || (openWorkspace as any)?.email;
+    const memberships = [
+      ...(rows.userMemberships || []),
+      ...(rows.memberships || []),
+    ].filter(active);
 
-    return (
-      teachers.find((row) => teacherId && sameId(idOf(row), teacherId)) ||
-      teachers.find((row) => memberEmail && sameId(row.email || row.teacherEmail, memberEmail)) ||
-      null
+    const currentMembership =
+      membership ||
+      memberships.find((item) =>
+        sameId(item.userId || item.appUserId, (user as AnyRow)?.id),
+      ) ||
+      memberships.find((item) => clean(item.role).toLowerCase() === "teacher") ||
+      null;
+
+    const schoolId = text(
+      openWorkspace?.schoolId ||
+        currentMembership?.schoolId ||
+        activeSchoolId ||
+        (activeSchool as AnyRow)?.id ||
+        (settings as AnyRow)?.schoolId ||
+        safeRead("activeSchoolId"),
     );
-  }, [activeMembership, openWorkspace, rows.teachers, teacherId]);
 
-  const teacherClassLinks = useMemo(() => teacherLinkedRows(rows.classTeachers || [], teacherId), [rows.classTeachers, teacherId]);
-  const teacherSubjectLinks = useMemo(() => teacherLinkedRows(rows.classSubjects || [], teacherId), [rows.classSubjects, teacherId]);
+    const branchId = text(
+      openWorkspace?.branchId ||
+        currentMembership?.branchId ||
+        activeBranchId ||
+        (activeBranch as AnyRow)?.id ||
+        (settings as AnyRow)?.branchId ||
+        safeRead("activeBranchId"),
+    );
 
-  const classIds = useMemo(() => {
-    const ids = new Set<string>();
-    teacherClassLinks.forEach((row) => ids.add(String(row.classId || row.classLocalId)));
-    teacherSubjectLinks.forEach((row) => ids.add(String(row.classId || row.classLocalId)));
-    (rows.classes || []).forEach((row) => {
-      if (teacherId && (sameId(row.teacherId, teacherId) || sameId(row.classTeacherId, teacherId) || sameId(row.primaryTeacherId, teacherId))) {
-        ids.add(String(idOf(row)));
-      }
-    });
-    return ids;
-  }, [rows.classes, teacherClassLinks, teacherId, teacherSubjectLinks]);
+    const teacherId = text(
+      openWorkspace?.teacherId ||
+        currentMembership?.teacherId ||
+        currentMembership?.teacherLocalId ||
+        safeRead("activeTeacherId"),
+    );
 
-  const subjectIds = useMemo(() => {
-    const ids = new Set<string>();
-    teacherSubjectLinks.forEach((row) => ids.add(String(row.subjectId || row.subjectLocalId)));
-    (rows.subjects || []).forEach((row) => {
-      if (teacherId && (sameId(row.teacherId, teacherId) || sameId(row.subjectTeacherId, teacherId))) {
-        ids.add(String(idOf(row)));
-      }
-    });
-    return ids;
-  }, [rows.subjects, teacherId, teacherSubjectLinks]);
+    const schools = (rows.schools || []).filter(active);
+    const branches = (rows.branches || []).filter(active);
+    const teachers = (rows.teachers || []).filter(active);
+    const appUsers = (rows.appUsers || []).filter(active);
 
-  const classes = useMemo(() => {
-    return (rows.classes || []).filter((row) => classIds.has(String(idOf(row))) || classIds.has(String(row.classId)));
-  }, [classIds, rows.classes]);
+    const school =
+      schools.find((item) => sameId(item.id, schoolId)) ||
+      (activeSchool as AnyRow) ||
+      schools.find((item) => sameId(item.id, branches.find((b) => sameId(b.id, branchId))?.schoolId)) ||
+      null;
 
-  const subjects = useMemo(() => {
-    return (rows.subjects || []).filter((row) => subjectIds.has(String(idOf(row))) || subjectIds.has(String(row.subjectId)));
-  }, [rows.subjects, subjectIds]);
+    const branch =
+      branches.find((item) => sameId(item.id, branchId)) ||
+      (activeBranch as AnyRow) ||
+      branches.find((item) => sameId(item.schoolId, school?.id)) ||
+      null;
 
-  const students = useMemo(() => {
-    const enrollments = rows.studentEnrollments || [];
-    const studentIds = new Set<string>();
+    const teacher =
+      teachers.find((item) => sameId(item.id, teacherId)) ||
+      teachers.find((item) => sameId(item.userId || item.appUserId, currentMembership?.userId)) ||
+      teachers.find((item) => sameId(item.email, (user as AnyRow)?.email)) ||
+      null;
 
-    enrollments.forEach((row) => {
-      if (classIds.has(String(row.classId || row.classLocalId))) {
-        studentIds.add(String(row.studentId || row.studentLocalId));
-      }
-    });
+    const appUser =
+      appUsers.find((item) => sameId(item.id, currentMembership?.userId || (user as AnyRow)?.id)) ||
+      (user as AnyRow) ||
+      null;
 
-    return (rows.students || []).filter((row) => studentIds.has(String(idOf(row))) || studentIds.has(String(row.studentId)));
-  }, [classIds, rows.studentEnrollments, rows.students]);
+    const assets = (rows.mediaAssets || []).filter(active);
+    const highlights = (rows.portalHighlights || [])
+      .filter(active)
+      .filter((item) =>
+        (!branch?.id || !item.branchId || sameId(item.branchId, branch.id)) &&
+        (!item.audiences || item.audiences.includes("teacher") || item.audiences.includes("all")),
+      )
+      .sort((a, b) => n(a.displayOrder) - n(b.displayOrder));
 
-  const studentIds = useMemo(
-    () => new Set(students.map((student) => String(idOf(student))).filter(Boolean)),
-    [students]
-  );
-
-  const summary = useMemo(() => {
-    const today = todayKey();
-    const attendance = (rows.attendance || []).filter((row) => studentIds.has(String(row.studentId)));
-    const todayAttendance = attendance.filter((row) => String(row.date || row.createdAt || "").startsWith(today));
-    const teacherAttendance = teacherLinkedRows(rows.teacherAttendance || [], teacherId);
-    const todayTeacherAttendance = teacherAttendance.filter((row) => String(row.date || row.createdAt || "").startsWith(today));
-    const assignments = teacherLinkedRows(rows.assignments || [], teacherId).filter((row) => !row.classId || classIds.has(String(row.classId)));
-    const submissions = (rows.assignmentSubmissions || []).filter((row) => studentIds.has(String(row.studentId)));
-    const assessments = teacherLinkedRows(rows.assessmentEntries || [], teacherId).filter((row) => !row.studentId || studentIds.has(String(row.studentId)));
-    const results = (rows.computedResults || []).filter((row) => studentIds.has(String(row.studentId)));
-    const reports = (rows.reportCards || []).filter((row) => studentIds.has(String(row.studentId)));
-    const reportItems = (rows.reportCardItems || []).filter((row) => studentIds.has(String(row.studentId)));
-    const remarks = [...(rows.teacherRemarks || []), ...(rows.studentRemarks || [])].filter((row) => !row.teacherId || sameId(row.teacherId, teacherId));
-    const courseOutlines = teacherLinkedRows(rows.courseOutlines || [], teacherId).filter((row) => !row.subjectId || subjectIds.has(String(row.subjectId)));
-    const lessonNotes = teacherLinkedRows(rows.lessonNotes || [], teacherId);
-    const teacherSessions = teacherLinkedRows(rows.scheduleSessions || [], teacherId);
-    const classSessions = (rows.scheduleSessions || []).filter((row) => row.classId && classIds.has(String(row.classId)));
-    const payrollProfiles = teacherLinkedRows(rows.staffPayrollProfiles || [], teacherId);
-    const payrollItems = teacherLinkedRows(rows.payrollItems || [], teacherId);
-    const salaryPayments = teacherLinkedRows(rows.staffPaymentRecords || [], teacherId);
-    const salaryAmount = n(payrollProfiles[0]?.basicSalary || payrollProfiles[0]?.salary || payrollItems[0]?.grossPay || payrollItems[0]?.netPay);
-    const salaryPaid = salaryPayments.reduce((total, row) => total + n(row.amount || row.total || row.netPay), 0);
+    const heroImage =
+      imageFromRecord(highlights[0] || null, assets) ||
+      imageFromRecord(branch, assets) ||
+      imageFromRecord(school, assets);
 
     return {
-      teacherName: selectedTeacherName({ openWorkspace, activeMembership, teacher, user }),
-      schoolName: text(activeSchool?.name, schoolId ? `School ${schoolId}` : "School"),
-      branchName: text(activeBranch?.name, branchId ? `Branch ${branchId}` : "Branch"),
-      classes: count(classes),
-      subjects: count(subjects),
-      classSubjects: count(teacherSubjectLinks),
-      students: count(students),
-      attendance: count(attendance),
-      todayAttendance: todayAttendance.length,
-      presentToday: todayAttendance.filter((row) => String(row.status || "").toLowerCase() === "present").length,
-      absent: attendance.filter((row) => ["absent", "excused"].includes(String(row.status || "").toLowerCase())).length,
-      teacherAttendance: count(teacherAttendance),
-      teacherPresentToday: todayTeacherAttendance.filter((row) => String(row.status || row.clockIn || "").toLowerCase().includes("present") || row.clockIn).length,
-      assignments: count(assignments),
-      submissions: count(submissions),
-      assessments: count(assessments),
-      results: count(results),
-      averageScore: average([...assessments, ...results], ["percentage", "average", "score", "totalScore"]),
-      reports: count(reports),
-      reportItems: count(reportItems),
-      remarks: count(remarks),
-      courseOutlines: count(courseOutlines),
-      lessonNotes: count(lessonNotes),
-      announcements: count(rows.announcements || []),
-      messages: count(rows.messageThreads || []),
-      events: count(rows.calendarEvents || []),
-      teacherSessions: count(teacherSessions),
-      classSessions: count(classSessions),
-      timetables: count(rows.scheduleTimetables || []),
-      payrollProfiles: count(payrollProfiles),
-      payrollItems: count(payrollItems),
-      salaryPayments: count(salaryPayments),
-      salaryAmount,
-      salaryPaid,
-      currencyCode: text(salaryPayments[0]?.currencyCode || payrollItems[0]?.currencyCode || payrollProfiles[0]?.currencyCode, "GHS"),
+      membership: currentMembership,
+      school,
+      branch,
+      teacher,
+      appUser,
+      teacherId: text(teacher?.id || teacherId),
+      schoolId: text(school?.id || schoolId),
+      branchId: text(branch?.id || branchId),
+      teacherName: fullName(teacher || appUser, "Teacher"),
+      schoolName: text(school?.name, "Your School"),
+      branchName: text(branch?.name, "Main Campus"),
+      motto: text(school?.motto || (settings as AnyRow)?.schoolMotto, "Learning today. Leading tomorrow."),
+      heroImage,
     };
-  }, [
-    activeBranch,
-    activeMembership,
-    activeSchool,
-    branchId,
-    classIds,
-    classes,
-    openWorkspace,
-    rows,
-    schoolId,
-    studentIds,
-    students,
-    subjectIds,
-    subjects,
-    teacher,
-    teacherId,
-    teacherSubjectLinks,
-    user,
-  ]);
+  }, [rowsByTable, activeMembership, activeSchoolId, activeBranchId, activeSchool, activeBranch, settings, user]);
 
-  const modules = useMemo<DashboardModule[]>(() => {
-    const navModules = buildNavModules(navSections);
-    return navModules.map((module) => ({ ...module, ...metricFor(module.routeKey, rows, summary) }));
-  }, [navSections, rows, summary]);
-
-  const filteredModules = useMemo(() => {
-    const q = query.toLowerCase().trim();
-    return modules.filter((item) => {
-      if (area !== "all" && item.area !== area) return false;
-      if (!q) return true;
-      return `${item.label} ${item.note} ${item.value} ${item.area}`.toLowerCase().includes(q);
+  const scoped = useMemo(() => {
+    const result: Record<string, AnyRow[]> = {};
+    Object.entries(rowsByTable).forEach(([table, rows]) => {
+      result[table] = rows.filter((row) => {
+        if (!active(row)) return false;
+        if (row.accountId && accountId && !sameId(row.accountId, accountId)) return false;
+        if (row.schoolId && resolved.schoolId && !sameId(row.schoolId, resolved.schoolId)) return false;
+        if (row.branchId && resolved.branchId && !sameId(row.branchId, resolved.branchId)) return false;
+        return true;
+      });
     });
-  }, [area, modules, query]);
+    return result;
+  }, [rowsByTable, resolved.schoolId, resolved.branchId, accountId]);
 
-  const recent = useMemo(() => {
-    const records: AnyRow[] = [
-      ...classes.map((row) => ({ ...row, _kind: "Class", _icon: "🏫", _title: rowName(row), _date: row.updatedAt || row.createdAt })),
-      ...subjects.map((row) => ({ ...row, _kind: "Subject", _icon: "📘", _title: rowName(row), _date: row.updatedAt || row.createdAt })),
-      ...(rows.assignments || []).map((row) => ({ ...row, _kind: "Assignment", _icon: "🧩", _title: text(row.title, "Assignment"), _date: row.dueDate || row.updatedAt || row.createdAt })),
-      ...(rows.assessmentEntries || []).map((row) => ({ ...row, _kind: "Assessment", _icon: "📝", _title: text(row.title || row.subjectName, "Assessment"), _date: row.updatedAt || row.createdAt })),
-      ...(rows.announcements || []).map((row) => ({ ...row, _kind: "Announcement", _icon: "📢", _title: text(row.title, "Announcement"), _date: row.sentAt || row.publishAt || row.updatedAt || row.createdAt })),
-      ...(rows.scheduleSessions || []).map((row) => ({ ...row, _kind: "Timetable", _icon: "🗓️", _title: text(row.title || row.subjectName, "Timetable session"), _date: row.startAt || row.startTime || row.date || row.updatedAt || row.createdAt })),
-      ...(rows.staffPaymentRecords || []).map((row) => ({ ...row, _kind: "Salary", _icon: "💵", _title: money(row.amount || row.total || row.netPay, row.currencyCode || "GHS"), _date: row.paidAt || row.updatedAt || row.createdAt })),
-    ];
+  const teacherData = useMemo(() => {
+    const teacherId = resolved.teacherId;
+    const classSubjects = (scoped.classSubjects || []).filter((row) =>
+      teacherId ? sameId(row.teacherId, teacherId) : false,
+    );
+    const classTeachers = (scoped.classTeachers || []).filter((row) =>
+      teacherId ? sameId(row.teacherId, teacherId) : false,
+    );
 
-    return records.filter(activeRow).sort((a, b) => n(b._date) - n(a._date)).slice(0, 8);
-  }, [classes, rows, subjects]);
+    const subjectIds = new Set(classSubjects.map((row) => clean(row.subjectId)).filter(Boolean));
+    const classIds = new Set(
+      [...classSubjects, ...classTeachers].map((row) => clean(row.classId)).filter(Boolean),
+    );
 
-  const activeFilterCount = area !== "all" ? 1 : 0;
+    const subjects = (scoped.subjects || []).filter((row) => subjectIds.has(clean(row.id)));
+    const classes = (scoped.classes || []).filter((row) => classIds.has(clean(row.id)));
+    const enrollments = (scoped.studentEnrollments || []).filter((row) => classIds.has(clean(row.classId)));
+    const today = todayKey();
 
-  function openRoute(routeKey: string) {
-    if (navigate) {
-      navigate(routeKey);
-      return;
-    }
+    const todayAttendance = (scoped.attendance || []).filter(
+      (row) => classIds.has(clean(row.classId)) && clean(row.date || row.createdAt).startsWith(today),
+    );
 
+    const myAttendance = (scoped.teacherAttendance || []).filter((row) =>
+      teacherId ? sameId(row.teacherId, teacherId) : false,
+    );
+
+    const assessmentEntries = (scoped.assessmentEntries || []).filter((row) =>
+      teacherId ? sameId(row.teacherId, teacherId) || subjectIds.has(clean(row.subjectId)) : false,
+    );
+
+    const sessions = (scoped.scheduleSessions || []).filter((row) =>
+      teacherId
+        ? sameId(row.teacherId, teacherId) || classIds.has(clean(row.classId))
+        : false,
+    );
+
+    const events = (scoped.calendarEvents || [])
+      .filter((row) => {
+        const audience = clean(row.audience).toLowerCase();
+        return !audience || ["all", "staff", "teachers", "teacher"].includes(audience);
+      })
+      .sort((a, b) => new Date(a.startAt || a.startDate || a.date || 0).getTime() - new Date(b.startAt || b.startDate || b.date || 0).getTime());
+
+    const announcements = (scoped.announcements || [])
+      .filter((row) => {
+        const audience = clean(row.audience).toLowerCase();
+        return !audience || ["all", "staff", "teachers", "teacher"].includes(audience);
+      })
+      .sort((a, b) => new Date(b.publishedAt || b.publishAt || b.updatedAt || 0).getTime() - new Date(a.publishedAt || a.publishAt || a.updatedAt || 0).getTime());
+
+    const payroll = [
+      ...(scoped.payrollItems || []),
+      ...(scoped.staffPaymentRecords || []),
+    ].filter((row) => teacherId ? sameId(row.teacherId, teacherId) : false);
+
+    return {
+      classSubjects,
+      subjects,
+      classes,
+      enrollments,
+      todayAttendance,
+      myAttendance,
+      assessmentEntries,
+      sessions,
+      events: events.slice(0, 4),
+      announcements: announcements.slice(0, 4),
+      payroll,
+      uniqueStudents: new Set(enrollments.map((row) => clean(row.studentId)).filter(Boolean)).size,
+      attendancePresent: todayAttendance.filter((row) => clean(row.status).toLowerCase() === "present").length,
+    };
+  }, [scoped, resolved.teacherId]);
+
+  const modules = useMemo<SearchModule[]>(() => {
+    const result: SearchModule[] = [];
+    const seen = new Set<string>();
+    (navSections || []).forEach((section) => {
+      section.items.forEach((item) => {
+        if (HIDDEN_KEYS.has(item.key) || seen.has(item.key)) return;
+        seen.add(item.key);
+        result.push({
+          key: item.key,
+          label: item.label,
+          icon: item.icon,
+          section: section.title,
+          note: moduleNote(item.key),
+        });
+      });
+    });
+    return result;
+  }, [navSections]);
+
+  const searchResults = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return modules.filter((item) =>
+      `${item.label} ${item.section} ${item.note}`.toLowerCase().includes(q),
+    );
+  }, [modules, query]);
+
+  function openRoute(key: string) {
+    if (navigate) return navigate(key);
     try {
-      window.dispatchEvent(new CustomEvent("eleeveon:portal-route", { detail: { key: routeKey } }));
-      window.dispatchEvent(new CustomEvent("role-portal:navigate", { detail: { key: routeKey } }));
-      window.dispatchEvent(new CustomEvent("portal:navigate", { detail: routeKey }));
+      window.dispatchEvent(new CustomEvent("eleeveon:portal-route", { detail: { key } }));
+      window.dispatchEvent(new CustomEvent("role-portal:navigate", { detail: { key } }));
+      window.dispatchEvent(new CustomEvent("portal:navigate", { detail: key }));
     } catch {
-      // Optional shell fallback.
+      // Optional RolePortalShell events.
     }
   }
 
   if (loading || accountLoading || settingsLoading) {
-    return <State primary={primary} title="Opening teacher dashboard..." text="Loading your classes, subjects, learners, records and salary data." />;
+    return <State primary={primary} title="Opening your workspace..." text="Loading your classes, subjects, timetable and school updates." />;
   }
 
   if (!authenticated || !accountId) {
-    return <State primary={primary} title="Redirecting to login..." text="You must sign in before viewing the teacher portal." />;
-  }
-
-  if (!teacherId && !teacher) {
-    return <State primary={primary} title="No teacher profile selected" text="Choose your teacher membership again from Select Role so the dashboard can load the correct teacher record." />;
+    return <State primary={primary} title="Redirecting to login..." text="Sign in to open your teacher workspace." />;
   }
 
   return (
     <main className="td-page" style={{ "--td-primary": primary } as React.CSSProperties}>
       <style>{css}</style>
 
-      <section className="td-search-card" aria-label="Teacher dashboard search and actions">
-        <span className={`status-dot-mini ${summary.classes || summary.subjects ? "green" : "gray"}`} title={`${summary.teacherName}: ${summary.classes} class(es), ${summary.subjects} subject(s)`} />
-
+      <section className="td-search-card">
+        <span className="td-status" title="Teacher workspace ready" />
         <label className="td-search">
           <span>⌕</span>
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search teacher modules..." aria-label="Search teacher dashboard" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search subjects, attendance, assessments..."
+            aria-label="Search teacher modules"
+          />
         </label>
-
-        <button type="button" className="td-add-inline" onClick={load} aria-label="Refresh teacher dashboard" title="Refresh">↻</button>
-
-        <button type="button" className={`td-filter-button ${activeFilterCount ? "active" : ""}`} onClick={() => setFilterOpen(true)} aria-label="Open filters" title="Filters">
-          <SliderIcon />
-          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
-        </button>
-
-        <button type="button" className="td-icon-button" onClick={() => setMoreOpen(true)} aria-label="More options">⋯</button>
+        {query ? (
+          <button type="button" className="td-round" onClick={() => setQuery("")} aria-label="Clear search">✕</button>
+        ) : null}
+        <button type="button" className="td-refresh" onClick={load} aria-label="Refresh dashboard">↻</button>
       </section>
 
-      <section className="td-teacher-strip" aria-label="Current teacher context">
-        <strong>{summary.teacherName}</strong>
-        <span>{summary.branchName} · {summary.classes} classes · {summary.subjects} subjects</span>
-        <Chip tone={summary.teacherPresentToday ? "green" : "gray"}>{summary.teacherPresentToday ? "Present today" : "Attendance"}</Chip>
-      </section>
-
-      {(area !== "all" || query.trim()) && (
-        <section className="td-filter-chips" aria-label="Active filters">
-          {area !== "all" && <button type="button" onClick={() => setArea("all")}>Area: {areaLabel(area)} ×</button>}
-          {query.trim() && <button type="button" onClick={() => setQuery("")}>Search: {query.trim()} ×</button>}
+      {query.trim() ? (
+        <section className="td-search-results">
+          <div className="td-section-head"><div><span>Search results</span><h2>{searchResults.length} module{searchResults.length === 1 ? "" : "s"}</h2></div></div>
+          <div className="td-result-list">
+            {searchResults.map((item) => (
+              <button key={item.key} type="button" className="td-result" onClick={() => openRoute(item.key)}>
+                <span className="td-result-icon">{item.icon}</span>
+                <span className="td-result-main"><strong>{item.label}</strong><small>{item.note}</small><em>{item.section}</em></span>
+                <span className="td-chevron">›</span>
+              </button>
+            ))}
+            {!searchResults.length ? <Empty title="No matching teacher module" text="Try subjects, attendance, assessment, reports or salary." /> : null}
+          </div>
         </section>
+      ) : (
+        <>
+          <section
+            className={`td-hero ${resolved.heroImage ? "has-image" : ""}`}
+            style={
+              resolved.heroImage
+                ? {
+                    backgroundImage: `linear-gradient(90deg,rgba(7,15,32,.88),rgba(7,15,32,.32)),url(${JSON.stringify(resolved.heroImage).slice(1,-1)})`,
+                  }
+                : undefined
+            }
+          >
+            <div className="td-hero-copy">
+              <span>{greeting()}</span>
+              <h1>{resolved.teacherName}</h1>
+              <p>
+                Welcome to <strong>{resolved.schoolName}</strong>
+                <small className="td-branch-name">{resolved.branchName}</small>
+              </p>
+              <blockquote>“{resolved.motto}”</blockquote>
+            </div>
+            <div className="td-hero-stats">
+              <span><b>{teacherData.subjects.length}</b> Subjects</span>
+              <span><b>{teacherData.classes.length}</b> Classes</span>
+              <span><b>{teacherData.uniqueStudents}</b> Students</span>
+            </div>
+          </section>
+
+          <section className="td-quick-actions">
+            <button type="button" onClick={() => openRoute("studentAttendance")}><span>✓</span><b>Take Attendance</b><small>Record today’s class attendance</small></button>
+            <button type="button" onClick={() => openRoute("assessmentEntry")}><span>✎</span><b>Enter Scores</b><small>Continue assessment entry</small></button>
+            <button type="button" onClick={() => openRoute("courseOutline")}><span>📚</span><b>My Subjects</b><small>Open assigned subjects</small></button>
+            <button type="button" onClick={() => openRoute("teacherReportRemarks")}><span>💬</span><b>Report Remarks</b><small>Prepare student remarks</small></button>
+          </section>
+
+          <section className="td-dashboard-grid">
+            <article className="td-card td-today">
+              <div className="td-section-head"><div><span>Today</span><h2>Classroom pulse</h2></div><Chip tone={teacherData.todayAttendance.length ? "green" : "orange"}>{teacherData.todayAttendance.length ? "Started" : "Pending"}</Chip></div>
+              <div className="td-pulse-grid">
+                <div><strong>{teacherData.attendancePresent}</strong><span>Present recorded</span></div>
+                <div><strong>{teacherData.todayAttendance.length}</strong><span>Attendance entries</span></div>
+                <div><strong>{teacherData.assessmentEntries.length}</strong><span>Score entries</span></div>
+                <div><strong>{teacherData.myAttendance.length}</strong><span>My attendance records</span></div>
+              </div>
+              <button type="button" className="td-link" onClick={() => openRoute("studentAttendance")}>Open student attendance <span>→</span></button>
+            </article>
+
+            <article className="td-card">
+              <div className="td-section-head"><div><span>Teaching</span><h2>My workload</h2></div></div>
+              <div className="td-workload-list">
+                <div><span>📚</span><p><b>{teacherData.classSubjects.length} class-subject links</b><small>Subjects connected to your classes</small></p></div>
+                <div><span>🏷</span><p><b>{teacherData.classes.length} assigned classes</b><small>{teacherData.uniqueStudents} learners across those classes</small></p></div>
+                <div><span>🗓</span><p><b>{teacherData.sessions.length} timetable sessions</b><small>Teaching sessions currently available</small></p></div>
+              </div>
+              <button type="button" className="td-link" onClick={() => openRoute("myClasses")}>View my classes <span>→</span></button>
+            </article>
+          </section>
+
+          <section className="td-content-grid">
+            <article className="td-card">
+              <div className="td-section-head"><div><span>Schedule</span><h2>Upcoming</h2></div><button type="button" onClick={() => openRoute("teacherTimetable")}>View all</button></div>
+              <div className="td-feed">
+                {teacherData.events.map((event, index) => (
+                  <div key={event.id || index} className="td-feed-row"><span>🗓</span><p><b>{text(event.title || event.name, "School event")}</b><small>{dateTime(event.startAt || event.startDate || event.date)}</small></p></div>
+                ))}
+                {!teacherData.events.length ? <MiniEmpty icon="🗓" text="No upcoming teacher events yet." /> : null}
+              </div>
+            </article>
+
+            <article className="td-card">
+              <div className="td-section-head"><div><span>School updates</span><h2>Announcements</h2></div><button type="button" onClick={() => openRoute("announcements")}>View all</button></div>
+              <div className="td-feed">
+                {teacherData.announcements.map((item, index) => (
+                  <div key={item.id || index} className="td-feed-row"><span>📣</span><p><b>{text(item.title, "Announcement")}</b><small>{text(item.body || item.description, "Open to read the full update.")}</small></p></div>
+                ))}
+                {!teacherData.announcements.length ? <MiniEmpty icon="📣" text="No teacher announcements yet." /> : null}
+              </div>
+            </article>
+          </section>
+
+          <section className="td-card td-progress-card">
+            <div className="td-section-head"><div><span>Teaching progress</span><h2>Your workspace at a glance</h2></div></div>
+            <div className="td-progress-grid">
+              <button type="button" onClick={() => openRoute("courseOutline")}><span>📖</span><strong>Course Outline</strong><small>Keep lessons aligned with the term plan.</small></button>
+              <button type="button" onClick={() => openRoute("assessmentEntry")}><span>📝</span><strong>Assessment Entry</strong><small>{teacherData.assessmentEntries.length} score record(s) available.</small></button>
+              <button type="button" onClick={() => openRoute("myAttendance")}><span>🕒</span><strong>My Attendance</strong><small>Review your presence and clock records.</small></button>
+              <button type="button" onClick={() => openRoute("salary")}><span>💰</span><strong>Salary</strong><small>{teacherData.payroll.length} payroll/payment record(s).</small></button>
+            </div>
+          </section>
+        </>
       )}
-
-      {view === "analytics" ? <AnalyticsView summary={summary} modules={modules} recent={recent} /> : null}
-      {view === "table" ? <TableView modules={filteredModules} openRoute={openRoute} /> : null}
-
-      {view === "cards" ? (
-        <section className="td-list">
-          {filteredModules.map((item) => (
-            <button key={item.key} type="button" className="teacher-row" onClick={() => openRoute(item.routeKey)}>
-              <span className="teacher-avatar">{item.icon}</span>
-              <span className="teacher-main">
-                <strong>{item.label}</strong>
-                <small>{item.note}</small>
-                <em>{areaLabel(item.area)}</em>
-              </span>
-              <span className="teacher-side">
-                <Chip tone={item.tone}>{item.value}</Chip>
-                <i>›</i>
-              </span>
-            </button>
-          ))}
-
-          {!filteredModules.length ? <Empty title="No matching teacher modules" text="Clear filters or search to show your teacher modules." /> : null}
-        </section>
-      ) : null}
-
-      {recent.length ? (
-        <section className="td-recent">
-          <div className="td-section-head">
-            <h2>Recent Activity</h2>
-            <span>{recent.length}</span>
-          </div>
-          <div className="td-recent-list">
-            {recent.map((item, index) => (
-              <article key={`${item._kind}-${idOf(item) || index}`} className="recent-row">
-                <span>{item._icon}</span>
-                <b>{item._title}</b>
-                <small>{item._kind} · {dateLabel(item._date)}</small>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      {filterOpen ? <FilterSheet area={area} setArea={setArea} onClose={() => setFilterOpen(false)} /> : null}
-
-      {moreOpen ? (
-        <MoreSheet
-          view={view}
-          setView={(mode) => { setView(mode); setMoreOpen(false); }}
-          summary={summary}
-          onRefresh={async () => { setMoreOpen(false); await load(); }}
-          onClose={() => setMoreOpen(false)}
-        />
-      ) : null}
     </main>
   );
 }
 
-function State({ primary, title, text }: { primary: string; title: string; text: string }) {
-  return (
-    <main className="td-page" style={{ "--td-primary": primary } as React.CSSProperties}>
-      <style>{css}</style>
-      <section className="td-state">
-        <div className="td-spinner" />
-        <h2>{title}</h2>
-        <p>{text}</p>
-      </section>
-    </main>
-  );
+function State({ primary, title, text: body }: { primary: string; title: string; text: string }) {
+  return <main className="td-page" style={{ "--td-primary": primary } as React.CSSProperties}><style>{css}</style><section className="td-state"><div className="td-spinner"/><h2>{title}</h2><p>{body}</p></section></main>;
 }
 
-function FilterSheet({ area, setArea, onClose }: { area: AreaFilter; setArea: (value: AreaFilter) => void; onClose: () => void }) {
-  return (
-    <div className="td-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="td-sheet small">
-        <div className="td-sheet-head">
-          <div>
-            <h2>Filters</h2>
-            <p>Choose which teacher area to show.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close filters">✕</button>
-        </div>
-
-        <div className="td-form compact">
-          <label>
-            <span>Area</span>
-            <select value={area} onChange={(event) => setArea(event.target.value as AreaFilter)}>
-              <option value="all">All areas</option>
-              <option value="teaching">Teaching</option>
-              <option value="learners">Learners</option>
-              <option value="records">Records</option>
-              <option value="communication">Communication</option>
-              <option value="timetable">Timetable</option>
-              <option value="finance">Finance</option>
-              <option value="account">Account</option>
-              <option value="other">Other</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="td-sheet-actions">
-          <button type="button" onClick={() => setArea("all")}>Reset</button>
-          <button type="button" className="primary" onClick={onClose}>Apply</button>
-        </div>
-      </section>
-    </div>
-  );
+function Empty({ title, text: body }: { title: string; text: string }) {
+  return <section className="td-empty"><div>⌕</div><h3>{title}</h3><p>{body}</p></section>;
 }
 
-function MoreSheet({ view, setView, summary, onRefresh, onClose }: { view: ViewMode; setView: (value: ViewMode) => void; summary: AnyRow; onRefresh: () => void | Promise<void>; onClose: () => void }) {
-  return (
-    <div className="td-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="td-sheet small">
-        <div className="td-sheet-head">
-          <div>
-            <h2>More</h2>
-            <p>Advanced views stay here so the teacher home remains compact.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close menu">✕</button>
-        </div>
-
-        <div className="td-menu-list">
-          <button type="button" className={view === "cards" ? "active" : ""} onClick={() => setView("cards")}><span>☰</span><b>List view</b><small>Compact teacher modules</small></button>
-          <button type="button" className={view === "table" ? "active" : ""} onClick={() => setView("table")}><span>☷</span><b>Table view</b><small>Dense module list</small></button>
-          <button type="button" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>◔</span><b>Analytics</b><small>{summary.classes} classes · {summary.students} students · {summary.assessments} assessments</small></button>
-          <button type="button" onClick={onRefresh}><span>↻</span><b>Refresh</b><small>Reload local teacher data</small></button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function TableView({ modules, openRoute }: { modules: DashboardModule[]; openRoute: (routeKey: string) => void }) {
-  return (
-    <section className="td-table-card">
-      <div className="td-table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Teacher Modules ({modules.length})</th>
-              <th>Area</th>
-              <th>Value</th>
-              <th>Status</th>
-              <th>Note</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {modules.map((item) => (
-              <tr key={item.key}>
-                <td><strong>{item.icon} {item.label}</strong><span>{item.routeKey}</span></td>
-                <td>{areaLabel(item.area)}</td>
-                <td>{item.value}</td>
-                <td><Chip tone={item.tone}>{item.tone}</Chip></td>
-                <td>{item.note}</td>
-                <td><div className="td-table-actions"><button type="button" onClick={() => openRoute(item.routeKey)}>Open</button></div></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!modules.length ? <div className="td-empty-table">No teacher module matches your filters.</div> : null}
-      </div>
-    </section>
-  );
-}
-
-function AnalyticsView({ summary, modules, recent }: { summary: AnyRow; modules: DashboardModule[]; recent: AnyRow[] }) {
-  const areaRows = ["teaching", "learners", "records", "communication", "timetable", "finance", "account", "other"].map((area) => ({
-    label: areaLabel(area),
-    value: modules.filter((module) => module.area === area).length,
-  })).filter((row) => row.value > 0);
-
-  return (
-    <section className="td-analysis-grid">
-      <article className="td-analysis"><span>Classes</span><strong>{summary.classes}</strong><p>{summary.students} learner(s), {summary.subjects} subject(s).</p></article>
-      <article className="td-analysis"><span>Attendance Today</span><strong>{summary.presentToday}</strong><p>{summary.todayAttendance} student attendance record(s), {summary.teacherPresentToday ? "teacher present" : "teacher not marked"}.</p></article>
-      <article className="td-analysis"><span>Assessment</span><strong>{summary.averageScore ? `${summary.averageScore}%` : summary.assessments}</strong><p>{summary.assessments} assessment entry record(s), {summary.results} result record(s).</p></article>
-      <article className="td-analysis"><span>Salary</span><strong>{summary.salaryAmount ? money(summary.salaryAmount, summary.currencyCode) : "—"}</strong><p>{summary.salaryPayments} payment record(s), {money(summary.salaryPaid, summary.currencyCode)} paid.</p></article>
-      <article className="td-analysis wide"><span>Module Areas</span><strong>{modules.length}</strong><div className="td-analysis-list">{areaRows.map((row) => <section key={row.label}><div><b>{row.label}</b><small>{row.value}</small></div><div className="td-progress"><i style={{ width: `${Math.max(6, Math.round((row.value / Math.max(1, modules.length)) * 100))}%` }} /></div></section>)}</div></article>
-      <article className="td-analysis wide"><span>Recent Activity</span><strong>{recent.length}</strong><p>Recent records from classes, subjects, assignments, assessments, timetable and salary.</p></article>
-    </section>
-  );
+function MiniEmpty({ icon, text: body }: { icon: string; text: string }) {
+  return <div className="td-mini-empty"><span>{icon}</span><p>{body}</p></div>;
 }
 
 const css = `
-@keyframes spin{to{transform:rotate(360deg)}}.td-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;width:100%;max-width:100%;min-width:0;padding:calc(8px * var(--local-density-scale,1));padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--td-primary) 9%,transparent),transparent 30rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:var(--font-size,14px);overflow-x:hidden}.td-page *,.td-page *::before,.td-page *::after{box-sizing:border-box;min-width:0}.td-page button,.td-page input,.td-page select{font:inherit;max-width:100%}.td-page button{-webkit-tap-highlight-color:transparent}.td-page input,.td-page select{width:100%;min-height:44px;border:1px solid var(--input-border,var(--border,rgba(0,0,0,.10)));border-radius:16px;padding:0 12px;background:var(--input-bg,var(--surface,#fff));color:var(--input-text,var(--text,#111827));outline:none;font-weight:750}.td-page input:focus,.td-page select:focus{border-color:color-mix(in srgb,var(--td-primary) 52%,var(--border,rgba(0,0,0,.10)));box-shadow:0 0 0 4px color-mix(in srgb,var(--td-primary) 12%,transparent)}.td-state,.td-search-card,.teacher-row,.td-table-card,.td-analysis,.td-empty,.td-sheet,.td-recent,.recent-row,.td-teacher-strip{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.10));box-shadow:0 12px 28px rgba(15,23,42,.045)}.td-state{min-height:min(420px,calc(100dvh - 32px));width:min(520px,100%);margin:0 auto;display:grid;place-items:center;align-content:center;gap:10px;padding:22px;border-radius:28px;text-align:center}.td-spinner{width:38px;height:38px;border-radius:999px;border:4px solid color-mix(in srgb,var(--td-primary) 18%,transparent);border-top-color:var(--td-primary);animation:spin .8s linear infinite}.td-state h2{margin:0;font-size:22px;font-weight:1000;letter-spacing:-.04em}.td-state p{max-width:34rem;margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.td-search-card{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;gap:8px;align-items:center;margin-top:2px;padding:8px;border-radius:24px}.td-search{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:44px;padding:0 11px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.td-search span{color:var(--muted,#64748b);font-size:17px;font-weight:1000}.td-search input{min-height:42px;border:0;padding:0;border-radius:0;background:transparent;box-shadow:none;font-size:14px}.td-icon-button,.td-filter-button,.td-add-inline{width:42px;height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;display:grid;place-items:center;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);font-size:18px;font-weight:1000;cursor:pointer;box-shadow:0 10px 22px rgba(15,23,42,.045)}.td-add-inline{border-color:var(--td-primary);background:var(--td-primary);color:#fff;box-shadow:0 12px 28px color-mix(in srgb,var(--td-primary) 22%,transparent)}.td-slider-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.td-filter-button{position:relative;background:color-mix(in srgb,var(--td-primary) 8%,var(--card-bg,#fff));color:var(--td-primary)}.td-filter-button.active{background:var(--td-primary);color:#fff;border-color:var(--td-primary)}.td-filter-button b{position:absolute;top:-4px;right:-4px;min-width:19px;height:19px;display:grid;place-items:center;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;border:2px solid var(--card-bg,#fff)}.status-dot-mini{width:10px;height:10px;border-radius:999px;display:inline-flex;box-shadow:0 0 0 4px color-mix(in srgb,var(--muted,#64748b) 10%,transparent)}.status-dot-mini.green{background:#22c55e}.status-dot-mini.orange{background:#f59e0b}.status-dot-mini.gray{background:var(--muted,#64748b)}.td-teacher-strip{display:flex;align-items:center;gap:8px;justify-content:space-between;margin-top:8px;padding:9px 10px;border-radius:20px}.td-teacher-strip strong,.td-teacher-strip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.td-teacher-strip strong{font-size:13px;font-weight:1000}.td-teacher-strip span{color:var(--muted,#64748b);font-size:12px;font-weight:850}.td-filter-chips{display:flex;gap:7px;overflow-x:auto;padding:8px 1px 0;scrollbar-width:none}.td-filter-chips::-webkit-scrollbar{display:none}.td-filter-chips button{flex:0 0 auto;min-height:31px;border:0;border-radius:999px;padding:0 10px;background:color-mix(in srgb,var(--td-primary) 11%,transparent);color:var(--td-primary);font-size:11px;font-weight:950;white-space:nowrap;cursor:pointer}.td-list{display:grid;gap:7px;margin-top:10px}.teacher-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:22px;text-align:left;cursor:pointer;color:inherit}.teacher-avatar{width:48px;height:48px;display:grid;place-items:center;border-radius:18px;background:color-mix(in srgb,var(--td-primary) 12%,var(--surface,#fff));font-size:22px}.teacher-main,.teacher-main strong,.teacher-main small,.teacher-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.teacher-main strong{color:var(--text,#111827);font-size:14px;font-weight:1000;letter-spacing:-.02em}.teacher-main small{margin-top:3px;color:var(--muted,#64748b);font-size:12px;font-weight:850}.teacher-main em{margin-top:3px;color:color-mix(in srgb,var(--muted,#64748b) 86%,var(--text,#111827));font-size:11px;font-weight:750;font-style:normal}.teacher-side{display:flex;align-items:center;gap:7px}.teacher-side i{color:var(--muted,#64748b);font-style:normal;font-weight:1000}.td-chip{max-width:100%;display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}.td-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.td-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.td-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.td-chip.gray{background:color-mix(in srgb,var(--muted,#64748b) 14%,transparent);color:var(--muted,#64748b)}.td-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.td-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.td-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.50);backdrop-filter:blur(12px)}.td-sheet{width:min(760px,100%);max-height:min(88dvh,760px);overflow-y:auto;padding:14px;border-radius:28px 28px 22px 22px;box-shadow:0 30px 90px rgba(15,23,42,.32);animation:sheetIn .18s var(--ease)}.td-sheet.small{width:min(520px,100%)}@keyframes sheetIn{from{transform:translateY(16px);opacity:.7}to{transform:translateY(0);opacity:1}}.td-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:12px}.td-sheet-head h2{margin:0;color:var(--text,#111827);font-size:21px;font-weight:1000;letter-spacing:-.05em}.td-sheet-head p{margin:5px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5;font-weight:750}.td-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;background:var(--surface,#fff);color:var(--text,#111827);font-weight:1000;cursor:pointer;flex:0 0 auto}.td-form{display:grid;gap:10px}.td-form label{display:grid;gap:6px}.td-form span{color:var(--muted,#64748b);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em}.td-menu-list{display:grid;gap:8px}.td-menu-list button{width:100%;display:grid;grid-template-columns:42px minmax(0,1fr);column-gap:10px;align-items:center;min-height:58px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:18px;padding:9px;background:var(--surface,#fff);color:var(--text,#111827);text-align:left;cursor:pointer}.td-menu-list button span{grid-row:span 2;width:42px;height:42px;display:grid;place-items:center;border-radius:16px;background:color-mix(in srgb,var(--td-primary) 10%,transparent);color:var(--td-primary);font-weight:1000}.td-menu-list button b,.td-menu-list button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.td-menu-list button b{font-size:13px;font-weight:1000}.td-menu-list button small{margin-top:2px;color:var(--muted,#64748b);font-size:11px;font-weight:750}.td-menu-list button.active{border-color:color-mix(in srgb,var(--td-primary) 34%,var(--border,rgba(0,0,0,.10)));background:color-mix(in srgb,var(--td-primary) 8%,var(--surface,#fff))}.td-sheet-actions{position:sticky;bottom:-14px;display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:14px;padding:12px 0 2px;background:linear-gradient(to top,var(--card-bg,var(--surface,#fff)) 70%,transparent)}.td-sheet-actions button{min-height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;padding:0 16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff));color:var(--text,#111827);font-size:12px;font-weight:950;cursor:pointer}.td-sheet-actions button.primary{border-color:var(--td-primary);background:var(--td-primary);color:#fff;box-shadow:0 14px 32px color-mix(in srgb,var(--td-primary) 25%,transparent)}.td-table-card,.td-analysis,.td-empty{padding:13px;border-radius:24px}.td-table-card{margin-top:10px}.td-table-scroll{width:100%;max-width:100%;overflow-x:auto;border-radius:18px;border:1px solid var(--border,rgba(0,0,0,.08))}.td-table-scroll table{width:100%;min-width:920px;border-collapse:collapse;background:var(--card-bg,var(--surface,var(--bg,transparent)))}.td-table-scroll th,.td-table-scroll td{padding:10px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));vertical-align:top;text-align:left;font-size:13px}.td-table-scroll th{background:var(--table-header-bg,color-mix(in srgb,var(--td-primary) 6%,var(--card-bg,var(--surface,var(--bg,transparent)))));color:var(--table-header-text,var(--muted,var(--text)));font-size:11px;font-weight:1000;text-transform:uppercase;letter-spacing:.07em}.td-table-scroll td strong,.td-table-scroll td span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.td-table-scroll td span{margin-top:3px;color:var(--muted,#64748b);font-size:11px}.td-table-actions{display:flex;gap:7px;overflow-x:auto}.td-table-actions button{flex:0 0 auto;min-height:34px;border:1px solid var(--td-primary);border-radius:999px;padding:0 12px;background:var(--td-primary);color:#fff;font-size:11px;font-weight:950;cursor:pointer}.td-empty-table{padding:22px;text-align:center;color:var(--muted,#64748b);font-weight:850}.td-analysis-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin-top:10px}.td-analysis span,.td-section-head span{color:var(--muted,#64748b);font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.td-analysis strong{display:block;margin-top:8px;font-size:clamp(22px,7vw,30px);line-height:1;font-weight:1000;letter-spacing:-.06em;overflow-wrap:anywhere}.td-analysis p{margin:8px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5}.td-analysis-list{display:grid;gap:10px;margin-top:12px}.td-analysis-list section{display:grid;gap:6px;padding:10px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent)}.td-analysis-list section>div:first-child{display:flex;justify-content:space-between;gap:10px}.td-analysis-list b,.td-analysis-list small{font-size:12px}.td-analysis-list small{color:var(--muted,#64748b);font-weight:850}.td-progress{height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted,#64748b) 18%,transparent);overflow:hidden}.td-progress i{display:block;height:100%;border-radius:inherit;background:var(--td-primary)}.td-empty{display:grid;place-items:center;align-content:center;gap:8px;min-height:220px;text-align:center;border-style:dashed}.td-empty div{width:56px;height:56px;display:grid;place-items:center;border-radius:22px;background:color-mix(in srgb,var(--td-primary) 12%,var(--surface,#fff));font-size:28px}.td-empty h3{margin:0;font-size:18px;font-weight:1000}.td-empty p{margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.td-recent{margin-top:10px;border-radius:24px;padding:12px}.td-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.td-section-head h2{margin:0;color:var(--text,#111827);font-size:15px;font-weight:1000;letter-spacing:-.03em}.td-recent-list{display:grid;gap:7px}.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;border-radius:18px;padding:9px}.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--td-primary) 10%,transparent)}.recent-row b,.recent-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row b{font-size:12px;font-weight:1000}.recent-row small{font-size:11px;color:var(--muted,#64748b);font-weight:800}@media (min-width:680px){.td-page{padding:calc(12px * var(--local-density-scale,1));padding-bottom:44px}.td-search-card{grid-template-columns:auto minmax(0,1fr) 48px 48px 48px}.td-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.teacher-row{border-radius:24px;padding:12px}.td-analysis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.td-analysis.wide{grid-column:span 2}.td-sheet-backdrop{place-items:center;padding:18px}.td-sheet{border-radius:28px;padding:18px}.td-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:1040px){.td-page{padding:calc(16px * var(--local-density-scale,1));padding-bottom:48px}.td-search-card,.td-teacher-strip,.td-list,.td-analysis-grid,.td-table-card,.td-filter-chips,.td-recent{max-width:1180px;margin-left:auto;margin-right:auto}.td-list{grid-template-columns:repeat(3,minmax(0,1fr))}.td-analysis-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.td-analysis.wide{grid-column:span 2}.td-recent-list{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (max-width:520px){.td-page{padding:calc(7px * var(--local-density-scale,1));padding-bottom:max(38px,env(safe-area-inset-bottom))}.td-icon-button,.td-filter-button,.td-add-inline{width:40px;height:40px}.teacher-row{grid-template-columns:auto minmax(0,1fr);align-items:start}.teacher-side{grid-column:1/-1;justify-content:flex-end}.td-teacher-strip{display:grid;grid-template-columns:minmax(0,1fr) auto}.td-teacher-strip span{grid-row:2}.td-sheet{border-radius:24px 24px 18px 18px;padding:12px}.td-sheet-actions{display:grid;grid-template-columns:minmax(0,1fr)}.td-sheet-actions button{width:100%}}
+@keyframes tdSpin{to{transform:rotate(360deg)}}
+.td-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;width:100%;padding:8px;padding-bottom:max(42px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--td-primary) 9%,transparent),transparent 30rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overflow-x:hidden}.td-page *{box-sizing:border-box;min-width:0}.td-page button,.td-page input{font:inherit}.td-page button{cursor:pointer;-webkit-tap-highlight-color:transparent}.td-search-card,.td-card,.td-result,.td-state,.td-empty{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.1));box-shadow:0 12px 30px rgba(15,23,42,.05)}
+.td-search-card{display:flex;align-items:center;gap:8px;padding:8px;border-radius:24px}.td-status{width:10px;height:10px;flex:0 0 auto;border-radius:999px;background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.12)}.td-search{flex:1;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:44px;padding:0 12px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.td-search>span{font-size:18px;color:var(--muted,#64748b);font-weight:1000}.td-search input{width:100%;min-height:42px;border:0;outline:0;background:transparent;color:var(--text,#111827);font-weight:750}.td-round,.td-refresh{width:42px;height:42px;flex:0 0 auto;display:grid;place-items:center;border-radius:999px;border:1px solid var(--border,rgba(0,0,0,.1));background:var(--surface,#fff);color:var(--text,#111827);font-weight:1000}.td-refresh{border-color:var(--td-primary);background:var(--td-primary);color:#fff}
+.td-hero{position:relative;min-height:270px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--td-primary) 95%,#111827),color-mix(in srgb,var(--td-primary) 55%,#0f172a));box-shadow:0 22px 60px color-mix(in srgb,var(--td-primary) 20%,transparent);background-position:center;background-size:cover}.td-hero:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.18),transparent 26%);pointer-events:none}.td-hero-copy,.td-hero-stats{position:relative;z-index:1}.td-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}.td-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}.td-hero p{margin:0;font-size:14px}.td-hero p strong{display:inline}.td-branch-name{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}.td-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}.td-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}.td-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}.td-hero-stats b{font-size:15px}.td-hero-stats strong{font-size:18px;font-weight:850;letter-spacing:-.035em}.td-hero-stats span{margin-top:2px;font-size:9px;font-weight:750;text-transform:uppercase;letter-spacing:.06em;opacity:.74}
+.td-quick-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.td-quick-actions button{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;padding:11px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:21px;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);text-align:left;box-shadow:0 12px 30px rgba(15,23,42,.045)}.td-quick-actions button>span{grid-row:span 2;width:39px;height:39px;display:grid;place-items:center;border-radius:15px;background:color-mix(in srgb,var(--td-primary) 11%,transparent);color:var(--td-primary);font-size:18px;font-weight:1000}.td-quick-actions b,.td-quick-actions small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.td-quick-actions b{font-size:12px;font-weight:1000}.td-quick-actions small{margin-top:2px;color:var(--muted,#64748b);font-size:10px;font-weight:750}
+.td-dashboard-grid,.td-content-grid{display:grid;gap:10px;margin-top:10px}.td-card{padding:14px;border-radius:25px}.td-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.td-section-head span{color:var(--muted,#64748b);font-size:10px;font-weight:1000;text-transform:uppercase;letter-spacing:.09em}.td-section-head h2{margin:3px 0 0;font-size:17px;font-weight:1000;letter-spacing:-.035em}.td-section-head button{border:0;background:transparent;color:var(--td-primary);font-size:11px;font-weight:950}.td-chip{display:inline-flex;align-items:center;min-height:25px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:950}.td-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.td-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.td-chip.gray{background:color-mix(in srgb,var(--muted,#64748b) 13%,transparent);color:var(--muted,#64748b)}
+.td-pulse-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.td-pulse-grid div{padding:12px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.td-pulse-grid strong,.td-pulse-grid span{display:block}.td-pulse-grid strong{font-size:23px;font-weight:1000;letter-spacing:-.05em}.td-pulse-grid span{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:850}.td-link{width:100%;display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding:11px 12px;border:0;border-radius:16px;background:color-mix(in srgb,var(--td-primary) 9%,transparent);color:var(--td-primary);font-size:11px;font-weight:950}.td-workload-list,.td-feed{display:grid;gap:8px;margin-top:12px}.td-workload-list>div,.td-feed-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:9px;align-items:center;padding:9px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent)}.td-workload-list>div>span,.td-feed-row>span{width:36px;height:36px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--td-primary) 10%,transparent)}.td-workload-list p,.td-feed-row p{margin:0}.td-workload-list b,.td-workload-list small,.td-feed-row b,.td-feed-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.td-workload-list b,.td-feed-row b{font-size:12px;font-weight:1000}.td-workload-list small,.td-feed-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}.td-mini-empty{display:grid;place-items:center;gap:6px;min-height:120px;color:var(--muted,#64748b);text-align:center}.td-mini-empty span{font-size:25px}.td-mini-empty p{margin:0;font-size:11px;font-weight:800}
+.td-progress-card{margin-top:10px}.td-progress-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.td-progress-grid button{display:block;padding:12px;border:1px solid var(--border,rgba(0,0,0,.09));border-radius:19px;background:color-mix(in srgb,var(--muted,#64748b) 5%,var(--surface,#fff));color:var(--text,#111827);text-align:left}.td-progress-grid button>span{display:grid;place-items:center;width:38px;height:38px;margin-bottom:9px;border-radius:15px;background:color-mix(in srgb,var(--td-primary) 10%,transparent)}.td-progress-grid strong,.td-progress-grid small{display:block}.td-progress-grid strong{font-size:12px;font-weight:1000}.td-progress-grid small{margin-top:4px;color:var(--muted,#64748b);font-size:10px;line-height:1.45;font-weight:750}
+.td-search-results{margin-top:10px}.td-result-list{display:grid;gap:7px;margin-top:9px}.td-result{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:21px;color:inherit;text-align:left}.td-result-icon{width:45px;height:45px;display:grid;place-items:center;border-radius:17px;background:color-mix(in srgb,var(--td-primary) 11%,transparent);font-size:21px}.td-result-main strong,.td-result-main small,.td-result-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.td-result-main strong{font-size:13px;font-weight:1000}.td-result-main small{margin-top:3px;color:var(--muted,#64748b);font-size:11px;font-weight:750}.td-result-main em{margin-top:3px;color:var(--td-primary);font-size:10px;font-weight:900;font-style:normal}.td-chevron{color:var(--muted,#64748b);font-size:20px;font-weight:1000}.td-empty{display:grid;place-items:center;align-content:center;gap:8px;min-height:230px;padding:20px;border-radius:24px;border-style:dashed;text-align:center}.td-empty>div{width:55px;height:55px;display:grid;place-items:center;border-radius:20px;background:color-mix(in srgb,var(--td-primary) 11%,transparent);font-size:24px}.td-empty h3{margin:0;font-size:17px;font-weight:1000}.td-empty p{margin:0;color:var(--muted,#64748b);font-size:12px;line-height:1.55}.td-state{min-height:min(430px,calc(100dvh - 24px));display:grid;place-items:center;align-content:center;gap:10px;padding:22px;border-radius:28px;text-align:center}.td-spinner{width:38px;height:38px;border:4px solid color-mix(in srgb,var(--td-primary) 17%,transparent);border-top-color:var(--td-primary);border-radius:999px;animation:tdSpin .8s linear infinite}.td-state h2{margin:0;font-size:21px;font-weight:1000}.td-state p{max-width:34rem;margin:0;color:var(--muted,#64748b);font-size:12px;line-height:1.6}
+@media(min-width:700px){.td-page{padding:12px}.td-hero{padding:22px}.td-quick-actions{grid-template-columns:repeat(4,minmax(0,1fr))}.td-dashboard-grid,.td-content-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.td-progress-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.td-result-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(min-width:1080px){.td-page{padding:16px}.td-search-card,.td-hero,.td-quick-actions,.td-dashboard-grid,.td-content-grid,.td-progress-card,.td-search-results{max-width:1180px;margin-left:auto;margin-right:auto}.td-hero,.td-quick-actions,.td-dashboard-grid,.td-content-grid,.td-progress-card,.td-search-results{margin-top:12px}}
+@media(max-width:480px){.td-page{padding:7px}.td-hero{min-height:270px;padding:22px;border-radius:30px}.td-quick-actions button{padding:9px}.td-progress-grid{grid-template-columns:minmax(0,1fr)}}
 `;

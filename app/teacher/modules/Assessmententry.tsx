@@ -1,104 +1,87 @@
 "use client";
 
 /**
- * app/teacher/modules/Assessmententry.tsx
- * ---------------------------------------------------------
- * TEACHER ASSESSMENT ENTRY
- * ---------------------------------------------------------
- * Teacher-only score entry engine.
+ * app/teacher/modules/AssessmentEntry.tsx
+ * Eleeveon Schools — Teacher Assessment Entry V2.
  *
- * This file is tailored for app/teacher/modules.
- * It does NOT import the old dashboard assessment page.
- * It does NOT use DexieCrudPage because teachers should not type raw IDs.
- *
- * Flow:
- * - Signed-in teacher opens assigned class subjects only.
- * - Teacher selects class/subject.
- * - App loads active students from enrollments.
- * - App loads assessment applicability + assessment structure items.
- * - Teacher enters scores in a mobile-first score sheet.
- * - App computes totals, weighted percentage, grade and remark.
- * - App saves to assessmentEntries with account/school/branch/teacher/class/subject context.
+ * Built from the old AssessmentEntries logic and upgraded to the compact
+ * Students.tsx branch-admin UI pattern:
+ * - workspace-session aligned school, branch, and teacher resolution
+ * - hard teacher ownership filter through ClassSubject.teacherId
+ * - mobile-first card score entry
+ * - responsive score table entry for tablet/laptop/desktop
+ * - More sheet for cards/table/summary modes
+ * - filter sheet for class, subject, period, readiness, completion
+ * - offline-first createLocal/updateLocal/softDeleteLocal saving
+ * - ClassSubject -> AssessmentApplicability -> AssessmentStructureItems -> AssessmentEntry
  */
-/*
+
 import React, { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
 import { useActiveBranch } from "../../context/active-branch-context";
+import { useActiveMembership } from "../../context/active-membership-context";
 
 import {
   db,
-  AcademicPeriod,
-  AcademicStructure,
-  AssessmentApplicability,
-  AssessmentEntry,
-  AssessmentStructure,
-  AssessmentStructureItem,
-  Class,
-  ClassSubject,
-  Curriculum,
-  CurriculumPathway,
-  CurriculumSubject,
-  GradeRule,
-  GradingSystem,
-  Organization,
-  Student,
-  StudentEnrollment,
-  Subject,
-  Teacher,
+  type AcademicPeriod,
+  type AcademicStructure,
+  type AssessmentApplicability,
+  type AssessmentEntry,
+  type AssessmentStructure,
+  type AssessmentStructureItem,
+  type Class,
+  type ClassSubject,
+  type Curriculum,
+  type CurriculumPathway,
+  type CurriculumSubject,
+  type GradeRule,
+  type GradingSystem,
+  type Organization,
+  type Student,
+  type StudentEnrollment,
+  type Subject,
+  type Teacher,
 } from "../../lib/db/db";
 
+import {
+  createLocal,
+  updateLocal,
+  softDeleteLocal,
+  listActiveLocal,
+} from "../../lib/sync/syncUtils";
 
-
-// Local helper avoids prepareSyncData's generic SyncableRecord typing mismatch.
-// It preserves your offline-sync fields while allowing AssessmentEntry's real type.
-const makeAssessmentEntryPayload = (
-  payload: Partial<AssessmentEntry>,
-  existing?: Partial<AssessmentEntry>
-): AssessmentEntry => {
-  const now = Date.now();
-
-  return {
-    ...(existing || {}),
-    ...payload,
-    accountId: payload.accountId ?? existing?.accountId,
-    schoolId: payload.schoolId ?? existing?.schoolId,
-    branchId: payload.branchId ?? existing?.branchId,
-    academicPeriodId: payload.academicPeriodId ?? existing?.academicPeriodId,
-    assessmentStructureItemId:
-      payload.assessmentStructureItemId ?? existing?.assessmentStructureItemId,
-    studentId: payload.studentId ?? existing?.studentId,
-    classId: payload.classId ?? existing?.classId,
-    subjectId: payload.subjectId ?? existing?.subjectId,
-    score: Number(payload.score ?? existing?.score ?? 0),
-    createdAt: existing?.createdAt || payload.createdAt || now,
-    updatedAt: now,
-    version: Number(existing?.version || 0) + 1,
-    cloudId: payload.cloudId ?? existing?.cloudId,
-    synced: "pending" as unknown as AssessmentEntry["synced"],
-    isDeleted: payload.isDeleted ?? existing?.isDeleted ?? false,
-  } as unknown as AssessmentEntry;
-};
-
-
-// ======================================================
-// TYPES
-// ======================================================
+import { useDataRevision } from "../../hooks/useDataRevision";
+import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+type ViewMode = "cards" | "table" | "summary";
+type ToastTone = "success" | "error" | "info";
+type ReadinessFilter = "all" | "ready" | "missing";
+type CompletionFilter = "all" | "complete" | "partial" | "empty";
+type ScoreValue = number | "";
+type ScoreMap = Record<string, ScoreValue>;
 
 type TenantRow = {
-  accountId?: string;
-  schoolId?: number | string;
-  branchId?: number | string;
+  accountId?: string | null;
+  schoolId?: string | null;
+  branchId?: string | null;
   isDeleted?: boolean;
+  active?: boolean;
+  status?: string;
 };
 
-type ScoreMap = Record<string, number | "">;
-
-type ViewMode = "sheet" | "cards" | "summary";
+type OpenWorkspaceSession = {
+  membership?: Record<string, any> | null;
+  membershipId?: string | null;
+  role?: string | null;
+  schoolId?: string | null;
+  branchId?: string | null;
+  openedAt?: number;
+};
 
 type ClassSubjectOption = {
-  id: number;
+  id: string;
   row: ClassSubject;
   className: string;
   subjectName: string;
@@ -108,16 +91,16 @@ type ClassSubjectOption = {
   academicPeriodName: string;
   curriculumName: string;
   pathwayName: string;
-  organizationId?: number;
+  organizationId?: string;
+  ready: boolean;
   display: string;
 };
 
-type StudentRow = {
+type StudentScoreRow = {
   student: Student;
-  enrollment?: StudentEnrollment;
-};
-
-type ResultRow = {
+  enrollment: StudentEnrollment;
+  rowEntered: number;
+  rowExpected: number;
   rawTotal: number;
   weightedTotal: number;
   percentage: number;
@@ -126,88 +109,161 @@ type ResultRow = {
   gpa?: number;
 };
 
-type ResultMap = Record<string, ResultRow>;
+type ClassEntryView = {
+  id: string;
+  row: Class;
+  name: string;
+  code: string;
+  subjectCount: number;
+  readyCount: number;
+  missingCount: number;
+  studentCount: number;
+};
 
-type ToastTone = "success" | "error" | "info";
+type ClassSubjectEntryView = {
+  id: string;
+  option: ClassSubjectOption;
+  studentCount: number;
+  itemCount: number;
+  entered: number;
+  expected: number;
+  completion: number;
+};
 
-// ======================================================
-// HELPERS
-// ======================================================
+const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 
-const scoreKey = (studentId?: number, itemId?: number) => `${studentId || 0}-${itemId || 0}`;
-
-const idOf = (value: any) => {
-  if (value === undefined || value === null || value === "") return 0;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
+const idOf = (v: any): string => {
+  if (v === undefined || v === null) return "";
+  return String(v).trim();
 };
 
 const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
+const safeLower = (v: any) =>
+  String(v || "")
+    .toLowerCase()
+    .trim();
+const tableSafe = (name: string) => (db as any)[name];
+const scoreKey = (studentId?: string, itemId?: string) =>
+  `${studentId || ""}-${itemId || ""}`;
 
-const fullNameOf = (row: any) =>
-  row?.fullName ||
-  row?.name ||
-  [row?.firstName, row?.middleName, row?.lastName].filter(Boolean).join(" ") ||
-  "Unnamed";
+function safeStorageRead(key: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    return (
+      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
+    );
+  } catch {
+    return null;
+  }
+}
 
-const safeLower = (value: any) => String(value || "").toLowerCase().trim();
+function safeJsonRead<T>(key: string): T | null {
+  const raw = safeStorageRead(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
 
-const formatNumber = (value: number, digits = 2) => {
-  if (!Number.isFinite(value)) return "0";
-  return Number(value.toFixed(digits)).toString();
-};
+function readOpenWorkspaceSession() {
+  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
+}
 
-const toPercent = (value: number) => `${formatNumber(value)}%`;
+function readStoredActiveMembership() {
+  return safeJsonRead<Record<string, any>>("activeMembership");
+}
 
-const getActiveStatus = (row: any) => {
-  const status = safeLower(row?.status);
-  if (!status) return true;
-  return !["inactive", "withdrawn", "deleted", "archived", "suspended"].includes(status);
-};
+function firstPermanentId(...values: unknown[]): string {
+  for (const value of values) {
+    const parsed = idOf(value);
+    if (parsed) return parsed;
+  }
 
-const isActiveRow = (row: any) => row?.active !== false && !row?.isDeleted && getActiveStatus(row);
+  return "";
+}
 
-const dateText = (value?: number | string | null) => {
-  if (!value) return "Not set";
-  const time = typeof value === "number" ? value : new Date(value).getTime();
+function selectedWorkspaceSchoolId(args: {
+  openWorkspace?: OpenWorkspaceSession | null;
+  activeMembership?: Record<string, any> | null;
+  activeSchoolId?: unknown;
+  activeSchool?: Record<string, any> | null;
+  settings?: Record<string, any> | null;
+}) {
+  const storedMembership = readStoredActiveMembership();
+  const membership =
+    args.openWorkspace?.membership ||
+    args.activeMembership ||
+    storedMembership ||
+    null;
+  return firstPermanentId(
+    args.openWorkspace?.schoolId,
+    membership?.schoolId,
+    membership?.school?.id,
+    args.activeSchoolId,
+    args.activeSchool?.id,
+    args.settings?.schoolId,
+    safeStorageRead("activeSchoolId"),
+  );
+}
 
-  if (!Number.isFinite(time)) return "Not set";
+function selectedWorkspaceBranchId(args: {
+  openWorkspace?: OpenWorkspaceSession | null;
+  activeMembership?: Record<string, any> | null;
+  activeBranchId?: unknown;
+  activeBranch?: Record<string, any> | null;
+  settings?: Record<string, any> | null;
+}) {
+  const storedMembership = readStoredActiveMembership();
+  const membership =
+    args.openWorkspace?.membership ||
+    args.activeMembership ||
+    storedMembership ||
+    null;
+  return firstPermanentId(
+    args.openWorkspace?.branchId,
+    membership?.branchId,
+    membership?.schoolBranchId,
+    membership?.branch?.id,
+    args.activeBranchId,
+    args.activeBranch?.id,
+    args.settings?.branchId,
+    safeStorageRead("activeBranchId"),
+  );
+}
 
-  return new Intl.DateTimeFormat("en-GH", {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(time));
-};
+const isActiveRow = (row: any) => !row?.isDeleted && row?.active !== false;
 
-const makeEntryIdentity = (entry: AssessmentEntry) =>
-  [
-    entry.studentId,
-    entry.classSubjectId,
-    entry.assessmentStructureItemId,
-    entry.academicPeriodId,
-    entry.assessmentStructureId,
-  ].join(":");
+function Chip({
+  children,
+  tone = "gray",
+}: {
+  children: React.ReactNode;
+  tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple";
+}) {
+  return <span className={`ae-chip ${tone}`}>{children}</span>;
+}
 
-// ======================================================
-// COMPONENT
-// ======================================================
+function SliderIcon() {
+  return (
+    <svg className="ae-slider-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h9" />
+      <path d="M17 7h3" />
+      <circle cx="15" cy="7" r="2" />
+      <path d="M4 17h3" />
+      <path d="M11 17h9" />
+      <circle cx="9" cy="17" r="2" />
+    </svg>
+  );
+}
 
-export default function Assessmententry() {
-  const accountContext = useAccount() as any;
+export default function TeacherAssessmentEntry() {
+  const dataRevision = useDataRevision();
 
-  const {
-    accountId,
-    loading: accountLoading,
-    authenticated,
-    user,
-  } = accountContext;
-
-  const accountEmail = safeLower(accountContext?.email || user?.email);
-
+  const router = useRouter();
+  const { accountId, authenticated, loading: accountLoading } = useAccount();
   const { settings, loading: settingsLoading } = useSettings();
-
   const {
     activeSchool,
     activeSchoolId,
@@ -215,36 +271,58 @@ export default function Assessmententry() {
     activeBranchId,
     loading: contextLoading,
   } = useActiveBranch();
+  const { activeMembership } = useActiveMembership();
 
-  const schoolId = idOf(activeSchoolId || activeSchool?.id || settings?.schoolId);
-  const branchId = idOf(activeBranchId || activeBranch?.id || settings?.branchId);
+  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
+  const schoolId = selectedWorkspaceSchoolId({
+    openWorkspace,
+    activeMembership: activeMembership as any,
+    activeSchoolId,
+    activeSchool: activeSchool as any,
+    settings: settings as any,
+  });
+  const branchId = selectedWorkspaceBranchId({
+    openWorkspace,
+    activeMembership: activeMembership as any,
+    activeBranchId,
+    activeBranch: activeBranch as any,
+    settings: settings as any,
+  });
+
+  const teacherId = firstPermanentId(
+    openWorkspace?.membership?.teacherId,
+    (activeMembership as any)?.teacherId,
+    readStoredActiveMembership()?.teacherId,
+  );
+
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
 
-  // ======================================================
-  // STATE
-  // ======================================================
-
-  const [loading, setLoading] = useState(true);
+  const { loading, setLoading } = useBackgroundLoader();
   const [saving, setSaving] = useState(false);
-
-  const [viewMode, setViewMode] = useState<ViewMode>("sheet");
   const [sessionStarted, setSessionStarted] = useState(false);
-
-  const [toast, setToast] = useState<{ tone: ToastTone; message: string } | null>(null);
+  const [toast, setToast] = useState<{
+    tone: ToastTone;
+    message: string;
+  } | null>(null);
 
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
-  const [academicStructures, setAcademicStructures] = useState<AcademicStructure[]>([]);
+  const [academicStructures, setAcademicStructures] = useState<
+    AcademicStructure[]
+  >([]);
   const [periods, setPeriods] = useState<AcademicPeriod[]>([]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [curriculums, setCurriculums] = useState<Curriculum[]>([]);
   const [pathways, setPathways] = useState<CurriculumPathway[]>([]);
-  const [curriculumSubjects, setCurriculumSubjects] = useState<CurriculumSubject[]>([]);
-
+  const [curriculumSubjects, setCurriculumSubjects] = useState<
+    CurriculumSubject[]
+  >([]);
   const [classSubjects, setClassSubjects] = useState<ClassSubject[]>([]);
-  const [applicabilities, setApplicabilities] = useState<AssessmentApplicability[]>([]);
+  const [applicabilities, setApplicabilities] = useState<
+    AssessmentApplicability[]
+  >([]);
   const [structures, setStructures] = useState<AssessmentStructure[]>([]);
   const [items, setItems] = useState<AssessmentStructureItem[]>([]);
   const [entries, setEntries] = useState<AssessmentEntry[]>([]);
@@ -252,52 +330,47 @@ export default function Assessmententry() {
   const [rules, setRules] = useState<GradeRule[]>([]);
   const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
 
-  const [teacherId, setTeacherId] = useState<number>(0);
-  const [classSubjectId, setClassSubjectId] = useState<number>(0);
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
   const [search, setSearch] = useState("");
+  const [classSubjectId, setClassSubjectId] = useState("all");
+  const [selectedClassId, setSelectedClassId] = useState<string>("");
+  const [filterClassId, setFilterClassId] = useState("all");
+  const [filterSubjectId, setFilterSubjectId] = useState("all");
+  const [filterPeriodId, setFilterPeriodId] = useState("all");
+  const [filterReadiness, setFilterReadiness] =
+    useState<ReadinessFilter>("all");
+  const [filterCompletion, setFilterCompletion] =
+    useState<CompletionFilter>("all");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [scores, setScores] = useState<ScoreMap>({});
 
-  // ======================================================
-  // TENANT / TEACHER FILTERS
-  // ======================================================
+  useEffect(() => {
+    if (accountLoading || contextLoading) return;
+    if (!authenticated || !accountId) router.replace("/login");
+    else if (!schoolId || !branchId) router.replace("/account");
+  }, [
+    accountLoading,
+    contextLoading,
+    authenticated,
+    accountId,
+    schoolId,
+    branchId,
+    router,
+  ]);
 
-  const sameTenant = (row: TenantRow) => {
-    const rowAccountOk = !row.accountId || row.accountId === accountId;
-    const rowSchoolOk = !row.schoolId || sameId(row.schoolId, schoolId);
-    const rowBranchOk = !row.branchId || sameId(row.branchId, branchId);
+  const sameTenant = (row: TenantRow) =>
+    (!row.accountId || row.accountId === accountId) &&
+    (!row.schoolId || sameId(row.schoolId, schoolId)) &&
+    (!row.branchId || sameId(row.branchId, branchId)) &&
+    !row.isDeleted;
 
-    return Boolean(rowAccountOk && rowSchoolOk && rowBranchOk && !row.isDeleted);
-  };
-
-  const matchSignedInTeacher = (teacher: Teacher) => {
-    const anyTeacher = teacher as any;
-    const currentUserId =
-      user?.id ||
-      user?.localId ||
-      user?.userId ||
-      user?.teacherId ||
-      user?.teacherLocalId ||
-      accountContext?.userId ||
-      accountContext?.localId;
-
-    const currentTeacherId =
-      user?.teacherId ||
-      user?.teacherLocalId ||
-      accountContext?.teacherId ||
-      accountContext?.teacherLocalId;
-
-    if (currentTeacherId && sameId(anyTeacher.id, currentTeacherId)) return true;
-
-    if (currentUserId && sameId(anyTeacher.userId, currentUserId)) return true;
-    if (currentUserId && sameId(anyTeacher.accountUserId, currentUserId)) return true;
-    if (currentUserId && sameId(anyTeacher.userLocalId, currentUserId)) return true;
-    if (currentUserId && sameId(anyTeacher.localUserId, currentUserId)) return true;
-
-    if (accountEmail && safeLower(anyTeacher.email) === accountEmail) return true;
-    if (accountEmail && safeLower(anyTeacher.workEmail) === accountEmail) return true;
-    if (accountEmail && safeLower(anyTeacher.phone) === accountEmail) return true;
-
-    return false;
+  const showToast = (tone: ToastTone, message: string) => {
+    setToast({ tone, message });
+    window.setTimeout(
+      () => setToast((c) => (c?.message === message ? null : c)),
+      4200,
+    );
   };
 
   const clearData = () => {
@@ -320,24 +393,11 @@ export default function Assessmententry() {
     setRules([]);
     setEnrollments([]);
     setScores({});
-    setTeacherId(0);
-    setClassSubjectId(0);
     setSessionStarted(false);
   };
 
-  const showToast = (tone: ToastTone, message: string) => {
-    setToast({ tone, message });
-    window.setTimeout(() => {
-      setToast((current) => (current?.message === message ? null : current));
-    }, 4500);
-  };
-
-  // ======================================================
-  // LOAD DATA
-  // ======================================================
-
   const load = async () => {
-    if (!authenticated || !accountId || !schoolId || !branchId) {
+    if (!authenticated || !accountId || !schoolId || !branchId || !teacherId) {
       clearData();
       setLoading(false);
       return;
@@ -345,7 +405,11 @@ export default function Assessmententry() {
 
     try {
       setLoading(true);
-
+      const tenant = {
+        accountId,
+        schoolId: schoolId,
+        branchId: branchId,
+      } as any;
       const [
         studentRows,
         classRows,
@@ -366,115 +430,95 @@ export default function Assessmententry() {
         ruleRows,
         enrollmentRows,
       ] = await Promise.all([
-        db.students.toArray(),
-        db.classes.toArray(),
-        db.subjects.toArray(),
-        db.teachers.toArray(),
-        db.academicStructures.toArray(),
-        db.academicPeriods.toArray(),
-        db.organizations.toArray(),
-        db.curriculums.toArray(),
-        db.curriculumPathways.toArray(),
-        db.curriculumSubjects.toArray(),
-        db.classSubjects.toArray(),
-        db.assessmentApplicabilities.toArray(),
-        db.assessmentStructures.toArray(),
-        db.assessmentStructureItems.toArray(),
-        db.assessmentEntries.toArray(),
-        db.gradingSystems.toArray(),
-        db.gradeRules.toArray(),
-        db.studentEnrollments.toArray(),
+        tableSafe("students")?.toArray?.() || [],
+        listActiveLocal("classes", tenant),
+        listActiveLocal("subjects", tenant),
+        listActiveLocal("teachers", tenant),
+        listActiveLocal("academicStructures", tenant),
+        listActiveLocal("academicPeriods", tenant),
+        listActiveLocal("organizations", tenant),
+        listActiveLocal("curriculums", tenant),
+        listActiveLocal("curriculumPathways", tenant),
+        listActiveLocal("curriculumSubjects", tenant),
+        listActiveLocal("classSubjects", tenant),
+        listActiveLocal("assessmentApplicabilities", tenant),
+        listActiveLocal("assessmentStructures", tenant),
+        listActiveLocal("assessmentStructureItems", tenant),
+        tableSafe("assessmentEntries")?.toArray?.() || [],
+        listActiveLocal("gradingSystems", tenant),
+        listActiveLocal("gradeRules", tenant),
+        tableSafe("studentEnrollments")?.toArray?.() || [],
       ]);
 
-      const tenantTeachers = teacherRows.filter((row) => sameTenant(row as TenantRow));
-      const signedTeacher =
-        tenantTeachers.find(matchSignedInTeacher) ||
-        tenantTeachers.find((row: any) => sameId(row.id, user?.teacherId || user?.teacherLocalId)) ||
-        tenantTeachers[0];
-
-      const signedTeacherId = idOf((signedTeacher as any)?.id);
-
-      setTeacherId(signedTeacherId);
-
-      const teacherClassSubjects = classSubjectRows
-        .filter((row) => sameTenant(row as TenantRow))
-        .filter(isActiveRow)
-        .filter((row: any) => {
-          if (!signedTeacherId) return false;
-          return (
-            sameId(row.teacherId, signedTeacherId) ||
-            sameId(row.primaryTeacherId, signedTeacherId) ||
-            sameId(row.assignedTeacherId, signedTeacherId)
-          );
-        });
-
-      const classSubjectClassIds = new Set(teacherClassSubjects.map((row: any) => idOf(row.classId)));
-      const classSubjectSubjectIds = new Set(teacherClassSubjects.map((row: any) => idOf(row.subjectId)));
-
-      setTeachers(tenantTeachers);
       setStudents(
-        studentRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter(isActiveRow)
-          .sort((a, b) => fullNameOf(a).localeCompare(fullNameOf(b)))
+        (studentRows as Student[])
+          .filter((r) => sameTenant(r as TenantRow))
+          .filter(
+            (r: any) =>
+              !["withdrawn", "deleted", "archived"].includes(
+                safeLower(r.status),
+              ),
+          )
+          .sort((a: any, b: any) =>
+            String(a.fullName || "").localeCompare(String(b.fullName || "")),
+          ),
       );
       setClasses(
-        classRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter((row: any) => !classSubjectClassIds.size || classSubjectClassIds.has(idOf(row.id)))
+        (classRows as Class[]).sort((a: any, b: any) =>
+          String(a.name || "").localeCompare(String(b.name || "")),
+        ),
       );
       setSubjects(
-        subjectRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter((row: any) => !classSubjectSubjectIds.size || classSubjectSubjectIds.has(idOf(row.id)))
+        (subjectRows as Subject[]).sort((a: any, b: any) =>
+          String(a.name || "").localeCompare(String(b.name || "")),
+        ),
       );
-      setAcademicStructures(academicStructureRows.filter((row) => sameTenant(row as TenantRow)));
-      setPeriods(periodRows.filter((row) => sameTenant(row as TenantRow)));
-      setOrganizations(organizationRows.filter((row) => sameTenant(row as TenantRow)));
-      setCurriculums(curriculumRows.filter((row) => sameTenant(row as TenantRow)));
-      setPathways(pathwayRows.filter((row) => sameTenant(row as TenantRow)));
-      setCurriculumSubjects(curriculumSubjectRows.filter((row) => sameTenant(row as TenantRow)));
-
-      setClassSubjects(teacherClassSubjects);
-
-      setApplicabilities(
-        applicabilityRows
-          .filter((row) => sameTenant(row as TenantRow))
+      setTeachers(
+        (teacherRows as Teacher[]).sort((a: any, b: any) =>
+          String(a.fullName || "").localeCompare(String(b.fullName || "")),
+        ),
+      );
+      setAcademicStructures(academicStructureRows as AcademicStructure[]);
+      setPeriods(periodRows as AcademicPeriod[]);
+      setOrganizations(organizationRows as Organization[]);
+      setCurriculums(curriculumRows as Curriculum[]);
+      setPathways(pathwayRows as CurriculumPathway[]);
+      setCurriculumSubjects(curriculumSubjectRows as CurriculumSubject[]);
+      setClassSubjects(
+        (classSubjectRows as ClassSubject[])
           .filter(isActiveRow)
+          .filter((row: any) => sameId(row.teacherId, teacherId)),
+      );
+      setApplicabilities(
+        (applicabilityRows as AssessmentApplicability[]).filter(isActiveRow),
       );
       setStructures(
-        structureRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter(isActiveRow)
+        (structureRows as AssessmentStructure[]).filter(isActiveRow),
       );
-      setItems(
-        itemRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter(isActiveRow)
+      setItems((itemRows as AssessmentStructureItem[]).filter(isActiveRow));
+      setEntries(
+        (entryRows as AssessmentEntry[]).filter(
+          (r) => sameTenant(r as TenantRow) && !r.isDeleted,
+        ),
       );
-      setEntries(entryRows.filter((row) => sameTenant(row as TenantRow)));
-      setGradings(
-        gradingRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter(isActiveRow)
+      setGradings((gradingRows as GradingSystem[]).filter(isActiveRow));
+      setRules((ruleRows as GradeRule[]).filter(isActiveRow));
+      setEnrollments(
+        (enrollmentRows as StudentEnrollment[]).filter(
+          (r) => sameTenant(r as TenantRow) && !r.isDeleted,
+        ),
       );
-      setRules(
-        ruleRows
-          .filter((row) => sameTenant(row as TenantRow))
-          .filter(isActiveRow)
-      );
-      setEnrollments(enrollmentRows.filter((row) => sameTenant(row as TenantRow)));
     } catch (error) {
-      console.error("Failed to load teacher assessment entries:", error);
+      console.error(error);
       clearData();
-      showToast("error", "Failed to load assessment data.");
+      showToast("error", "Failed to load assessment entries.");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (accountLoading || contextLoading || settingsLoading) return;
+    if (accountLoading || settingsLoading || contextLoading) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -482,55 +526,88 @@ export default function Assessmententry() {
     accountId,
     schoolId,
     branchId,
+    teacherId,
     accountLoading,
-    contextLoading,
     settingsLoading,
+    contextLoading,
+    dataRevision,
   ]);
 
-  // ======================================================
-  // LOOKUPS
-  // ======================================================
-
-  const classMap = useMemo(() => new Map(classes.map((row: any) => [idOf(row.id), row])), [classes]);
-  const subjectMap = useMemo(() => new Map(subjects.map((row: any) => [idOf(row.id), row])), [subjects]);
-  const teacherMap = useMemo(() => new Map(teachers.map((row: any) => [idOf(row.id), row])), [teachers]);
-  const structureMap = useMemo(
-    () => new Map(academicStructures.map((row: any) => [idOf(row.id), row])),
-    [academicStructures]
+  const classMap = useMemo(
+    () => new Map(classes.map((r: any) => [idOf(r.id), r])),
+    [classes],
   );
-  const periodMap = useMemo(() => new Map(periods.map((row: any) => [idOf(row.id), row])), [periods]);
-  const orgMap = useMemo(() => new Map(organizations.map((row: any) => [idOf(row.id), row])), [organizations]);
+  const subjectMap = useMemo(
+    () => new Map(subjects.map((r: any) => [idOf(r.id), r])),
+    [subjects],
+  );
+  const teacherMap = useMemo(
+    () => new Map(teachers.map((r: any) => [idOf(r.id), r])),
+    [teachers],
+  );
+  const academicStructureMap = useMemo(
+    () => new Map(academicStructures.map((r: any) => [idOf(r.id), r])),
+    [academicStructures],
+  );
+  const periodMap = useMemo(
+    () => new Map(periods.map((r: any) => [idOf(r.id), r])),
+    [periods],
+  );
+  const organizationMap = useMemo(
+    () => new Map(organizations.map((r: any) => [idOf(r.id), r])),
+    [organizations],
+  );
   const curriculumSubjectMap = useMemo(
-    () => new Map(curriculumSubjects.map((row: any) => [idOf(row.id), row])),
-    [curriculumSubjects]
+    () => new Map(curriculumSubjects.map((r: any) => [idOf(r.id), r])),
+    [curriculumSubjects],
   );
-  const curriculumMap = useMemo(() => new Map(curriculums.map((row: any) => [idOf(row.id), row])), [curriculums]);
-  const pathwayMap = useMemo(() => new Map(pathways.map((row: any) => [idOf(row.id), row])), [pathways]);
+  const curriculumMap = useMemo(
+    () => new Map(curriculums.map((r: any) => [idOf(r.id), r])),
+    [curriculums],
+  );
+  const pathwayMap = useMemo(
+    () => new Map(pathways.map((r: any) => [idOf(r.id), r])),
+    [pathways],
+  );
 
-  // ======================================================
-  // CLASS SUBJECT OPTIONS
-  // ======================================================
+  const applicabilityMap = useMemo(() => {
+    const m = new Map<string, AssessmentApplicability>();
+    applicabilities.forEach((row: any) => {
+      if (idOf(row.classSubjectId) && row.active !== false && !row.isDeleted)
+        m.set(idOf(row.classSubjectId), row);
+    });
+    return m;
+  }, [applicabilities]);
 
   const classSubjectOptions = useMemo<ClassSubjectOption[]>(() => {
     return classSubjects
       .map((row: any) => {
         const id = idOf(row.id);
-        const classRow = classMap.get(idOf(row.classId));
-        const subject = subjectMap.get(idOf(row.subjectId));
-        const teacher = row.teacherId ? teacherMap.get(idOf(row.teacherId)) : teacherMap.get(teacherId);
-        const academicStructure = structureMap.get(idOf(row.academicStructureId));
-        const period = row.academicPeriodId ? periodMap.get(idOf(row.academicPeriodId)) : undefined;
-        const curriculumSubject = curriculumSubjectMap.get(idOf(row.curriculumSubjectId));
-        const curriculum = curriculumSubject ? curriculumMap.get(idOf((curriculumSubject as any).curriculumId)) : undefined;
-        const pathway = (curriculumSubject as any)?.pathwayId
-          ? pathwayMap.get(idOf((curriculumSubject as any).pathwayId))
+        const cls: any = classMap.get(idOf(row.classId));
+        const subj: any = subjectMap.get(idOf(row.subjectId));
+        const teacher: any = row.teacherId
+          ? teacherMap.get(idOf(row.teacherId))
           : undefined;
-
-        const subjectName = row.name || (subject as any)?.name || "Unknown Subject";
-        const subjectCode = row.code || (subject as any)?.code;
-        const className = (classRow as any)?.name || "Unknown Class";
-        const academicPeriodName = (period as any)?.name || "All Periods";
-        const teacherName = fullNameOf(teacher);
+        const academicStructure: any = academicStructureMap.get(
+          idOf(row.academicStructureId),
+        );
+        const period: any = row.academicPeriodId
+          ? periodMap.get(idOf(row.academicPeriodId))
+          : undefined;
+        const curriculumSubject: any = curriculumSubjectMap.get(
+          idOf(row.curriculumSubjectId),
+        );
+        const curriculum: any = curriculumSubject
+          ? curriculumMap.get(idOf(curriculumSubject.curriculumId))
+          : undefined;
+        const pathway: any = curriculumSubject?.pathwayId
+          ? pathwayMap.get(idOf(curriculumSubject.pathwayId))
+          : undefined;
+        const subjectName = row.name || subj?.name || "Unknown Subject";
+        const subjectCode = row.code || subj?.code || "";
+        const className = cls?.name || "Unknown Class";
+        const academicPeriodName = period?.name || "All Periods";
+        const ready = !!applicabilityMap.get(id);
 
         return {
           id,
@@ -538,139 +615,252 @@ export default function Assessmententry() {
           className,
           subjectName,
           subjectCode,
-          teacherName,
-          academicStructureName: (academicStructure as any)?.name || "Unknown academic structure",
+          teacherName: teacher?.fullName || "No teacher assigned",
+          academicStructureName: academicStructure?.name || "Unknown structure",
           academicPeriodName,
-          curriculumName: (curriculum as any)?.name || "No curriculum",
-          pathwayName: (pathway as any)?.name || "No pathway",
-          organizationId: idOf((curriculumSubject as any)?.organizationId) || undefined,
+          curriculumName: curriculum?.name || "No curriculum",
+          pathwayName: pathway?.name || "No pathway",
+          organizationId: curriculumSubject?.organizationId,
+          ready,
           display: `${className} • ${subjectName}${subjectCode ? ` (${subjectCode})` : ""} • ${academicPeriodName}`,
         };
       })
-      .filter((option) => option.id > 0)
+      .filter((option) => Boolean(option.id))
+      .filter(
+        (option) =>
+          filterClassId === "all" || sameId(option.row.classId, filterClassId),
+      )
+      .filter(
+        (option) =>
+          filterSubjectId === "all" ||
+          sameId(option.row.subjectId, filterSubjectId),
+      )
+      .filter(
+        (option) =>
+          filterPeriodId === "all" ||
+          sameId(option.row.academicPeriodId || "", filterPeriodId),
+      )
+      .filter(
+        (option) =>
+          filterReadiness === "all" ||
+          (filterReadiness === "ready" ? option.ready : !option.ready),
+      )
       .sort((a, b) => a.display.localeCompare(b.display));
   }, [
     classSubjects,
     classMap,
     subjectMap,
     teacherMap,
-    teacherId,
-    structureMap,
+    academicStructureMap,
     periodMap,
     curriculumSubjectMap,
     curriculumMap,
     pathwayMap,
+    applicabilityMap,
+    filterClassId,
+    filterSubjectId,
+    filterPeriodId,
+    filterReadiness,
   ]);
 
+  const selectedClass = useMemo(
+    () =>
+      selectedClassId ? (classMap.get(idOf(selectedClassId)) as any) : null,
+    [classMap, selectedClassId],
+  );
+
+  const selectedClassSubjectOptions = useMemo(() => {
+    if (!selectedClassId) return [];
+    return classSubjectOptions.filter((option) =>
+      sameId((option.row as any).classId, selectedClassId),
+    );
+  }, [classSubjectOptions, selectedClassId]);
+
+  const classSubjectEntryViews = useMemo<ClassSubjectEntryView[]>(() => {
+    return selectedClassSubjectOptions.map((option) => {
+      const app = applicabilityMap.get(option.id) as any;
+      const optionItems = app?.assessmentStructureId
+        ? items.filter(
+            (row: any) =>
+              sameId(row.assessmentStructureId, app.assessmentStructureId) &&
+              isActiveRow(row),
+          )
+        : [];
+      const periodId = idOf((option.row as any).academicPeriodId);
+      const studentCount = enrollments.filter((row: any) => {
+        if (!sameId(row.classId, (option.row as any).classId)) return false;
+        if (
+          !sameId(
+            row.academicStructureId,
+            (option.row as any).academicStructureId,
+          )
+        )
+          return false;
+        if (periodId && !sameId(row.academicPeriodId, periodId)) return false;
+        return row.status === "active" && !row.isDeleted;
+      }).length;
+      const expected = studentCount * optionItems.length;
+      const entered = entries.filter((entry: any) => {
+        if (!sameId(entry.classSubjectId, option.id)) return false;
+        if (
+          !app ||
+          !sameId(entry.assessmentStructureId || "", app.assessmentStructureId)
+        )
+          return false;
+        return (
+          !entry.isDeleted &&
+          entry.score !== undefined &&
+          entry.score !== null &&
+          entry.score !== ""
+        );
+      }).length;
+      const completion = expected
+        ? Math.round((Math.min(entered, expected) / expected) * 100)
+        : 0;
+      return {
+        id: option.id,
+        option,
+        studentCount,
+        itemCount: optionItems.length,
+        entered,
+        expected,
+        completion,
+      };
+    });
+  }, [
+    selectedClassSubjectOptions,
+    applicabilityMap,
+    items,
+    enrollments,
+    entries,
+  ]);
+
+  const classCards = useMemo<ClassEntryView[]>(() => {
+    const term = search.trim().toLowerCase();
+    return classes
+      .filter(isActiveRow)
+      .map((classRow: any) => {
+        const id = idOf(classRow.id);
+        const options = classSubjectOptions.filter((option) =>
+          sameId((option.row as any).classId, id),
+        );
+        const readyCount = options.filter((option) => option.ready).length;
+        const studentIds = new Set(
+          enrollments
+            .filter(
+              (row: any) =>
+                sameId(row.classId, id) &&
+                row.status === "active" &&
+                !row.isDeleted,
+            )
+            .map((row: any) => idOf(row.studentId))
+            .filter(Boolean),
+        );
+        return {
+          id,
+          row: classRow,
+          name: classRow.name || `Class ${id}`,
+          code: classRow.code || "",
+          subjectCount: options.length,
+          readyCount,
+          missingCount: Math.max(0, options.length - readyCount),
+          studentCount: studentIds.size,
+        };
+      })
+      .filter(
+        (item) =>
+          !term ||
+          `${item.name} ${item.code} ${item.subjectCount} subjects`
+            .toLowerCase()
+            .includes(term),
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [classes, classSubjectOptions, enrollments, search]);
+
   const selectedOption = useMemo(() => {
-    return classSubjectOptions.find((option) => option.id === classSubjectId);
+    const selectedId = idOf(classSubjectId);
+    return classSubjectOptions.find((option) => sameId(option.id, selectedId));
   }, [classSubjectOptions, classSubjectId]);
 
   const currentClassSubject = selectedOption?.row;
-
-  // ======================================================
-  // APPLICABILITY / STRUCTURE / GRADING
-  // ======================================================
-
-  const applicability = useMemo(() => {
-    if (!classSubjectId) return undefined;
-
-    const current: any = currentClassSubject;
-
-    return applicabilities.find((row: any) => {
-      if (row.classSubjectId && sameId(row.classSubjectId, classSubjectId)) return true;
-
-      const classOk = !row.classId || sameId(row.classId, current?.classId);
-      const subjectOk = !row.subjectId || sameId(row.subjectId, current?.subjectId);
-      const periodOk = !row.academicPeriodId || sameId(row.academicPeriodId, current?.academicPeriodId);
-      const structureOk =
-        !row.academicStructureId || sameId(row.academicStructureId, current?.academicStructureId);
-
-      return classOk && subjectOk && periodOk && structureOk;
-    });
-  }, [applicabilities, classSubjectId, currentClassSubject]);
-
-  const assessmentStructure = useMemo(() => {
-    if (!applicability?.assessmentStructureId) return undefined;
-    return structures.find((row: any) => sameId(row.id, applicability.assessmentStructureId));
-  }, [structures, applicability]);
-
+  const applicability = useMemo(
+    () =>
+      selectedOption ? applicabilityMap.get(selectedOption.id) : undefined,
+    [applicabilityMap, selectedOption],
+  );
+  const assessmentStructure = useMemo(
+    () =>
+      structures.find((row: any) =>
+        sameId(row.id, applicability?.assessmentStructureId),
+      ),
+    [structures, applicability],
+  );
+  const gradingSystem = useMemo(
+    () =>
+      gradings.find((row: any) =>
+        sameId(row.id, applicability?.gradingSystemId),
+      ),
+    [gradings, applicability],
+  );
   const structureItems = useMemo(() => {
     if (!applicability?.assessmentStructureId) return [];
-
     return items
-      .filter((row: any) => sameId(row.assessmentStructureId, applicability.assessmentStructureId))
-      .filter(isActiveRow)
-      .sort((a: any, b: any) => Number(a.order || a.position || 0) - Number(b.order || b.position || 0));
+      .filter(
+        (row: any) =>
+          sameId(
+            row.assessmentStructureId,
+            applicability.assessmentStructureId,
+          ) && isActiveRow(row),
+      )
+      .sort((a: any, b: any) => Number(a.order || 0) - Number(b.order || 0));
   }, [items, applicability]);
-
-  const gradingSystem = useMemo(() => {
-    if (!applicability?.gradingSystemId) return undefined;
-    return gradings.find((row: any) => sameId(row.id, applicability.gradingSystemId));
-  }, [gradings, applicability]);
-
   const gradeRules = useMemo(() => {
     if (!gradingSystem?.id) return [];
-
     return rules
-      .filter((row: any) => sameId(row.gradingSystemId, gradingSystem.id))
-      .filter(isActiveRow)
-      .sort((a: any, b: any) => Number(b.minScore || 0) - Number(a.minScore || 0));
+      .filter(
+        (row: any) =>
+          sameId(row.gradingSystemId, gradingSystem.id) && isActiveRow(row),
+      )
+      .sort(
+        (a: any, b: any) => Number(b.minScore || 0) - Number(a.minScore || 0),
+      );
   }, [rules, gradingSystem]);
 
-  const organizationName = useMemo(() => {
-    const orgId = idOf((applicability as any)?.organizationId || selectedOption?.organizationId);
-    if (!orgId) return "No organization";
-    return (orgMap.get(orgId) as any)?.name || "Unknown organization";
-  }, [applicability, selectedOption, orgMap]);
-
-  // ======================================================
-  // STUDENTS FOR SELECTED CLASS SUBJECT
-  // ======================================================
-
-  const studentRows = useMemo<StudentRow[]>(() => {
-    if (!currentClassSubject) return [];
-
-    const current: any = currentClassSubject;
-    const periodId = idOf(current.academicPeriodId);
-
-    return students
-      .map((student: any) => {
-        const enrollment = enrollments.find((row: any) => {
-          if (!sameId(row.studentId, student.id)) return false;
-          if (!sameId(row.classId, current.classId)) return false;
-
-          if (current.academicStructureId && row.academicStructureId) {
-            if (!sameId(row.academicStructureId, current.academicStructureId)) return false;
-          }
-
-          if (periodId && row.academicPeriodId) {
-            if (!sameId(row.academicPeriodId, periodId)) return false;
-          }
-
-          return isActiveRow(row) || safeLower(row.status) === "active";
-        });
-
-        return enrollment ? { student, enrollment } : undefined;
-      })
-      .filter(Boolean) as StudentRow[];
-  }, [students, enrollments, currentClassSubject]);
-
-  const filteredStudentRows = useMemo(() => {
-    const query = search.trim().toLowerCase();
-
-    if (!query) return studentRows;
-
-    return studentRows.filter(({ student }: any) => {
-      return `${fullNameOf(student)} ${student.admissionNumber || ""} ${student.indexNumber || ""}`
-        .toLowerCase()
-        .includes(query);
+  const relevantEntries = useMemo(() => {
+    if (!currentClassSubject || !applicability) return [];
+    const academicPeriodId = idOf(
+      (currentClassSubject as any).academicPeriodId,
+    );
+    return entries.filter((entry: any) => {
+      if (!sameId(entry.classSubjectId, (currentClassSubject as any).id))
+        return false;
+      if (!sameId(entry.classId, (currentClassSubject as any).classId))
+        return false;
+      if (!sameId(entry.subjectId, (currentClassSubject as any).subjectId))
+        return false;
+      if (
+        !sameId(
+          entry.academicStructureId || "",
+          (currentClassSubject as any).academicStructureId,
+        )
+      )
+        return false;
+      if (!sameId(entry.academicPeriodId || "", academicPeriodId)) return false;
+      if (
+        !sameId(
+          entry.assessmentStructureId || "",
+          applicability.assessmentStructureId,
+        )
+      )
+        return false;
+      if (
+        applicability.gradingSystemId &&
+        !sameId(entry.gradingSystemId || "", applicability.gradingSystemId)
+      )
+        return false;
+      return !entry.isDeleted;
     });
-  }, [studentRows, search]);
-
-  // ======================================================
-  // SCORE HYDRATION
-  // ======================================================
+  }, [entries, currentClassSubject, applicability]);
 
   useEffect(() => {
     if (!currentClassSubject || !applicability) {
@@ -679,85 +869,88 @@ export default function Assessmententry() {
       return;
     }
 
-    const current: any = currentClassSubject;
-    const academicPeriodId = idOf(current.academicPeriodId);
-    const assessmentStructureId = idOf(applicability.assessmentStructureId);
-
     const nextScores: ScoreMap = {};
-
-    entries
-      .filter((entry: any) => {
-        if (!sameId(entry.classSubjectId, current.id)) return false;
-        if (!sameId(entry.classId, current.classId)) return false;
-        if (!sameId(entry.subjectId, current.subjectId)) return false;
-
-        if (current.academicStructureId && entry.academicStructureId) {
-          if (!sameId(entry.academicStructureId, current.academicStructureId)) return false;
-        }
-
-        if (academicPeriodId && entry.academicPeriodId) {
-          if (!sameId(entry.academicPeriodId, academicPeriodId)) return false;
-        }
-
-        if (assessmentStructureId && entry.assessmentStructureId) {
-          if (!sameId(entry.assessmentStructureId, assessmentStructureId)) return false;
-        }
-
-        if (applicability.gradingSystemId && entry.gradingSystemId) {
-          if (!sameId(entry.gradingSystemId, applicability.gradingSystemId)) return false;
-        }
-
-        return true;
-      })
-      .forEach((entry: any) => {
-        nextScores[scoreKey(idOf(entry.studentId), idOf(entry.assessmentStructureItemId))] = Number(entry.score);
-      });
-
+    relevantEntries.forEach((entry: any) => {
+      nextScores[
+        scoreKey(idOf(entry.studentId), idOf(entry.assessmentStructureItemId))
+      ] = Number(entry.score || 0);
+    });
     setScores(nextScores);
     setSessionStarted(false);
-  }, [entries, currentClassSubject, applicability]);
+  }, [currentClassSubject, applicability, relevantEntries]);
 
-  // ======================================================
-  // COMPUTED RESULTS
-  // ======================================================
+  const enrolledStudents = useMemo(() => {
+    if (!currentClassSubject) return [];
+    const periodId = idOf((currentClassSubject as any).academicPeriodId);
+    return students
+      .map((student: any) => {
+        const enrollment = enrollments.find((row: any) => {
+          if (!sameId(row.studentId, student.id)) return false;
+          if (!sameId(row.classId, (currentClassSubject as any).classId))
+            return false;
+          if (
+            !sameId(
+              row.academicStructureId,
+              (currentClassSubject as any).academicStructureId,
+            )
+          )
+            return false;
+          if (periodId && !sameId(row.academicPeriodId, periodId)) return false;
+          return row.status === "active";
+        });
+        return enrollment ? { student, enrollment } : undefined;
+      })
+      .filter(Boolean) as { student: Student; enrollment: StudentEnrollment }[];
+  }, [students, enrollments, currentClassSubject]);
 
-  const computedResults = useMemo<ResultMap>(() => {
-    const result: ResultMap = {};
+  const existingEntryMap = useMemo(() => {
+    const m = new Map<string, AssessmentEntry>();
+    relevantEntries.forEach((entry: any) =>
+      m.set(
+        scoreKey(idOf(entry.studentId), idOf(entry.assessmentStructureItemId)),
+        entry,
+      ),
+    );
+    return m;
+  }, [relevantEntries]);
 
-    for (const { student } of filteredStudentRows as any[]) {
+  const studentScoreRows = useMemo<StudentScoreRow[]>(() => {
+    return enrolledStudents.map(({ student, enrollment }) => {
       let rawTotal = 0;
       let weightedTotal = 0;
       let maxTotal = 0;
-      let totalWeight = 0;
+      let rowEntered = 0;
 
       for (const item of structureItems as any[]) {
-        const value = scores[scoreKey(idOf(student.id), idOf(item.id))];
-        const score = value === "" || value == null ? 0 : Number(value);
+        const value =
+          scores[scoreKey(idOf((student as any).id), idOf(item.id))];
+        const hasScore = value !== "" && value !== undefined && value !== null;
+        const score = hasScore ? Number(value) : 0;
         const maxScore = Math.max(1, Number(item.maxScore || 100));
         const weight = Number(item.weight || 0);
 
+        if (hasScore) rowEntered += 1;
         rawTotal += score;
         maxTotal += maxScore;
-
-        if (weight > 0) {
-          totalWeight += weight;
-          weightedTotal += (score / maxScore) * weight;
-        }
+        weightedTotal += (score / maxScore) * weight;
       }
 
       const percentage = structureItems.length
-        ? totalWeight > 0
-          ? Number(weightedTotal.toFixed(2))
-          : maxTotal
-            ? Number(((rawTotal / maxTotal) * 100).toFixed(2))
-            : 0
-        : 0;
+        ? Number(weightedTotal.toFixed(2))
+        : maxTotal
+          ? Number(((rawTotal / maxTotal) * 100).toFixed(2))
+          : 0;
+      const matchedRule = gradeRules.find(
+        (rule: any) =>
+          percentage >= Number(rule.minScore || 0) &&
+          percentage <= Number(rule.maxScore || 100),
+      );
 
-      const matchedRule = (gradeRules as any[]).find((rule) => {
-        return percentage >= Number(rule.minScore) && percentage <= Number(rule.maxScore);
-      });
-
-      result[String(student.id)] = {
+      return {
+        student,
+        enrollment,
+        rowEntered,
+        rowExpected: structureItems.length,
         rawTotal: Number(rawTotal.toFixed(2)),
         weightedTotal: Number(weightedTotal.toFixed(2)),
         percentage,
@@ -765,1501 +958,1178 @@ export default function Assessmententry() {
         remark: matchedRule?.remark,
         gpa: matchedRule?.gpa,
       };
-    }
+    });
+  }, [enrolledStudents, structureItems, scores, gradeRules]);
 
-    return result;
-  }, [filteredStudentRows, structureItems, scores, gradeRules]);
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return studentScoreRows.filter((item) => {
+      if (filterCompletion !== "all") {
+        const entered = item.rowEntered;
+        const expected = item.rowExpected;
+        if (filterCompletion === "empty" && entered !== 0) return false;
+        if (
+          filterCompletion === "partial" &&
+          !(entered > 0 && entered < expected)
+        )
+          return false;
+        if (
+          filterCompletion === "complete" &&
+          !(expected > 0 && entered >= expected)
+        )
+          return false;
+      }
+      if (!q) return true;
+      const s: any = item.student;
+      return `${s.fullName || ""} ${s.admissionNumber || ""} ${item.grade || ""} ${item.remark || ""}`
+        .toLowerCase()
+        .includes(q);
+    });
+  }, [studentScoreRows, search, filterCompletion]);
 
   const completionStats = useMemo(() => {
-    const visibleStudentIds = new Set(filteredStudentRows.map(({ student }: any) => String(student.id)));
-    const visibleItemIds = new Set((structureItems as any[]).map((item) => String(item.id)));
-
-    const expected = filteredStudentRows.length * structureItems.length;
-
-    const entered = Object.entries(scores).filter(([key, value]) => {
-      const [studentId, itemId] = key.split("-");
-      return (
-        visibleStudentIds.has(studentId) &&
-        visibleItemIds.has(itemId) &&
-        value !== "" &&
-        value !== undefined &&
-        value !== null
-      );
-    }).length;
-
+    const expected = studentScoreRows.length * structureItems.length;
+    let entered = 0;
+    studentScoreRows.forEach((row) => (entered += row.rowEntered));
     const completion = expected ? Math.round((entered / expected) * 100) : 0;
+    const completeStudents = studentScoreRows.filter(
+      (row) => row.rowExpected > 0 && row.rowEntered >= row.rowExpected,
+    ).length;
+    return { expected, entered, completion, completeStudents };
+  }, [studentScoreRows, structureItems]);
 
-    return { expected, entered, completion };
-  }, [filteredStudentRows, structureItems, scores]);
+  const activeFilterCount = useMemo(() => {
+    return [
+      filterClassId,
+      filterSubjectId,
+      filterPeriodId,
+      filterReadiness,
+      filterCompletion,
+    ].filter((v) => v !== "all").length;
+  }, [
+    filterClassId,
+    filterSubjectId,
+    filterPeriodId,
+    filterReadiness,
+    filterCompletion,
+  ]);
 
-  const classAverage = useMemo(() => {
-    const values = Object.values(computedResults).map((row) => row.percentage);
-    if (!values.length) return 0;
-    return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2));
-  }, [computedResults]);
+  const contextSubtitle = selectedOption
+    ? `${selectedOption.className} · ${selectedOption.academicStructureName} · ${selectedOption.academicPeriodName}`
+    : activeBranch?.name || "Selected branch";
 
-  const topStudent = useMemo(() => {
-    return filteredStudentRows
-      .map(({ student }: any) => ({
-        student,
-        result: computedResults[String(student.id)],
-      }))
-      .sort((a, b) => Number(b.result?.percentage || 0) - Number(a.result?.percentage || 0))[0];
-  }, [filteredStudentRows, computedResults]);
-
-  // ======================================================
-  // ACTIONS
-  // ======================================================
-
-  const updateScore = (studentId: number, item: AssessmentStructureItem, value: string) => {
-    const itemAny: any = item;
-
+  const updateScore = (
+    studentId: string,
+    item: AssessmentStructureItem,
+    value: string,
+  ) => {
+    const key = scoreKey(studentId, idOf((item as any).id));
     if (value === "") {
-      setScores((prev) => ({ ...prev, [scoreKey(studentId, idOf(itemAny.id))]: "" }));
+      setScores((prev) => ({ ...prev, [key]: "" }));
       return;
     }
-
     const num = Number(value);
     if (Number.isNaN(num)) return;
-
-    const maxScore = Number(itemAny.maxScore || 100);
-    const sanitized = Math.max(0, Math.min(num, maxScore));
-
-    setScores((prev) => ({ ...prev, [scoreKey(studentId, idOf(itemAny.id))]: sanitized }));
-  };
-
-  const fillEmptyWithZero = () => {
-    if (!sessionStarted) {
-      showToast("info", "Start the session first.");
-      return;
-    }
-
-    setScores((prev) => {
-      const next = { ...prev };
-
-      for (const { student } of filteredStudentRows as any[]) {
-        for (const item of structureItems as any[]) {
-          const key = scoreKey(idOf(student.id), idOf(item.id));
-          if (next[key] === "" || next[key] === undefined || next[key] === null) {
-            next[key] = 0;
-          }
-        }
-      }
-
-      return next;
-    });
-
-    showToast("success", "Empty visible scores filled with zero.");
+    const sanitized = Math.max(
+      0,
+      Math.min(num, Number((item as any).maxScore || 100)),
+    );
+    setScores((prev) => ({ ...prev, [key]: sanitized }));
   };
 
   const startSession = () => {
-    if (!authenticated || !accountId || !schoolId || !branchId) {
-      showToast("error", "Sign in and select a branch first.");
-      return;
-    }
-
-    if (!teacherId) {
-      showToast("error", "Could not identify the signed-in teacher in this branch.");
-      return;
-    }
-
-    if (!currentClassSubject) {
-      showToast("error", "Select one of your class subjects first.");
-      return;
-    }
-
-    if (!applicability) {
-      showToast("error", "No assessment applicability configured for this class subject.");
-      return;
-    }
-
-    if (!structureItems.length) {
-      showToast("error", "The selected assessment structure has no active assessment items.");
-      return;
-    }
-
-    if (!filteredStudentRows.length) {
-      showToast("error", "No active student enrollment found for this class subject and period.");
-      return;
-    }
-
+    if (!authenticated || !accountId || !schoolId || !branchId)
+      return showToast("error", "Sign in and select a school branch first.");
+    if (!currentClassSubject)
+      return showToast("error", "Select a class subject first.");
+    if (!applicability)
+      return showToast(
+        "error",
+        "No assessment applicability is configured for this class subject.",
+      );
+    if (!structureItems.length)
+      return showToast(
+        "error",
+        "The selected assessment structure has no active items.",
+      );
+    if (!studentScoreRows.length)
+      return showToast(
+        "error",
+        "No active student enrollment was found for this class subject.",
+      );
     setSessionStarted(true);
     showToast("success", "Score entry session started.");
   };
 
   const saveEntries = async () => {
-    if (!sessionStarted) {
-      showToast("info", "Start the session first.");
-      return;
-    }
-
-    if (!authenticated || !accountId || !schoolId || !branchId) {
-      showToast("error", "Sign in and select a branch first.");
-      return;
-    }
-
-    if (!teacherId) {
-      showToast("error", "Could not identify the signed-in teacher.");
-      return;
-    }
-
-    if (!currentClassSubject || !applicability) {
-      showToast("error", "Select a valid class subject with assessment applicability.");
-      return;
-    }
+    if (!sessionStarted)
+      return showToast("error", "Start the score entry session first.");
+    if (!authenticated || !accountId || !schoolId || !branchId)
+      return showToast("error", "Sign in and select a school branch first.");
+    if (!currentClassSubject || !applicability)
+      return showToast(
+        "error",
+        "Select a valid class subject with assessment applicability.",
+      );
 
     try {
       setSaving(true);
+      const academicPeriodId = idOf(
+        (currentClassSubject as any).academicPeriodId,
+      );
+      let savedCount = 0;
+      let clearedCount = 0;
+      let lockedCount = 0;
 
-      const current: any = currentClassSubject;
-      const academicPeriodId = idOf(current.academicPeriodId);
-      const assessmentStructureId = idOf(applicability.assessmentStructureId);
-      const gradingSystemId = idOf(applicability.gradingSystemId);
-      const organizationId = idOf((applicability as any).organizationId || selectedOption?.organizationId);
-
-      const visibleStudentIds = new Set(filteredStudentRows.map(({ student }: any) => idOf(student.id)));
-
-      const existingForScope = entries.filter((entry: any) => {
-        if (!visibleStudentIds.has(idOf(entry.studentId))) return false;
-        if (!sameId(entry.classSubjectId, current.id)) return false;
-        if (!sameId(entry.classId, current.classId)) return false;
-        if (!sameId(entry.subjectId, current.subjectId)) return false;
-
-        if (current.academicStructureId && entry.academicStructureId) {
-          if (!sameId(entry.academicStructureId, current.academicStructureId)) return false;
-        }
-
-        if (academicPeriodId && entry.academicPeriodId) {
-          if (!sameId(entry.academicPeriodId, academicPeriodId)) return false;
-        }
-
-        if (assessmentStructureId && entry.assessmentStructureId) {
-          if (!sameId(entry.assessmentStructureId, assessmentStructureId)) return false;
-        }
-
-        return true;
-      });
-
-      const existingByIdentity = new Map(existingForScope.map((entry) => [makeEntryIdentity(entry), entry]));
-
-      const upserts: AssessmentEntry[] = [];
-
-      for (const { student } of filteredStudentRows as any[]) {
-        const result = computedResults[String(student.id)];
+      for (const row of studentScoreRows) {
+        const studentId = idOf((row.student as any).id);
+        if (!studentId) continue;
 
         for (const item of structureItems as any[]) {
-          const key = scoreKey(idOf(student.id), idOf(item.id));
-          const score = scores[key];
+          const itemId = idOf(item.id);
+          const key = scoreKey(studentId, itemId);
+          const value = scores[key];
+          const existing: any = existingEntryMap.get(key);
 
-          if (score === "" || score == null) continue;
-
-          const identitySource = {
-            studentId: idOf(student.id),
-            classSubjectId: idOf(current.id),
-            assessmentStructureItemId: idOf(item.id),
-            academicPeriodId,
-            assessmentStructureId,
-          } as AssessmentEntry;
-
-          const existing = existingByIdentity.get(makeEntryIdentity(identitySource));
-
-          const payload = makeAssessmentEntryPayload(
-            {
-              id: (existing as any)?.id,
-              accountId,
-              schoolId,
-              branchId,
-              teacherId,
-              classSubjectId: idOf(current.id),
-              organizationId,
-              academicStructureId: idOf(current.academicStructureId),
-              academicPeriodId,
-              gradingSystemId,
-              assessmentStructureId,
-              assessmentStructureItemId: idOf(item.id),
-              studentId: idOf(student.id),
-              classId: idOf(current.classId),
-              subjectId: idOf(current.subjectId),
-              score: Number(score),
-              grade: result?.grade,
-              remark: result?.remark,
-              published: (existing as any)?.published ?? false,
-              locked: (existing as any)?.locked ?? false,
-              active: true,
-            } as Partial<AssessmentEntry>,
-            existing as Partial<AssessmentEntry> | undefined
-          );
-
-          upserts.push(payload);
-        }
-      }
-
-      if (!upserts.length) {
-        showToast("info", "No scores entered yet.");
-        return;
-      }
-
-      await db.transaction("rw", db.assessmentEntries, async () => {
-        for (const entry of upserts as any[]) {
-          if (entry.id) {
-            await db.assessmentEntries.put(entry);
-          } else {
-            const { id, ...withoutId } = entry;
-            await db.assessmentEntries.add(withoutId as AssessmentEntry);
+          if (existing?.locked) {
+            lockedCount += 1;
+            continue;
           }
+
+          if (value === "" || value === undefined || value === null) {
+            if (existing?.id) {
+              await softDeleteLocal("assessmentEntries", idOf(existing.id));
+              clearedCount += 1;
+            }
+            continue;
+          }
+
+          const payload: Partial<AssessmentEntry> = {
+            accountId,
+            schoolId: schoolId,
+            branchId: branchId,
+            classSubjectId: idOf((currentClassSubject as any).id),
+            organizationId:
+              applicability.organizationId || selectedOption?.organizationId,
+            academicStructureId: idOf(
+              (currentClassSubject as any).academicStructureId,
+            ),
+            academicPeriodId,
+            gradingSystemId: applicability.gradingSystemId,
+            assessmentStructureId: applicability.assessmentStructureId,
+            assessmentStructureItemId: itemId,
+            studentId,
+            classId: idOf((currentClassSubject as any).classId),
+            subjectId: idOf((currentClassSubject as any).subjectId),
+            score: Number(value),
+            grade: row.grade,
+            remark: row.remark,
+            published: false,
+            locked: false,
+            active: true,
+            isDeleted: false,
+          } as Partial<AssessmentEntry>;
+
+          if (existing?.id)
+            await updateLocal(
+              "assessmentEntries",
+              idOf(existing.id),
+              payload as AssessmentEntry,
+            );
+          else
+            await createLocal("assessmentEntries", payload as AssessmentEntry);
+          savedCount += 1;
         }
-      });
+      }
 
       await load();
-      setSessionStarted(true);
-      showToast("success", `${upserts.length} score record(s) saved successfully.`);
+      setSessionStarted(false);
+      showToast(
+        "success",
+        `Saved ${savedCount} score${savedCount === 1 ? "" : "s"}${clearedCount ? ` · cleared ${clearedCount}` : ""}${
+          lockedCount ? ` · skipped ${lockedCount} locked` : ""
+        }.`,
+      );
     } catch (error) {
-      console.error("Failed to save teacher assessment entries:", error);
-      showToast("error", "Failed to save scores.");
+      console.error(error);
+      showToast("error", "Failed to save assessment scores.");
     } finally {
       setSaving(false);
     }
   };
 
-  // ======================================================
-  // STATES
-  // ======================================================
+  const clearFilters = () => {
+    setFilterClassId("all");
+    setFilterSubjectId("all");
+    setFilterPeriodId("all");
+    setFilterReadiness("all");
+    setFilterCompletion("all");
+  };
 
   if (accountLoading || contextLoading || settingsLoading || loading) {
     return (
-      <main className="tae-page" style={{ "--tae-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="tae-state-card">
-          <div className="tae-spinner" />
-          <h2>Opening teacher assessment entry...</h2>
-          <p>Checking your account, branch, assigned class subjects and assessment records.</p>
-        </section>
-      </main>
+      <State
+        primary={primary}
+        title="Opening Assessment Entries..."
+        text="Checking your teacher profile, assigned class subjects, students, assessment structures, and saved scores."
+      />
     );
   }
 
   if (!authenticated || !accountId) {
     return (
-      <main className="tae-page" style={{ "--tae-primary": primary } as React.CSSProperties}>
-        <style>{css}</style>
-        <section className="tae-state-card">
-          <h2>Sign in required</h2>
-          <p>You must sign in before entering assessment scores.</p>
-        </section>
-      </main>
+      <State
+        primary={primary}
+        title="Redirecting to login..."
+        text="You must sign in before entering assessment scores."
+      />
     );
   }
 
   if (!schoolId || !branchId) {
     return (
-      <main className="tae-page" style={{ "--tae-primary": primary } as React.CSSProperties}>
+      <main
+        className="ae-page"
+        style={{ "--ae-primary": primary } as React.CSSProperties}
+      >
         <style>{css}</style>
-        <section className="tae-state-card">
-          <h2>Select a branch first</h2>
-          <p>Teacher assessment entries belong to one active school branch.</p>
+        <section className="ae-state">
+          <h2>No branch workspace selected</h2>
+          <p>
+            Assessment entries belong to your selected teacher workspace. Use Select Role again if the wrong school or branch is active.
+          </p>
+          <button
+            type="button"
+            className="ae-state-button"
+            onClick={() => router.push("/account")}
+          >
+            Go to Account Setup
+          </button>
         </section>
       </main>
     );
   }
 
-  // ======================================================
-  // UI
-  // ======================================================
+  if (!teacherId) {
+    return (
+      <main
+        className="ae-page"
+        style={{ "--ae-primary": primary } as React.CSSProperties}
+      >
+        <style>{css}</style>
+        <section className="ae-state">
+          <h2>No teacher profile linked</h2>
+          <p>
+            Your active teacher membership does not contain a teacherId. Ask the
+            school administrator to link this login to your permanent teacher record,
+            then select the teacher role again.
+          </p>
+          <button
+            type="button"
+            className="ae-state-button"
+            onClick={() => router.push("/account")}
+          >
+            Select Teacher Role
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   return (
-    <main className="tae-page" style={{ "--tae-primary": primary } as React.CSSProperties}>
+    <main
+      className="ae-page"
+      style={{ "--ae-primary": primary } as React.CSSProperties}
+    >
       <style>{css}</style>
 
       {toast && (
-        <section className={`tae-toast ${toast.tone}`}>
+        <section className={`ae-toast ${toast.tone}`}>
           {toast.message}
-          <button type="button" onClick={() => setToast(null)} aria-label="Close notification">
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Close notification"
+          >
             ✕
           </button>
         </section>
       )}
 
-      <section className="tae-hero">
-        <div className="tae-hero-left">
-          <div className="tae-hero-icon">📝</div>
-          <div className="tae-title-wrap">
-            <p>Teacher Score Entry</p>
-            <h2>Assessment Entry</h2>
-            <span>
-              {activeBranch?.name || "Selected branch"}
-              {activeSchool?.name ? ` · ${activeSchool.name}` : ""}
-            </span>
-          </div>
-        </div>
-
-        <div className="tae-hero-actions">
-          <div className="tae-view-switch">
-            <button
-              type="button"
-              className={viewMode === "sheet" ? "active" : ""}
-              onClick={() => setViewMode("sheet")}
-            >
-              Sheet
-            </button>
-            <button
-              type="button"
-              className={viewMode === "cards" ? "active" : ""}
-              onClick={() => setViewMode("cards")}
-            >
-              Cards
-            </button>
-            <button
-              type="button"
-              className={viewMode === "summary" ? "active" : ""}
-              onClick={() => setViewMode("summary")}
-            >
-              Summary
-            </button>
-          </div>
-
-          <button type="button" className="tae-ghost-btn" onClick={load}>
-            Refresh
-          </button>
-          <button type="button" className="tae-primary-btn" onClick={startSession}>
-            {sessionStarted ? "Session Active" : "Start Session"}
-          </button>
-          <button type="button" className="tae-primary-btn" onClick={saveEntries} disabled={!sessionStarted || saving}>
-            {saving ? "Saving..." : "Save Scores"}
-          </button>
-        </div>
-      </section>
-
-      <section className="tae-filter-card">
-        <label>
-          <span>Your class subject</span>
-          <select
-            value={classSubjectId}
-            onChange={(event) => {
-              setClassSubjectId(Number(event.target.value));
-              setSessionStarted(false);
-            }}
-          >
-            <option value={0}>Select one of your assigned class subjects</option>
-            {classSubjectOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.display}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          <span>Search learner</span>
+      <section
+        className="ae-search-card"
+        aria-label="Assessment entry search and actions"
+      >
+        <label className="ae-search">
+          <span>⌕</span>
           <input
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search student or admission number..."
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={
+              !selectedClassId
+                ? "Search my classes..."
+                : classSubjectId === "all"
+                  ? "Search class subjects..."
+                  : "Search students..."
+            }
+            aria-label="Search assessment entries"
           />
         </label>
+
+        <button
+          type="button"
+          className={`ae-filter-button ${activeFilterCount ? "active" : ""}`}
+          onClick={() => setFilterOpen(true)}
+          aria-label="Open filters"
+          title="Filters"
+        >
+          <SliderIcon />
+          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
+        </button>
+
+        <button
+          type="button"
+          className="ae-icon-button"
+          onClick={() => setMoreOpen(true)}
+          aria-label="More options"
+        >
+          ⋯
+        </button>
       </section>
 
-      {selectedOption && (
-        <section className="tae-context-card">
-          <div className="tae-card-top">
-            <div className="tae-context-main">
-              <div className="tae-context-icon">📖</div>
-              <div>
-                <h3>{selectedOption.subjectName}</h3>
-                <p>
-                  {selectedOption.className} · {selectedOption.academicStructureName} · {selectedOption.academicPeriodName}
-                </p>
-                <span>
-                  {selectedOption.curriculumName} · {selectedOption.pathwayName} · Teacher: {selectedOption.teacherName}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div className="tae-chip-row">
-            {teacherId ? <Chip tone="green">Teacher Identified</Chip> : <Chip tone="red">Teacher Not Found</Chip>}
-            {applicability ? <Chip tone="green">Applicability Ready</Chip> : <Chip tone="red">No Applicability</Chip>}
-            {assessmentStructure && <Chip tone="blue">{(assessmentStructure as any).name}</Chip>}
-            {gradingSystem && <Chip tone="purple">{(gradingSystem as any).name}</Chip>}
-            <Chip tone="gray">{organizationName}</Chip>
-          </div>
+      {activeFilterCount > 0 && selectedClassId && (
+        <section className="ae-filter-chips" aria-label="Active filters">
+          {filterSubjectId !== "all" && (
+            <button type="button" onClick={() => setFilterSubjectId("all")}>
+              Subject:{" "}
+              {(subjectMap.get(idOf(filterSubjectId)) as any)?.name ||
+                filterSubjectId}{" "}
+              ×
+            </button>
+          )}
+          {filterPeriodId !== "all" && (
+            <button type="button" onClick={() => setFilterPeriodId("all")}>
+              Period:{" "}
+              {(periodMap.get(idOf(filterPeriodId)) as any)?.name ||
+                filterPeriodId}{" "}
+              ×
+            </button>
+          )}
+          {filterReadiness !== "all" && (
+            <button type="button" onClick={() => setFilterReadiness("all")}>
+              {filterReadiness === "ready" ? "Ready only" : "Missing setup"} ×
+            </button>
+          )}
+          {filterCompletion !== "all" && (
+            <button type="button" onClick={() => setFilterCompletion("all")}>
+              Completion: {filterCompletion} ×
+            </button>
+          )}
         </section>
       )}
 
-      {classSubjectId > 0 && !applicability && (
-        <section className="tae-warning-card red">
-          No active assessment applicability is configured for this class subject. Ask the school admin to configure assessment applicability first.
+      {!selectedClassId ? (
+        <section className="ae-list ae-picker-list">
+          {classCards.map((item) => (
+            <ClassPickerRow
+              key={String(item.id)}
+              item={item}
+              onOpen={() => {
+                setSelectedClassId(String(item.id));
+                setFilterClassId(String(item.id));
+                setClassSubjectId("all");
+                setSearch("");
+              }}
+            />
+          ))}
+          {!classCards.length && (
+            <Empty
+              icon="🏫"
+              title="No assigned classes"
+              text="No active class subjects are assigned to your teacher profile for the current branch."
+            />
+          )}
         </section>
-      )}
+      ) : classSubjectId === "all" ? (
+        <>
+          <section
+            className="ae-filter-chips class-breadcrumb"
+            aria-label="Selected class"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedClassId("");
+                setFilterClassId("all");
+                setClassSubjectId("all");
+                setSearch("");
+              }}
+            >
+              ← Classes
+            </button>
+            <button type="button" onClick={() => setFilterOpen(true)}>
+              {(selectedClass as any)?.name || "Selected class"} ·{" "}
+              {selectedClassSubjectOptions.length} class subject(s)
+            </button>
+          </section>
 
-      {applicability && !structureItems.length && (
-        <section className="tae-warning-card orange">
-          The selected assessment structure has no active assessment items.
-        </section>
-      )}
-
-      {!teacherId && (
-        <section className="tae-warning-card red">
-          Your signed-in user could not be matched to a teacher record in this branch. Make sure the teacher record has the correct user ID or email.
-        </section>
-      )}
-
-      <section className="tae-summary-grid" aria-label="Score entry summary">
-        <SummaryCard label="My Class Subjects" value={classSubjectOptions.length} icon="📚" />
-        <SummaryCard label="Learners" value={filteredStudentRows.length} icon="🧑‍🎓" />
-        <SummaryCard label="Assessment Items" value={structureItems.length} icon="🧩" />
-        <SummaryCard label="Entered" value={completionStats.entered} icon="✍️" />
-        <SummaryCard label="Completion" value={`${completionStats.completion}%`} icon="✅" />
-        <SummaryCard label="Class Average" value={toPercent(classAverage)} icon="📊" />
-      </section>
-
-      {!classSubjectOptions.length && (
-        <section className="tae-empty-card">
-          <div className="tae-empty-icon">📖</div>
-          <h3>No assigned class subjects found</h3>
-          <p>
-            This teacher account has no class subjects assigned in this branch yet. Ask the admin to assign classes and subjects to this teacher.
-          </p>
-        </section>
-      )}
-
-      {!sessionStarted && classSubjectOptions.length > 0 && (
-        <section className="tae-empty-card compact">
-          <div className="tae-empty-icon">▶️</div>
-          <h3>Start a teacher score entry session</h3>
-          <p>Select one of your assigned class subjects, confirm applicability, then start the session to enter scores.</p>
-        </section>
-      )}
-
-      {sessionStarted && viewMode === "summary" && (
-        <section className="tae-analysis-grid">
-          <article className="tae-analysis-card">
-            <span>Class Average</span>
-            <strong>{toPercent(classAverage)}</strong>
-            <p>Average computed from visible learners and current score entries.</p>
-          </article>
-
-          <article className="tae-analysis-card">
-            <span>Top Learner</span>
-            <strong>{topStudent ? fullNameOf(topStudent.student) : "None"}</strong>
-            <p>{topStudent?.result ? `${toPercent(topStudent.result.percentage)} · ${topStudent.result.grade || "No grade"}` : "No scores yet."}</p>
-          </article>
-
-          <article className="tae-analysis-card">
-            <span>Completion</span>
-            <strong>{completionStats.completion}%</strong>
-            <p>{completionStats.entered} of {completionStats.expected} expected score cells completed.</p>
-          </article>
-
-          <article className="tae-analysis-card">
-            <span>Last Saved Context</span>
-            <strong>{dateText(Date.now())}</strong>
-            <p>Scores save offline first and sync when your app sync engine runs.</p>
-          </article>
-        </section>
-      )}
-
-      {sessionStarted && viewMode === "cards" && (
-        <section className="tae-student-card-grid">
-          {filteredStudentRows.map(({ student }: any) => {
-            const result = computedResults[String(student.id)];
-
-            return (
-              <article key={student.id} className="tae-student-card">
-                <div className="tae-student-card-head">
-                  <div>
-                    <h3>{fullNameOf(student)}</h3>
-                    <p>{student.admissionNumber || student.indexNumber || "No admission number"}</p>
-                  </div>
-                  <Chip tone={result?.grade ? "green" : "gray"}>{result?.grade || "No Grade"}</Chip>
-                </div>
-
-                <div className="tae-card-score-grid">
-                  {(structureItems as any[]).map((item) => (
-                    <label key={item.id}>
-                      <span>{item.name}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={item.maxScore || 100}
-                        value={scores[scoreKey(idOf(student.id), idOf(item.id))] ?? ""}
-                        onChange={(event) => updateScore(idOf(student.id), item, event.target.value)}
-                      />
-                      <small>Max {item.maxScore || 100} · Weight {item.weight || 0}%</small>
-                    </label>
-                  ))}
-                </div>
-
-                <div className="tae-student-result">
-                  <span>Total: {formatNumber(result?.rawTotal || 0)}</span>
-                  <span>Weighted: {toPercent(result?.percentage || 0)}</span>
-                  <span>{result?.remark || "No remark yet"}</span>
-                </div>
-              </article>
-            );
-          })}
-
-          {!filteredStudentRows.length && <Empty text="No active learners found for this class subject and period." />}
-        </section>
-      )}
-
-      {sessionStarted && viewMode === "sheet" && (
-        <section className="tae-score-shell">
-          <div className="tae-score-head">
-            <div>
-              <h3>Teacher Score Sheet</h3>
-              <p>
-                Scores are saved against your teacher ID, class subject, assessment item, student, class, subject and academic period.
-              </p>
-            </div>
-            <div className="tae-score-actions">
-              <Chip tone={completionStats.completion === 100 ? "green" : "orange"}>{completionStats.completion}% complete</Chip>
-              <button type="button" onClick={fillEmptyWithZero}>
-                Fill blanks with 0
-              </button>
-            </div>
-          </div>
-
-          <div className="tae-table-scroll" aria-label="Scrollable teacher score entry table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Student</th>
-                  {(structureItems as any[]).map((item) => (
-                    <th key={item.id}>
-                      {item.name}
-                      <span>Max {item.maxScore || 100} · {item.weight || 0}%</span>
-                    </th>
-                  ))}
-                  <th>Raw Total</th>
-                  <th>% / Weighted</th>
-                  <th>Grade</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {filteredStudentRows.map(({ student }: any) => {
-                  const result = computedResults[String(student.id)];
-
-                  return (
-                    <tr key={student.id}>
-                      <td className="tae-student-cell">
-                        <strong>{fullNameOf(student)}</strong>
-                        <span>{student.admissionNumber || student.indexNumber || "No admission number"}</span>
-                      </td>
-
-                      {(structureItems as any[]).map((item) => (
-                        <td key={item.id}>
-                          <input
-                            className="tae-score-input"
-                            type="number"
-                            min={0}
-                            max={item.maxScore || 100}
-                            value={scores[scoreKey(idOf(student.id), idOf(item.id))] ?? ""}
-                            onChange={(event) => updateScore(idOf(student.id), item, event.target.value)}
-                          />
-                        </td>
-                      ))}
-
-                      <td className="tae-center strong">{formatNumber(result?.rawTotal || 0)}</td>
-                      <td className="tae-center strong">{toPercent(result?.percentage || 0)}</td>
-                      <td className="tae-center">
-                        <Chip tone={result?.grade ? "green" : "gray"}>{result?.grade || "-"}</Chip>
-                        {result?.remark && <span className="tae-remark">{result.remark}</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-
-            {!filteredStudentRows.length && (
-              <div className="tae-empty-table">No active learners found for this class subject and period.</div>
+          <section className="ae-list ae-picker-list">
+            {classSubjectEntryViews.map((item) => (
+              <ClassSubjectPickerRow
+                key={String(item.id)}
+                item={item}
+                onOpen={() => {
+                  setClassSubjectId(String(item.id));
+                  setSessionStarted(false);
+                  setSearch("");
+                }}
+              />
+            ))}
+            {!classSubjectEntryViews.length && (
+              <Empty
+                icon="📝"
+                title="No assigned subjects"
+                text="You have no assigned subjects in this class matching the current filters."
+              />
             )}
-          </div>
-        </section>
+          </section>
+        </>
+      ) : (
+        <>
+          <section
+            className="ae-filter-chips class-breadcrumb"
+            aria-label="Selected class subject"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setClassSubjectId("all");
+                setSessionStarted(false);
+                setSearch("");
+              }}
+            >
+              ← Class subjects
+            </button>
+            <button type="button" onClick={() => setFilterOpen(true)}>
+              {selectedOption?.className || "Class"} ·{" "}
+              {selectedOption?.subjectName || "Subject"}
+            </button>
+          </section>
+
+          {selectedOption && (
+            <section className="ae-session-strip">
+              <span
+                className={`ae-status-dot ${applicability ? "green" : "orange"}`}
+              />
+              <div>
+                <strong>{selectedOption.subjectName}</strong>
+                <small>
+                  {contextSubtitle} · {selectedOption.teacherName}
+                </small>
+              </div>
+              <button type="button" onClick={startSession}>
+                {sessionStarted ? "Active" : "Start"}
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={saveEntries}
+                disabled={!sessionStarted || saving}
+              >
+                {saving ? "Saving" : "Save"}
+              </button>
+            </section>
+          )}
+
+          {selectedOption && (
+            <section className="ae-compact-meta">
+              {applicability ? (
+                <Chip tone="green">Ready</Chip>
+              ) : (
+                <Chip tone="red">No applicability</Chip>
+              )}
+              {assessmentStructure && (
+                <Chip tone="blue">{assessmentStructure.name}</Chip>
+              )}
+              {gradingSystem && <Chip tone="purple">{gradingSystem.name}</Chip>}
+              <Chip tone="gray">{studentScoreRows.length} students</Chip>
+              <Chip tone="gray">{structureItems.length} items</Chip>
+              <Chip tone="orange">
+                {completionStats.entered}/{completionStats.expected} entered
+              </Chip>
+            </section>
+          )}
+
+          {classSubjectId !== "all" && !applicability && (
+            <Empty
+              icon="⚠️"
+              title="No assessment applicability"
+              text="Go to Assessment Applicability and connect this class subject to an assessment structure and grading system first."
+            />
+          )}
+          {applicability && !structureItems.length && (
+            <Empty
+              icon="🧩"
+              title="No assessment items"
+              text="The selected assessment structure has no active items to enter."
+            />
+          )}
+          {selectedOption &&
+            applicability &&
+            !!structureItems.length &&
+            !studentScoreRows.length && (
+              <Empty
+                icon="🎓"
+                title="No enrolled students"
+                text="No active student enrollment was found for this class subject, class, academic structure, and period."
+              />
+            )}
+
+          {selectedOption &&
+            applicability &&
+            !!structureItems.length &&
+            !!studentScoreRows.length &&
+            viewMode === "summary" && (
+              <SummaryView
+                rows={studentScoreRows}
+                completion={completionStats}
+                structureItems={structureItems}
+                classSubjectOptions={classSubjectOptions}
+              />
+            )}
+
+          {selectedOption &&
+            applicability &&
+            !!structureItems.length &&
+            !!studentScoreRows.length &&
+            viewMode === "table" && (
+              <ScoreTable
+                rows={filteredRows}
+                items={structureItems}
+                scores={scores}
+                updateScore={updateScore}
+              />
+            )}
+
+          {selectedOption &&
+            applicability &&
+            !!structureItems.length &&
+            !!studentScoreRows.length &&
+            viewMode === "cards" && (
+              <section className="ae-list ae-entry-list">
+                {filteredRows.map((row) => (
+                  <StudentScoreCard
+                    key={String((row.student as any).id)}
+                    row={row}
+                    items={structureItems}
+                    scores={scores}
+                    updateScore={updateScore}
+                  />
+                ))}
+                {!filteredRows.length && (
+                  <Empty
+                    icon="🔎"
+                    title="No student matches"
+                    text="Change your search or completion filter to see students."
+                  />
+                )}
+              </section>
+            )}
+        </>
+      )}
+
+      {filterOpen && (
+        <FilterSheet
+          classes={classes}
+          subjects={subjects}
+          periods={periods}
+          filterClassId={filterClassId}
+          filterSubjectId={filterSubjectId}
+          filterPeriodId={filterPeriodId}
+          filterReadiness={filterReadiness}
+          filterCompletion={filterCompletion}
+          setFilterClassId={setFilterClassId}
+          setFilterSubjectId={setFilterSubjectId}
+          setFilterPeriodId={setFilterPeriodId}
+          setFilterReadiness={setFilterReadiness}
+          setFilterCompletion={setFilterCompletion}
+          clearFilters={clearFilters}
+          onClose={() => setFilterOpen(false)}
+        />
+      )}
+
+      {moreOpen && (
+        <MoreSheet
+          viewMode={viewMode}
+          setViewMode={(mode) => {
+            setViewMode(mode);
+            setMoreOpen(false);
+          }}
+          onRefresh={async () => {
+            setMoreOpen(false);
+            await load();
+          }}
+          onClose={() => setMoreOpen(false)}
+        />
       )}
     </main>
   );
 }
 
-// ======================================================
-// SMALL COMPONENTS
-// ======================================================
-
-function SummaryCard({ label, value, icon }: { label: string; value: string | number; icon: string }) {
+function ClassPickerRow({
+  item,
+  onOpen,
+}: {
+  item: ClassEntryView;
+  onOpen: () => void;
+}) {
   return (
-    <article className="tae-summary-card">
-      <div className="tae-summary-icon">{icon}</div>
-      <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
+    <button
+      type="button"
+      className="student-row assessment-row"
+      onClick={onOpen}
+    >
+      <span className="app-icon">🏫</span>
+      <span className="student-main">
+        <strong>{item.name}</strong>
+        <small>
+          {item.subjectCount} class subject(s) · {item.studentCount} active
+          student(s)
+        </small>
+        <em>
+          {item.missingCount
+            ? `${item.missingCount} missing setup`
+            : "All class subjects ready"}
+        </em>
+      </span>
+      <span className="student-side">
+        <span
+          className={`status-dot-mini ${item.missingCount ? "orange" : "green"}`}
+        />
+        <i>›</i>
+      </span>
+    </button>
+  );
+}
+
+function ClassSubjectPickerRow({
+  item,
+  onOpen,
+}: {
+  item: ClassSubjectEntryView;
+  onOpen: () => void;
+}) {
+  const ready = item.option.ready && item.itemCount > 0;
+  return (
+    <button
+      type="button"
+      className="student-row assessment-row"
+      onClick={onOpen}
+    >
+      <span className="app-icon">📝</span>
+      <span className="student-main">
+        <strong>{item.option.subjectName}</strong>
+        <small>
+          {item.option.teacherName} · {item.option.academicPeriodName}
+        </small>
+        <em>
+          {ready
+            ? `${item.studentCount} students · ${item.itemCount} items · ${item.completion}% done`
+            : "Needs applicability or assessment items"}
+        </em>
+      </span>
+      <span className="student-side">
+        <span
+          className={`status-dot-mini ${ready ? (item.completion >= 100 ? "green" : "orange") : "red"}`}
+        />
+        <i>›</i>
+      </span>
+    </button>
+  );
+}
+
+function State({
+  primary,
+  title,
+  text,
+}: {
+  primary: string;
+  title: string;
+  text: string;
+}) {
+  return (
+    <main
+      className="ae-page"
+      style={{ "--ae-primary": primary } as React.CSSProperties}
+    >
+      <style>{css}</style>
+      <section className="ae-state">
+        <div className="ae-spinner" />
+        <h2>{title}</h2>
+        <p>{text}</p>
+      </section>
+    </main>
+  );
+}
+
+function SummaryPill({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <article>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  );
+}
+
+function Empty({
+  icon,
+  title,
+  text,
+}: {
+  icon: string;
+  title: string;
+  text: string;
+}) {
+  return (
+    <section className="ae-empty">
+      <div className="ae-empty-icon">{icon}</div>
+      <h3>{title}</h3>
+      <p>{text}</p>
+    </section>
+  );
+}
+
+function ScoreInput({
+  studentId,
+  item,
+  scores,
+  updateScore,
+}: {
+  studentId: string;
+  item: AssessmentStructureItem;
+  scores: ScoreMap;
+  updateScore: (
+    studentId: string,
+    item: AssessmentStructureItem,
+    value: string,
+  ) => void;
+}) {
+  const value = scores[scoreKey(studentId, idOf((item as any).id))];
+  return (
+    <input
+      className="ae-score-input"
+      type="number"
+      inputMode="decimal"
+      min={0}
+      max={Number((item as any).maxScore || 100)}
+      step="0.01"
+      value={value ?? ""}
+      placeholder={`/${Number((item as any).maxScore || 100)}`}
+      onChange={(event) => updateScore(studentId, item, event.target.value)}
+    />
+  );
+}
+
+function StudentScoreCard({
+  row,
+  items,
+  scores,
+  updateScore,
+}: {
+  row: StudentScoreRow;
+  items: AssessmentStructureItem[];
+  scores: ScoreMap;
+  updateScore: (
+    studentId: string,
+    item: AssessmentStructureItem,
+    value: string,
+  ) => void;
+}) {
+  const student: any = row.student;
+  const studentId = idOf(student.id);
+  const complete = row.rowExpected > 0 && row.rowEntered >= row.rowExpected;
+
+  return (
+    <article className="ae-score-card">
+      <div className="ae-score-head">
+        <div>
+          <strong>{student.fullName || "Unnamed student"}</strong>
+          <span>{student.admissionNumber || "No admission number"}</span>
+        </div>
+        <i className={complete ? "done" : row.rowEntered ? "partial" : "empty"}>
+          {complete ? "Done" : row.rowEntered ? "Partial" : "Empty"}
+        </i>
+      </div>
+
+      <div className="ae-score-grid">
+        {items.map((item: any) => (
+          <label key={String(item.id)}>
+            <span>{item.name}</span>
+            <small>
+              Max {Number(item.maxScore || 100)} · Weight{" "}
+              {Number(item.weight || 0)}
+            </small>
+            <ScoreInput
+              studentId={studentId}
+              item={item}
+              scores={scores}
+              updateScore={updateScore}
+            />
+          </label>
+        ))}
+      </div>
+
+      <div className="ae-result-row">
+        <span>
+          Total: <b>{row.weightedTotal}</b>
+        </span>
+        <span>
+          Grade: <b>{row.grade || "—"}</b>
+        </span>
+        <span>{row.remark || "No remark"}</span>
       </div>
     </article>
   );
 }
 
-function Chip({
-  children,
-  tone = "gray",
+function ScoreTable({
+  rows,
+  items,
+  scores,
+  updateScore,
 }: {
-  children: React.ReactNode;
-  tone?: "green" | "red" | "blue" | "gray" | "orange" | "purple";
+  rows: StudentScoreRow[];
+  items: AssessmentStructureItem[];
+  scores: ScoreMap;
+  updateScore: (
+    studentId: string,
+    item: AssessmentStructureItem,
+    value: string,
+  ) => void;
 }) {
-  return <span className={`tae-chip ${tone}`}>{children}</span>;
+  return (
+    <section className="ae-table-card">
+      <div className="ae-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Students ({rows.length})</th>
+              {items.map((item: any) => (
+                <th key={String(item.id)}>
+                  {item.name}
+                  <span>/{Number(item.maxScore || 100)}</span>
+                </th>
+              ))}
+              <th>Total</th>
+              <th>Grade</th>
+              <th>Remark</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const student: any = row.student;
+              const studentId = idOf(student.id);
+              return (
+                <tr key={String(studentId)}>
+                  <td>
+                    <strong>{student.fullName || "Unnamed student"}</strong>
+                    <span>{student.admissionNumber || "—"}</span>
+                  </td>
+                  {items.map((item: any) => (
+                    <td key={String(item.id)}>
+                      <ScoreInput
+                        studentId={studentId}
+                        item={item}
+                        scores={scores}
+                        updateScore={updateScore}
+                      />
+                    </td>
+                  ))}
+                  <td>
+                    <b>{row.weightedTotal}</b>
+                  </td>
+                  <td>{row.grade || "—"}</td>
+                  <td>{row.remark || "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!rows.length && (
+          <div className="ae-empty-table">No student matches your filters.</div>
+        )}
+      </div>
+    </section>
+  );
 }
 
-function Empty({ text }: { text: string }) {
-  return <div className="tae-empty-inline">{text}</div>;
+function SummaryView({
+  rows,
+  completion,
+  structureItems,
+  classSubjectOptions,
+}: {
+  rows: StudentScoreRow[];
+  completion: {
+    expected: number;
+    entered: number;
+    completion: number;
+    completeStudents: number;
+  };
+  structureItems: AssessmentStructureItem[];
+  classSubjectOptions: ClassSubjectOption[];
+}) {
+  const gradeCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    rows.forEach((row) =>
+      map.set(
+        row.grade || "Ungraded",
+        (map.get(row.grade || "Ungraded") || 0) + 1,
+      ),
+    );
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [rows]);
+
+  return (
+    <section className="ae-analysis-grid">
+      <article className="ae-analysis ae-current-filter">
+        <span>Completion</span>
+        <strong>{completion.completion}%</strong>
+        <p>
+          {completion.entered} of {completion.expected} expected score cells
+          entered.
+        </p>
+      </article>
+      <article className="ae-analysis ae-current-filter">
+        <span>Complete Students</span>
+        <strong>{completion.completeStudents}</strong>
+        <p>Students with every active assessment item entered.</p>
+      </article>
+      <article className="ae-analysis ae-current-filter">
+        <span>Assessment Items</span>
+        <strong>{structureItems.length}</strong>
+        <p>Active score components in the selected assessment structure.</p>
+      </article>
+      <article className="ae-analysis ae-current-filter">
+        <span>Class Subjects</span>
+        <strong>{classSubjectOptions.length}</strong>
+        <p>Class subjects currently matching your filters.</p>
+      </article>
+      <article className="ae-analysis ae-wide">
+        <span>Grade Distribution</span>
+        {gradeCounts.map(([grade, count]) => (
+          <p key={grade}>
+            <b>{grade}</b> — {count}
+          </p>
+        ))}
+      </article>
+    </section>
+  );
 }
 
-// ======================================================
-// CSS
-// ======================================================
+function FilterSheet({
+  classes,
+  subjects,
+  periods,
+  filterClassId,
+  filterSubjectId,
+  filterPeriodId,
+  filterReadiness,
+  filterCompletion,
+  setFilterClassId,
+  setFilterSubjectId,
+  setFilterPeriodId,
+  setFilterReadiness,
+  setFilterCompletion,
+  clearFilters,
+  onClose,
+}: {
+  classes: Class[];
+  subjects: Subject[];
+  periods: AcademicPeriod[];
+  filterClassId: string;
+  filterSubjectId: string;
+  filterPeriodId: string;
+  filterReadiness: ReadinessFilter;
+  filterCompletion: CompletionFilter;
+  setFilterClassId: (value: string) => void;
+  setFilterSubjectId: (value: string) => void;
+  setFilterPeriodId: (value: string) => void;
+  setFilterReadiness: (value: ReadinessFilter) => void;
+  setFilterCompletion: (value: CompletionFilter) => void;
+  clearFilters: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="ae-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="ae-sheet">
+        <div className="ae-sheet-head">
+          <div>
+            <h2>Filters</h2>
+            <p>Narrow class subjects and score completion.</p>
+          </div>
+          <button type="button" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <div className="ae-form-grid">
+          <label>
+            <span>Class</span>
+            <select
+              value={filterClassId}
+              onChange={(e) => setFilterClassId(e.target.value)}
+            >
+              <option value="all">All classes</option>
+              {classes.map((row: any) => (
+                <option key={String(row.id)} value={String(row.id)}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Subject</span>
+            <select
+              value={filterSubjectId}
+              onChange={(e) => setFilterSubjectId(e.target.value)}
+            >
+              <option value="all">All subjects</option>
+              {subjects.map((row: any) => (
+                <option key={String(row.id)} value={String(row.id)}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Academic Period</span>
+            <select
+              value={filterPeriodId}
+              onChange={(e) => setFilterPeriodId(e.target.value)}
+            >
+              <option value="all">All periods</option>
+              {periods.map((row: any) => (
+                <option key={String(row.id)} value={String(row.id)}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Setup Status</span>
+            <select
+              value={filterReadiness}
+              onChange={(e) =>
+                setFilterReadiness(e.target.value as ReadinessFilter)
+              }
+            >
+              <option value="all">All</option>
+              <option value="ready">Applicability ready</option>
+              <option value="missing">Missing applicability</option>
+            </select>
+          </label>
+          <label>
+            <span>Score Completion</span>
+            <select
+              value={filterCompletion}
+              onChange={(e) =>
+                setFilterCompletion(e.target.value as CompletionFilter)
+              }
+            >
+              <option value="all">All</option>
+              <option value="empty">Empty</option>
+              <option value="partial">Partial</option>
+              <option value="complete">Complete</option>
+            </select>
+          </label>
+        </div>
+        <div className="ae-sheet-actions">
+          <button type="button" onClick={clearFilters}>
+            Clear
+          </button>
+          <button type="button" className="ae-primary" onClick={onClose}>
+            Apply
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MoreSheet({
+  viewMode,
+  setViewMode,
+  onRefresh,
+  onClose,
+}: {
+  viewMode: ViewMode;
+  setViewMode: (mode: ViewMode) => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="ae-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="ae-sheet ae-more-sheet">
+        <div className="ae-sheet-head">
+          <div>
+            <h2>More</h2>
+            <p>Change how you enter and review scores.</p>
+          </div>
+          <button type="button" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <button
+          type="button"
+          className={viewMode === "cards" ? "active" : ""}
+          onClick={() => setViewMode("cards")}
+        >
+          Card entry <span>Best for phones</span>
+        </button>
+        <button
+          type="button"
+          className={viewMode === "table" ? "active" : ""}
+          onClick={() => setViewMode("table")}
+        >
+          Table entry <span>Best for laptop/tablet</span>
+        </button>
+        <button
+          type="button"
+          className={viewMode === "summary" ? "active" : ""}
+          onClick={() => setViewMode("summary")}
+        >
+          Summary <span>Completion and grade overview</span>
+        </button>
+        <button type="button" onClick={onRefresh}>
+          Refresh data <span>Reload records from IndexedDB</span>
+        </button>
+      </section>
+    </div>
+  );
+}
 
 const css = `
-@keyframes taeSpin {
-  to { transform: rotate(360deg); }
-}
-
-.tae-page {
-  min-height: 100dvh;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  padding: 8px;
-  padding-bottom: max(28px, env(safe-area-inset-bottom));
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--tae-primary) 10%, transparent), transparent 34rem),
-    var(--bg, #f8fafc);
-  color: var(--text, #0f172a);
-  font-family: var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  overflow-x: hidden;
-}
-
-.tae-page *,
-.tae-page *::before,
-.tae-page *::after {
-  box-sizing: border-box;
-}
-
-.tae-page button,
-.tae-page input,
-.tae-page select,
-.tae-page textarea {
-  font: inherit;
-  max-width: 100%;
-}
-
-.tae-page input,
-.tae-page select {
-  width: 100%;
-  min-height: 43px;
-  border: 1px solid rgba(148, 163, 184, .28);
-  border-radius: 15px;
-  padding: 0 12px;
-  background: var(--surface, #fff);
-  color: var(--text, #0f172a);
-  outline: none;
-  font-weight: 750;
-}
-
-.tae-state-card {
-  min-height: min(420px, calc(100dvh - 32px));
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 10px;
-  width: min(520px, 100%);
-  margin: 0 auto;
-  padding: 22px;
-  border-radius: 28px;
-  background: var(--surface, #fff);
-  border: 1px solid rgba(148, 163, 184, .22);
-  box-shadow: 0 24px 60px rgba(15, 23, 42, .08);
-  text-align: center;
-}
-
-.tae-state-card h2 {
-  margin: 0;
-  font-size: clamp(18px, 5vw, 24px);
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.tae-state-card p {
-  max-width: 34rem;
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.tae-spinner {
-  width: 38px;
-  height: 38px;
-  border-radius: 999px;
-  border: 4px solid color-mix(in srgb, var(--tae-primary) 18%, transparent);
-  border-top-color: var(--tae-primary);
-  animation: taeSpin .8s linear infinite;
-}
-
-.tae-toast {
-  position: sticky;
-  top: 8px;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  padding: 12px 14px;
-  border-radius: 18px;
-  font-size: 13px;
-  font-weight: 850;
-  box-shadow: 0 18px 40px rgba(15, 23, 42, .12);
-}
-
-.tae-toast.success {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.tae-toast.error {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.tae-toast.info {
-  background: #dbeafe;
-  color: #1d4ed8;
-}
-
-.tae-toast button {
-  border: 0;
-  background: transparent;
-  color: currentColor;
-  font-weight: 1000;
-  cursor: pointer;
-}
-
-.tae-primary-btn {
-  min-height: 42px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 16px;
-  background: var(--tae-primary);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.tae-primary-btn:disabled {
-  opacity: .55;
-  cursor: not-allowed;
-}
-
-.tae-hero {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 28px;
-  color: #fff;
-  background:
-    radial-gradient(circle at 20% 10%, rgba(255, 255, 255, .18), transparent 20rem),
-    linear-gradient(135deg, var(--tae-primary), #0f172a 76%);
-  box-shadow: 0 22px 55px rgba(15, 23, 42, .16);
-  overflow: hidden;
-}
-
-.tae-hero-left {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1 1 auto;
-}
-
-.tae-hero-icon {
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, .16);
-  border: 1px solid rgba(255, 255, 255, .2);
-  color: #fff;
-  font-size: 22px;
-}
-
-.tae-title-wrap {
-  min-width: 0;
-}
-
-.tae-title-wrap p,
-.tae-title-wrap h2,
-.tae-title-wrap span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tae-title-wrap p {
-  margin: 0 0 2px;
-  color: rgba(255, 255, 255, .82);
-  font-size: 10px;
-  font-weight: 950;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.tae-title-wrap h2 {
-  margin: 0;
-  font-size: clamp(22px, 6vw, 34px);
-  font-weight: 1000;
-  letter-spacing: -.07em;
-  line-height: 1;
-}
-
-.tae-title-wrap span {
-  margin-top: 4px;
-  color: rgba(255, 255, 255, .82);
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.tae-hero-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.tae-view-switch {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .12);
-  border: 1px solid rgba(255, 255, 255, .2);
-}
-
-.tae-view-switch button {
-  min-height: 34px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 10px;
-  background: transparent;
-  color: rgba(255, 255, 255, .72);
-  font-size: 12px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.tae-view-switch button.active {
-  background: #fff;
-  color: #0f172a;
-}
-
-.tae-ghost-btn {
-  min-height: 40px;
-  border: 1px solid rgba(255, 255, 255, .24);
-  border-radius: 999px;
-  padding: 0 13px;
-  background: rgba(255, 255, 255, .13);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.tae-filter-card,
-.tae-context-card,
-.tae-warning-card,
-.tae-score-shell,
-.tae-empty-card,
-.tae-analysis-card,
-.tae-student-card {
-  min-width: 0;
-  border-radius: 24px;
-  background: var(--surface, #fff);
-  border: 1px solid rgba(148, 163, 184, .2);
-  box-shadow: 0 16px 40px rgba(15, 23, 42, .055);
-  overflow: hidden;
-}
-
-.tae-filter-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  margin-top: 10px;
-  padding: 10px;
-}
-
-.tae-filter-card label {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.tae-filter-card label span {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-}
-
-.tae-context-card,
-.tae-warning-card,
-.tae-score-shell,
-.tae-empty-card {
-  margin-top: 10px;
-  padding: 13px;
-}
-
-.tae-warning-card {
-  color: #7f1d1d;
-  font-size: 13px;
-  font-weight: 850;
-  line-height: 1.55;
-}
-
-.tae-warning-card.red {
-  border-color: rgba(239, 68, 68, .18);
-  background: rgba(239, 68, 68, .06);
-}
-
-.tae-warning-card.orange {
-  color: #92400e;
-  border-color: rgba(245, 158, 11, .18);
-  background: rgba(245, 158, 11, .07);
-}
-
-.tae-card-top,
-.tae-context-main {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.tae-context-main {
-  flex: 1 1 auto;
-}
-
-.tae-context-main > div:last-child {
-  min-width: 0;
-}
-
-.tae-context-icon {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 17px;
-  background: color-mix(in srgb, var(--tae-primary) 12%, #fff);
-}
-
-.tae-context-main h3,
-.tae-context-main p,
-.tae-context-main span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tae-context-main h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 1000;
-  letter-spacing: -.035em;
-}
-
-.tae-context-main p,
-.tae-context-main span {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  font-weight: 750;
-  line-height: 1.4;
-}
-
-.tae-chip-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.tae-chip {
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  min-height: 25px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 950;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tae-chip.green { background: rgba(34,197,94,.12); color: #16a34a; }
-.tae-chip.red { background: rgba(239,68,68,.12); color: #dc2626; }
-.tae-chip.blue { background: rgba(59,130,246,.12); color: #2563eb; }
-.tae-chip.gray { background: rgba(107,114,128,.12); color: #4b5563; }
-.tae-chip.orange { background: rgba(245,158,11,.14); color: #b45309; }
-.tae-chip.purple { background: rgba(147,51,234,.12); color: #7e22ce; }
-
-.tae-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.tae-summary-card {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 22px;
-  background: var(--surface, #fff);
-  border: 1px solid rgba(148, 163, 184, .2);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, .04);
-  overflow: hidden;
-}
-
-.tae-summary-icon {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--tae-primary) 12%, #fff);
-}
-
-.tae-summary-card div:last-child {
-  min-width: 0;
-}
-
-.tae-summary-card strong,
-.tae-summary-card span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tae-summary-card strong {
-  font-size: 22px;
-  font-weight: 1000;
-  letter-spacing: -.05em;
-}
-
-.tae-summary-card span {
-  margin-top: 2px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.tae-empty-card {
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 8px;
-  min-height: 210px;
-  text-align: center;
-  border-style: dashed;
-}
-
-.tae-empty-card.compact {
-  min-height: 170px;
-}
-
-.tae-empty-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--tae-primary) 12%, #fff);
-  font-size: 28px;
-}
-
-.tae-empty-card h3 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 1000;
-}
-
-.tae-empty-card p {
-  margin: 0;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.tae-score-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.tae-score-head div {
-  min-width: 0;
-}
-
-.tae-score-head h3 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 1000;
-  letter-spacing: -.04em;
-}
-
-.tae-score-head p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.tae-score-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
-  flex-wrap: wrap;
-}
-
-.tae-score-actions button {
-  min-height: 34px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 10px;
-  background: color-mix(in srgb, var(--tae-primary) 10%, #fff);
-  color: var(--tae-primary);
-  font-size: 11px;
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.tae-table-scroll {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  border-radius: 18px;
-  border: 1px solid rgba(148, 163, 184, .18);
-}
-
-.tae-table-scroll table {
-  width: max-content;
-  min-width: 100%;
-  border-collapse: collapse;
-  background: #fff;
-}
-
-.tae-table-scroll th,
-.tae-table-scroll td {
-  padding: 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, .16);
-  vertical-align: middle;
-}
-
-.tae-table-scroll th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #f8fafc;
-  color: #334155;
-  text-align: center;
-  font-size: 12px;
-  font-weight: 1000;
-  white-space: nowrap;
-}
-
-.tae-table-scroll th:first-child,
-.tae-table-scroll td:first-child {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  background: #fff;
-  text-align: left;
-  min-width: 220px;
-  max-width: 260px;
-}
-
-.tae-table-scroll th:first-child {
-  z-index: 3;
-  background: #f8fafc;
-}
-
-.tae-table-scroll th span,
-.tae-student-cell span,
-.tae-remark {
-  display: block;
-  margin-top: 3px;
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 750;
-}
-
-.tae-student-cell strong {
-  display: block;
-  font-size: 13px;
-  font-weight: 950;
-}
-
-.tae-score-input {
-  width: 84px !important;
-  min-height: 38px !important;
-  border-radius: 12px !important;
-  padding: 0 8px !important;
-  text-align: center;
-  font-weight: 900 !important;
-}
-
-.tae-center {
-  text-align: center;
-}
-
-.tae-center.strong {
-  font-weight: 950;
-}
-
-.tae-empty-table,
-.tae-empty-inline {
-  padding: 22px;
-  text-align: center;
-  color: var(--muted, #64748b);
-  font-weight: 850;
-}
-
-.tae-student-card-grid,
-.tae-analysis-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.tae-student-card {
-  padding: 13px;
-}
-
-.tae-student-card-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.tae-student-card-head h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 1000;
-}
-
-.tae-student-card-head p {
-  margin: 4px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-}
-
-.tae-card-score-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.tae-card-score-grid label {
-  display: grid;
-  gap: 5px;
-  padding: 10px;
-  border-radius: 16px;
-  background: #f8fafc;
-}
-
-.tae-card-score-grid label span {
-  font-size: 12px;
-  font-weight: 950;
-}
-
-.tae-card-score-grid label small {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.tae-student-result {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 12px;
-}
-
-.tae-student-result span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  border-radius: 999px;
-  padding: 0 9px;
-  background: #f8fafc;
-  color: #475569;
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.tae-analysis-card {
-  padding: 14px;
-}
-
-.tae-analysis-card span {
-  color: var(--muted, #64748b);
-  font-size: 11px;
-  font-weight: 950;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-}
-
-.tae-analysis-card strong {
-  display: block;
-  margin-top: 8px;
-  font-size: clamp(22px, 7vw, 32px);
-  line-height: 1;
-  font-weight: 1000;
-  letter-spacing: -.06em;
-}
-
-.tae-analysis-card p {
-  margin: 8px 0 0;
-  color: var(--muted, #64748b);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-@media (min-width: 680px) {
-  .tae-page {
-    padding: 12px;
-  }
-
-  .tae-filter-card {
-    grid-template-columns: minmax(0, 1.3fr) minmax(0, .7fr);
-  }
-
-  .tae-summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .tae-student-card-grid,
-  .tae-analysis-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .tae-card-score-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 1040px) {
-  .tae-page {
-    padding: 16px;
-  }
-
-  .tae-summary-grid {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-
-  .tae-student-card-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .tae-analysis-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 520px) {
-  .tae-page {
-    padding: 6px;
-  }
-
-  .tae-hero {
-    flex-direction: column;
-    border-radius: 22px;
-    padding: 10px;
-  }
-
-  .tae-hero-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .tae-view-switch,
-  .tae-ghost-btn,
-  .tae-primary-btn {
-    width: 100%;
-  }
-
-  .tae-view-switch {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .tae-summary-grid {
-    gap: 6px;
-  }
-
-  .tae-summary-card {
-    padding: 10px;
-    border-radius: 19px;
-  }
-
-  .tae-context-card,
-  .tae-warning-card,
-  .tae-score-shell,
-  .tae-empty-card,
-  .tae-student-card,
-  .tae-analysis-card {
-    border-radius: 20px;
-    padding: 11px;
-  }
-
-  .tae-score-head {
-    flex-direction: column;
-  }
-
-  .tae-score-actions {
-    width: 100%;
-    justify-content: flex-start;
-  }
-
-  .tae-table-scroll th:first-child,
-  .tae-table-scroll td:first-child {
-    min-width: 180px;
-    max-width: 200px;
-  }
-
-  .tae-score-input {
-    width: 74px !important;
-  }
-}
+@keyframes ae-spin { to { transform: rotate(360deg); } }
+.ae-page{--ae-bg:var(--bg,#f7f8fb);--ae-card:var(--card-bg,var(--surface,#fff));--ae-text:var(--text,#111827);--ae-muted:var(--muted,#6b7280);--ae-border:var(--border,rgba(15,23,42,.10));min-height:100dvh;width:100%;max-width:100%;padding:calc(8px * var(--local-density-scale,1));padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--ae-primary) 9%,transparent),transparent 30rem),var(--ae-bg);color:var(--ae-text);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:var(--font-size,14px);overflow-x:hidden}
+.ae-page *,.ae-page *::before,.ae-page *::after{box-sizing:border-box;min-width:0}.ae-page button,.ae-page input,.ae-page select{font:inherit}.ae-page button{-webkit-tap-highlight-color:transparent;cursor:pointer}.ae-page input,.ae-page select{width:100%;min-height:42px;border:1px solid var(--input-border,var(--ae-border));border-radius:16px;padding:0 12px;background:var(--input-bg,var(--ae-card));color:var(--input-text,var(--ae-text));outline:none;font-weight:750}.ae-page input:focus,.ae-page select:focus{border-color:color-mix(in srgb,var(--ae-primary) 52%,var(--ae-border));box-shadow:0 0 0 4px color-mix(in srgb,var(--ae-primary) 12%,transparent)}
+.ae-state,.ae-search-card,.student-row,.ae-table-card,.ae-score-card,.ae-empty,.ae-analysis,.ae-sheet,.ae-session-strip,.ae-compact-meta{background:var(--ae-card);border:1px solid var(--ae-border);box-shadow:0 18px 45px rgba(15,23,42,.07)}
+.ae-search-card{position:sticky;top:0;z-index:10;display:grid;grid-template-columns:1fr auto auto;gap:7px;align-items:center;padding:8px;border-radius:22px;margin:0 auto 8px;backdrop-filter:blur(18px);max-width:1180px}.ae-search{display:flex;align-items:center;gap:8px;min-width:0;background:color-mix(in srgb,var(--ae-primary) 5%,var(--ae-card));border:1px solid var(--ae-border);border-radius:16px;padding:0 10px}.ae-search span{color:var(--ae-muted);font-weight:900}.ae-search input{height:40px;min-height:40px;border:0;background:transparent;box-shadow:none;padding:0}.ae-icon-button,.ae-filter-button{height:40px;width:40px;border:1px solid var(--ae-border);border-radius:15px;background:var(--ae-card);color:var(--ae-text);display:grid;place-items:center;position:relative;font-weight:950}.ae-filter-button.active{border-color:color-mix(in srgb,var(--ae-primary) 58%,var(--ae-border));color:var(--ae-primary);background:color-mix(in srgb,var(--ae-primary) 8%,var(--ae-card))}.ae-filter-button b{position:absolute;right:-4px;top:-4px;min-width:18px;height:18px;border-radius:99px;background:var(--ae-primary);color:#fff;font-size:11px;display:grid;place-items:center}.ae-slider-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+.ae-filter-chips{display:flex;gap:7px;overflow:auto;padding:1px 0 8px;max-width:1180px;margin:0 auto}.ae-filter-chips button{white-space:nowrap;border:1px solid var(--ae-border);background:var(--ae-card);color:var(--ae-text);border-radius:999px;padding:7px 10px;font-size:12px;font-weight:850}.class-breadcrumb button:first-child{background:color-mix(in srgb,var(--ae-primary) 10%,var(--ae-card));color:var(--ae-primary);border-color:color-mix(in srgb,var(--ae-primary) 22%,var(--ae-border))}
+.ae-list{display:grid;gap:8px;max-width:1180px;margin:0 auto}.student-row{width:100%;border-radius:18px;padding:9px 10px;display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;text-align:left;color:var(--ae-text)}.student-row:hover{border-color:color-mix(in srgb,var(--ae-primary) 35%,var(--ae-border));transform:translateY(-1px)}.app-icon{width:36px;height:36px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,color-mix(in srgb,var(--ae-primary) 18%,transparent),color-mix(in srgb,var(--ae-primary) 5%,transparent));font-size:18px}.student-main{display:grid;gap:1px}.student-main strong{font-size:13.5px;line-height:1.2}.student-main small,.student-main em{font-size:11.5px;color:var(--ae-muted);font-style:normal;line-height:1.25}.student-side{display:grid;justify-items:end;gap:3px;color:var(--ae-muted);font-weight:950}.status-dot-mini,.ae-status-dot{width:9px;height:9px;border-radius:99px;background:var(--ae-muted);box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent)}.status-dot-mini.green,.ae-status-dot.green{background:#16a34a}.status-dot-mini.orange,.ae-status-dot.orange{background:#f97316}.status-dot-mini.red{background:#dc2626}.status-dot-mini.gray{background:#94a3b8}
+.ae-session-strip{max-width:1180px;margin:0 auto 8px;border-radius:18px;padding:8px 9px;display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center}.ae-session-strip strong{display:block;font-size:13.5px}.ae-session-strip small{display:block;color:var(--ae-muted);font-size:11.5px;margin-top:1px}.ae-session-strip button{border:1px solid var(--ae-border);border-radius:14px;padding:8px 10px;background:var(--ae-card);color:var(--ae-text);font-weight:950}.ae-session-strip button.primary{border-color:transparent;background:var(--ae-primary);color:#fff}.ae-session-strip button:disabled{opacity:.55}.ae-compact-meta{max-width:1180px;margin:0 auto 8px;border-radius:18px;padding:7px;display:flex;gap:6px;overflow:auto}.ae-chip{white-space:nowrap;display:inline-flex;align-items:center;border-radius:999px;padding:5px 8px;font-size:11px;font-weight:950;border:1px solid var(--ae-border);background:color-mix(in srgb,var(--ae-card) 90%,transparent)}.ae-chip.green{background:rgba(34,197,94,.12);color:#15803d}.ae-chip.red{background:rgba(239,68,68,.12);color:#b91c1c}.ae-chip.blue{background:rgba(59,130,246,.12);color:#1d4ed8}.ae-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.ae-chip.orange{background:rgba(249,115,22,.12);color:#c2410c}.ae-chip.gray{color:var(--ae-muted)}
+.ae-score-card{border-radius:18px;padding:9px}.ae-score-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px}.ae-score-head strong{display:block;font-size:13.5px}.ae-score-head span{display:block;color:var(--ae-muted);font-size:11.5px;margin-top:1px}.ae-score-head i{font-style:normal;font-size:10.5px;font-weight:950;border-radius:999px;padding:4px 7px;background:rgba(148,163,184,.12)}.ae-score-head i.done{background:rgba(34,197,94,.12);color:#15803d}.ae-score-head i.partial{background:rgba(249,115,22,.12);color:#c2410c}.ae-score-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.ae-score-grid label{display:grid;gap:3px;border:1px solid var(--ae-border);border-radius:15px;padding:7px;background:color-mix(in srgb,var(--ae-primary) 3%,var(--ae-card))}.ae-score-grid span{font-size:11.5px;font-weight:950}.ae-score-grid small{font-size:10px;color:var(--ae-muted)}.ae-score-input{width:100%;height:36px;min-height:36px;border:1px solid var(--ae-border);border-radius:12px;background:var(--ae-card);color:var(--ae-text);padding:0 8px;font:inherit;font-weight:950}.ae-result-row{display:flex;gap:8px;flex-wrap:wrap;color:var(--ae-muted);font-size:11.5px;border-top:1px solid var(--ae-border);margin-top:8px;padding-top:8px}.ae-result-row b{color:var(--ae-text)}
+.ae-table-card{max-width:1180px;margin:0 auto;border-radius:20px;overflow:hidden}.ae-table-scroll{overflow:auto;max-height:72dvh}table{width:100%;border-collapse:separate;border-spacing:0;min-width:760px}th,td{border-bottom:1px solid var(--ae-border);padding:8px 9px;text-align:left;vertical-align:middle;font-size:12.5px}th{position:sticky;top:0;background:var(--ae-card);z-index:1;color:var(--ae-muted);font-size:10.5px;text-transform:uppercase}th span,td span{display:block;color:var(--ae-muted);font-size:10.5px;margin-top:1px}td .ae-score-input{min-width:84px}.ae-empty-table{padding:18px;color:var(--ae-muted);text-align:center}
+.ae-empty,.ae-state{max-width:720px;margin:10px auto;border-radius:22px;padding:22px;text-align:center}.ae-empty-icon{font-size:28px}.ae-empty h3,.ae-state h2{margin:7px 0 4px}.ae-empty p,.ae-state p{margin:0;color:var(--ae-muted);font-size:13px}.ae-spinner{width:30px;height:30px;border:3px solid rgba(148,163,184,.35);border-top-color:var(--ae-primary);border-radius:999px;margin:0 auto 10px;animation:ae-spin 1s linear infinite}.ae-state-button{margin-top:12px;border:1px solid transparent;border-radius:14px;padding:10px 12px;font-weight:950;background:var(--ae-primary);color:#fff}
+.ae-analysis-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-width:1180px;margin:0 auto}.ae-analysis{border-radius:18px;padding:12px}.ae-analysis span{display:block;color:var(--ae-muted);font-size:11.5px;font-weight:950}.ae-analysis strong{font-size:26px}.ae-analysis p{margin:5px 0 0;color:var(--ae-muted);font-size:12.5px}.ae-analysis.ae-wide{grid-column:1/-1}.ae-analysis.ae-wide p{display:flex;justify-content:space-between;border-top:1px solid var(--ae-border);padding-top:7px}
+.ae-sheet-backdrop{position:fixed;inset:0;z-index:50;background:rgba(15,23,42,.48);display:flex;align-items:flex-end;justify-content:center;padding:12px}.ae-sheet{width:min(680px,100%);max-height:88dvh;overflow:auto;border-radius:26px;padding:14px}.ae-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.ae-sheet-head h2{margin:0}.ae-sheet-head p{margin:2px 0 0;color:var(--ae-muted);font-size:13px}.ae-sheet-head button{border:1px solid var(--ae-border);background:var(--ae-card);border-radius:12px;width:36px;height:36px;color:var(--ae-text)}.ae-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.ae-form-grid label{display:grid;gap:5px;font-size:12px;color:var(--ae-muted);font-weight:850}.ae-sheet-actions{display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--ae-border);padding-top:12px;margin-top:12px}.ae-sheet-actions button{border:1px solid var(--ae-border);border-radius:14px;padding:10px 12px;background:var(--ae-card);color:var(--ae-text);font-weight:950}.ae-sheet-actions .ae-primary{background:var(--ae-primary);color:#fff;border-color:transparent}.ae-more-sheet{display:grid;gap:8px}.ae-more-sheet .ae-sheet-head{margin-bottom:4px}.ae-more-sheet>button{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;text-align:left;border:1px solid var(--ae-border);background:var(--ae-card);color:var(--ae-text);border-radius:16px;padding:11px;font-weight:950}.ae-more-sheet>button span:first-child{grid-row:1/3;font-size:18px}.ae-more-sheet>button small{display:block;color:var(--ae-muted);font-size:11.5px;font-weight:700}.ae-more-sheet>button.active{border-color:var(--ae-primary);color:var(--ae-primary);background:color-mix(in srgb,var(--ae-primary) 7%,var(--ae-card))}
+.ae-toast{position:fixed;z-index:80;left:12px;right:12px;bottom:12px;max-width:720px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;border-radius:18px;padding:12px 14px;color:#fff;box-shadow:0 18px 40px rgba(15,23,42,.28);font-weight:850}.ae-toast.success{background:#16a34a}.ae-toast.error{background:#dc2626}.ae-toast.info{background:#2563eb}.ae-toast button{border:0;background:rgba(255,255,255,.18);color:#fff;border-radius:10px;width:30px;height:30px}
+@media (min-width:760px){.ae-page{padding:14px}.ae-list{grid-template-columns:repeat(2,minmax(0,1fr))}.ae-score-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.ae-sheet-backdrop{align-items:center}.ae-analysis-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media (min-width:1120px){.ae-list.ae-entry-list{grid-template-columns:repeat(3,minmax(0,1fr))}.ae-list.ae-picker-list{grid-template-columns:repeat(2,minmax(0,1fr))}.ae-score-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.ae-page{padding:7px}.ae-search-card{border-radius:18px}.ae-session-strip{grid-template-columns:auto 1fr auto auto}.ae-session-strip button{padding:8px 9px}.ae-score-grid,.ae-form-grid{grid-template-columns:1fr}th,td{padding:7px}.ae-sheet{border-radius:22px}.ae-analysis-grid{grid-template-columns:1fr}}
 `;
-*/

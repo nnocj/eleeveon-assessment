@@ -24,19 +24,16 @@ import RolePortalShell, {
 import { TEACHER_ROLES } from "../lib/auth/roleRedirect";
 
 import Teacherdashboard from "./modules/Teacherdashboard";
-//import Teacherclasses from "./modules/Teacherclasses";
-import Teachersubjects from "./modules/Teachersubjects";
-/*import Attendance from "./modules/Attendance";
-import Assessmententry from "./modules/Assessmententry";
-import Assignments from "./modules/Assignments";
-import Courseoutline from "./modules/Courseoutline";*/
+import TeacherAssessmentEntry from "./modules/AssessmentEntry";
+import StudentAttendance from "./modules/StudentAttendance";
+import AssessmentEntry from "./modules/AssessmentEntry";
+import CourseOutline from "./modules/Courseoutline";
 
 import Teacherstudents from "./modules/Teacherstudents";
 import Studentprogress from "./modules/Studentprogress";
 
-import Teacherreports from "./modules/Teacherreports";
-import Teacherbroadsheets from "./modules/Teacherbroadsheets";
-import Lessonnotes from "./modules/Lessonnotes";
+import TeacherReportRemarks from "./modules/ReportRemarks";
+import Broadsheets from "./modules/Broadsheets";
 
 import Announcements from "./modules/Announcements";
 import Messages from "./modules/Messages";
@@ -50,8 +47,6 @@ import Teacherpaymenthistory from "./modules/Teacherpaymenthistory";
 
 import Teacherprofile from "./modules/Teacherprofile";
 import Teachersettings from "./modules/Teachersettings";
-
-//import ReportRemarks from "./modules/ReportRemarks";
 
 type RouteProps = {
   navigate: (key: string) => void;
@@ -67,30 +62,25 @@ export const NAV_SECTIONS: RoleNavSection[] = [
     defaultOpen: true,
     items: [
       { key: "teacherDashboard", label: "Dashboard", icon: "🏠" },
-      { key: "teacherClasses", label: "My Classes", icon: "🏫" },
-      { key: "teacherSubjects", label: "My Subjects", icon: "📘" },
-      { key: "attendance", label: "Attendance", icon: "📅" },
-      { key: "assessmentEntry", label: "Assessment Entry", icon: "📝" },
-      { key: "assignments", label: "Assignments", icon: "🧩" },
-      { key: "courseOutline", label: "Course Outline", icon: "📖" },
+     
+      { key: "courseOutline", label: "My Subjects", icon: "📖" },
     ],
   },
   {
     title: "Learners",
     defaultOpen: true,
     items: [
-      { key: "teacherStudents", label: "My Students", icon: "👨‍🎓" },
-      { key: "studentProgress", label: "Student Progress", icon: "📈" },
-      { key: "reportRemarks", label: "Report Remarks", icon: "📝" },
+      { key: "studentAttendance", label: "Student Attendance", icon: "📅" },
+      //{ key: "studentProgress", label: "Student Progress", icon: "📈" },
     ],
   },
   {
     title: "Records",
     defaultOpen: false,
     items: [
-      { key: "teacherReports", label: "Reports", icon: "📄" },
-      { key: "teacherBroadsheets", label: "Broadsheets", icon: "📊" },
-      { key: "lessonNotes", label: "Lesson Notes", icon: "🗒️" },
+      { key: "assessmentEntry", label: "Assessment Entry", icon: "📝" },
+      { key: "teacherReportRemarks", label: "Report Remarks", icon: "📄" },
+      { key: "broadsheets", label: "Broadsheets", icon: "📊" },
     ],
   },
   {
@@ -142,20 +132,16 @@ function TeacherDashboardRoute(props: RouteProps) {
 
 const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   teacherDashboard: TeacherDashboardRoute,
-  //teacherClasses: Teacherclasses,
-  teacherSubjects: Teachersubjects,
-  /*attendance: Attendance,
-  assessmentEntry: Assessmententry,
-  assignments: Assignments,
-  courseOutline: Courseoutline,*/
+  teacherAssessmentEntry: TeacherAssessmentEntry,
+  studentAttendance: StudentAttendance,
+  courseOutline: CourseOutline,
 
+  assessmentEntry: AssessmentEntry,
   teacherStudents: Teacherstudents,
   studentProgress: Studentprogress,
-  /*reportRemarks: ReportRemarks,*/
 
-  teacherReports: Teacherreports,
-  teacherBroadsheets: Teacherbroadsheets,
-  lessonNotes: Lessonnotes,
+  teacherReportRemarks: TeacherReportRemarks,
+  broadsheets: Broadsheets,
 
   announcements: Announcements,
   messages: Messages,
