@@ -468,6 +468,8 @@ export type NotificationPriority =
 
 export type PortalHighlightMediaType = "image" | "video";
 
+export type PortalHighlightPlacement = "hero" | "gallery";
+
 export type PortalHighlightAudience =
   | "all"
   | "branch_admin"
@@ -517,6 +519,11 @@ export type WebsiteSslStatus =
   | "active"
   | "failed"
   | "expired";
+/**
+ * Source-driven website sections may consume these operational tables.
+ * Except for "manual" and "custom", records should be exposed publicly only
+ * when their WebsitePublicationFields.publishToWebsite flag is true.
+ */
 export type WebsiteSectionSourceType =
   | "manual"
   | "school"
@@ -533,6 +540,38 @@ export type WebsiteSectionSourceType =
 export type WebsiteNavigationTarget = "page" | "section" | "external_url" | "portal_login";
 export type WebsiteFormType = "contact" | "admissions_enquiry" | "newsletter" | "custom";
 export type WebsiteSubmissionStatus = "new" | "reviewing" | "responded" | "closed" | "spam";
+
+export type WebsitePublicationStatus =
+  | "draft"
+  | "scheduled"
+  | "published"
+  | "hidden"
+  | "archived";
+
+/**
+ * Shared opt-in contract for operational records that may also be exposed
+ * through a source-driven school website section.
+ *
+ * These fields do not duplicate the source record. The website builder reads
+ * the original record only when publishToWebsite=true and the publication
+ * window/status permits it.
+ */
+export interface WebsitePublicationFields {
+  publishToWebsite?: boolean;
+  websitePublicationStatus?: WebsitePublicationStatus;
+
+  websiteFeatured?: boolean;
+  websiteDisplayOrder?: number;
+
+  websiteSlug?: string | null;
+  websiteSectionKey?: string | null;
+
+  websiteStartAt?: number | null;
+  websiteEndAt?: number | null;
+  websitePublishedAt?: number | null;
+
+  websiteMetadata?: Record<string, unknown>;
+}
 
 export type MediaAssetKind =
   | "image"
@@ -1198,7 +1237,7 @@ export interface LocalNotificationDeliveryLog {
 // CORE (SCHOOL STRUCTURE)
 // ======================================================
 
-export interface School extends BaseSync, AddressFields, MapLocationFields {
+export interface School extends BaseSync, AddressFields, MapLocationFields, WebsitePublicationFields {
   name: string;
   logo?: string;
   logoMediaId?: string;
@@ -1215,7 +1254,7 @@ export interface School extends BaseSync, AddressFields, MapLocationFields {
   galleryMediaIds?: number[];
 }
 
-export interface Branch extends BaseSync, AddressFields, MapLocationFields {
+export interface Branch extends BaseSync, AddressFields, MapLocationFields, WebsitePublicationFields {
   schoolId: string;
   name: string;
   code?: string;
@@ -1260,7 +1299,7 @@ export interface AcademicPeriod extends BaseSync {
   active?: boolean;
 }
 
-export interface Organization extends BaseSync {
+export interface Organization extends BaseSync, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
   parentOrganizationId?: string;
@@ -1306,7 +1345,7 @@ export interface Student extends BaseSync, AddressFields, PersonMapLocationField
   status?: "active" | "graduated" | "transferred" | "withdrawn";
 }
 
-export interface Teacher extends BaseSync, AddressFields, PersonMapLocationFields {
+export interface Teacher extends BaseSync, AddressFields, PersonMapLocationFields, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
   organizationId?: string;
@@ -1375,7 +1414,7 @@ export interface Class extends BaseSync {
   active?: boolean;
 }
 
-export interface Subject extends BaseSync {
+export interface Subject extends BaseSync, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
   organizationId?: string;
@@ -1391,7 +1430,7 @@ export interface Subject extends BaseSync {
   active?: boolean;
 }
 
-export interface Program extends BaseSync {
+export interface Program extends BaseSync, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
   organizationId?: string;
@@ -3267,7 +3306,7 @@ export interface StaffPaymentRecord extends BaseSync, MoneyFields {
  * Media bytes remain in mediaAssets/mediaBlobs. This record stores only media
  * references, presentation rules, scheduling, audience and navigation metadata.
  */
-export interface PortalHighlight extends BaseSync {
+export interface PortalHighlight extends BaseSync, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
 
@@ -3277,6 +3316,8 @@ export interface PortalHighlight extends BaseSync {
   eyebrow?: string | null;
 
   mediaType: PortalHighlightMediaType;
+  placement: PortalHighlightPlacement;
+
   mediaAssetId?: string | null;
   posterMediaAssetId?: string | null;
   fallbackImageUrl?: string | null;
@@ -3293,6 +3334,10 @@ export interface PortalHighlight extends BaseSync {
   displayOrder: number;
   durationSeconds: number;
   transition?: PortalHighlightTransition;
+
+  autoplay?: boolean;
+  loop?: boolean;
+  muted?: boolean;
 
   startAt?: number | null;
   endAt?: number | null;
@@ -3545,7 +3590,7 @@ export interface WebsiteRevision extends BaseSync {
   note?: string | null;
 }
 
-export interface Announcement extends BaseSync {
+export interface Announcement extends BaseSync, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
   title: string;
@@ -3858,7 +3903,7 @@ export type ScheduleConflictStatus =
 // CALENDAR EVENTS
 // ======================================================
 
-export interface CalendarEvent extends BaseSync {
+export interface CalendarEvent extends BaseSync, WebsitePublicationFields {
   schoolId: string;
   branchId: string;
 
@@ -4411,7 +4456,7 @@ export const APP_DB_STORES_V1: Record<string, string> = {
         "id,accountId,schoolId,branchId,teacherId,staffUserId,payrollRunId,payrollItemId,status,method,provider,referenceNumber,receiptNumber,providerReference,date,paidAt,updatedAt",
 
       portalHighlights:
-        "id,accountId,schoolId,branchId,status,active,mediaType,displayOrder,startAt,endAt,publishedAt,updatedAt,isDeleted,synced,[accountId+schoolId+branchId],[branchId+active+displayOrder],[branchId+status+startAt]",
+        "id,accountId,schoolId,branchId,placement,status,active,mediaType,displayOrder,startAt,endAt,publishedAt,updatedAt,isDeleted,synced,[accountId+schoolId+branchId],[branchId+placement+active+displayOrder],[branchId+status+startAt]",
 
       websiteSettings:
         "id,accountId,schoolId,branchId,eleeveonSlug,templateKey,status,primaryDomainId,homePageId,publishedAt,isDeleted,updatedAt,synced,&[accountId+eleeveonSlug],[schoolId+status]",
@@ -4775,9 +4820,10 @@ export class EleeveonDatabase extends Dexie {
     });
 
     /**
-     * Version 2 activates the website template persistence stores:
+     * Version 2 activates the complete current schema, including:
      * - websiteTemplateSettings
      * - websiteTemplateAssignments
+     * - Portal Highlight placement indexing for hero and gallery records
      *
      * APP_DB_STORES_V1 currently represents the complete schema inventory, so
      * re-declaring it here lets Dexie compare the installed v1 database against

@@ -1,7 +1,7 @@
 /**
  * app/lib/media/mediaUpload.ts
  * --------------------------------------------------------------------------
- * Debounced remote media upload queue.
+ * Debounced remote media upload queue with Portal Highlight image/video support.
  *
  * Local media remains immediately usable from mediaBlobs even when remote
  * upload is unavailable. After a successful upload, the permanent remote URL
@@ -69,6 +69,119 @@ export type PortalHighlightMediaUploadInput = {
   posterMediaAssetId?: string | null;
   thumbnailMediaAssetId?: string | null;
 };
+
+const PORTAL_HIGHLIGHT_MAX_FILE_SIZE_BYTES =
+  15 * 1024 * 1024;
+
+const PORTAL_HIGHLIGHT_VIDEO_MIME_TYPES =
+  new Set([
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+  ]);
+
+const PORTAL_HIGHLIGHT_IMAGE_MIME_TYPES =
+  new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/avif",
+  ]);
+
+function normalizedMimeType(
+  value: unknown,
+) {
+  return String(
+    value || "",
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function isPortalHighlightField(
+  fieldKey: string,
+) {
+  return Object.values(
+    PORTAL_HIGHLIGHT_MEDIA_FIELDS,
+  ).includes(
+    fieldKey as PortalHighlightMediaField,
+  );
+}
+
+function validatePortalHighlightBlob(
+  asset: any,
+  blob: Blob,
+) {
+  const ownerTable =
+    optionalString(
+      asset.ownerTable,
+    );
+
+  const fieldKey =
+    optionalString(
+      asset.fieldKey,
+    );
+
+  if (
+    ownerTable !==
+      PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE ||
+    !fieldKey ||
+    !isPortalHighlightField(
+      fieldKey,
+    )
+  ) {
+    return;
+  }
+
+  if (
+    blob.size >
+    PORTAL_HIGHLIGHT_MAX_FILE_SIZE_BYTES
+  ) {
+    throw new Error(
+      "Portal Highlight media must be 15 MB or smaller.",
+    );
+  }
+
+  const mimeType =
+    normalizedMimeType(
+      blob.type ||
+        asset.mimeType,
+    );
+
+  if (
+    fieldKey ===
+      PORTAL_HIGHLIGHT_MEDIA_FIELDS.media
+  ) {
+    if (
+      !PORTAL_HIGHLIGHT_IMAGE_MIME_TYPES.has(
+        mimeType,
+      ) &&
+      !PORTAL_HIGHLIGHT_VIDEO_MIME_TYPES.has(
+        mimeType,
+      )
+    ) {
+      throw new Error(
+        `Unsupported Portal Highlight media type: ${
+          mimeType ||
+          "unknown"
+        }. Use JPG, PNG, WebP, GIF, AVIF, MP4, WebM or MOV.`,
+      );
+    }
+
+    return;
+  }
+
+  if (
+    !PORTAL_HIGHLIGHT_IMAGE_MIME_TYPES.has(
+      mimeType,
+    )
+  ) {
+    throw new Error(
+      "Portal Highlight poster and thumbnail files must be images.",
+    );
+  }
+}
 
 const queued =
   new Set<string>();
@@ -481,6 +594,11 @@ export async function uploadMediaAsset(
       `Media asset ${id} contains an empty file.`,
     );
   }
+
+  validatePortalHighlightBlob(
+    asset,
+    blob,
+  );
 
   const ownerTable =
     optionalString(
@@ -998,6 +1116,121 @@ export async function retryFailedMediaUploads(
     queued:
       queuedCount,
   };
+}
+
+export async function portalHighlightMediaUploadStatus(
+  input: PortalHighlightMediaUploadInput,
+) {
+  const ids = [
+    input.mediaAssetId,
+    input.posterMediaAssetId,
+    input.thumbnailMediaAssetId,
+  ]
+    .map(
+      (value) =>
+        optionalString(
+          value,
+        ),
+    )
+    .filter(
+      (value): value is string =>
+        Boolean(
+          value,
+        ),
+    );
+
+  const uniqueIds =
+    Array.from(
+      new Set(
+        ids,
+      ),
+    );
+
+  const table =
+    (db as any).mediaAssets;
+
+  if (
+    !table ||
+    !uniqueIds.length
+  ) {
+    return {
+      total:
+        uniqueIds.length,
+      uploaded:
+        0,
+      queued:
+        0,
+      failed:
+        0,
+      missing:
+        uniqueIds.length,
+    };
+  }
+
+  const assets =
+    await Promise.all(
+      uniqueIds.map(
+        (assetId) =>
+          table
+            .get(
+              assetId,
+            )
+            .catch(
+              () => null,
+            ),
+      ),
+    );
+
+  return assets.reduce(
+    (
+      summary,
+      asset,
+    ) => {
+      if (
+        !asset ||
+        asset.isDeleted ||
+        asset.active === false
+      ) {
+        summary.missing +=
+          1;
+        return summary;
+      }
+
+      if (
+        remoteUrl(
+          asset,
+        ) ||
+        asset.uploadStatus ===
+          "uploaded"
+      ) {
+        summary.uploaded +=
+          1;
+      } else if (
+        asset.uploadStatus ===
+          "failed"
+      ) {
+        summary.failed +=
+          1;
+      } else {
+        summary.queued +=
+          1;
+      }
+
+      return summary;
+    },
+    {
+      total:
+        uniqueIds.length,
+      uploaded:
+        0,
+      queued:
+        0,
+      failed:
+        0,
+      missing:
+        0,
+    },
+  );
 }
 
 /**

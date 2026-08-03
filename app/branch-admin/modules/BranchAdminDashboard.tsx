@@ -3,7 +3,7 @@
 /**
  * app/branch-admin/modules/BranchAdminDashboard.tsx
  * ---------------------------------------------------------
- * ELEEVEON BRANCH ADMIN DASHBOARD V4.1
+ * ELEEVEON BRANCH ADMIN DASHBOARD V5 — PORTAL HIGHLIGHTS
  * ---------------------------------------------------------
  * Golden Standard Branch Home.
  * Branch-scoped, offline-first, mobile-first, theme-safe.
@@ -57,6 +57,20 @@ type Tone = "green" | "red" | "blue" | "gray" | "orange" | "purple";
 type RouteProps = {
   navigate?: (key: string) => void;
   navSections?: RoleNavSection[];
+};
+
+type HeroSlide = {
+  id: string;
+  type: "image" | "video";
+  src: string;
+  poster?: string;
+  title?: string;
+  subtitle?: string;
+  durationSeconds: number;
+  transition: "fade" | "slide";
+  actionType?: string;
+  actionLabel?: string;
+  actionValue?: string;
 };
 
 type DashboardModule = {
@@ -1009,72 +1023,197 @@ export default function BranchAdminDashboard({
     return source.sort((a,b)=>n(b._date)-n(a._date)).slice(0,6);
   }, [rows]);
 
-  const heroImage = useMemo(() => {
-    const highlights = (rows.portalHighlights || [])
-      .filter(activeRow)
-      .filter((row) => ["published", "scheduled"].includes(String(row.status || "").toLowerCase()))
-      .sort((a, b) => n(a.displayOrder) - n(b.displayOrder));
+  const heroSlides = useMemo<HeroSlide[]>(() => {
     const media = (rows.mediaAssets || []).filter(activeRow);
-    const branchRecord = identity.branch;
-    const schoolRecord = identity.school;
+    const now = Date.now();
 
     const mediaUrl = (mediaId: unknown) => {
       const asset = media.find((row) => idOf(row) === cleanId(mediaId));
       return text(
         asset?.publicUrl ||
           asset?.remoteUrl ||
+          asset?.localObjectUrl ||
           asset?.previewDataUrl ||
-          asset?.thumbnailDataUrl ||
-          asset?.localObjectUrl,
+          asset?.thumbnailDataUrl,
       );
     };
 
-    const candidates = [
-      ...highlights.flatMap((row) => [
-        mediaUrl(row.mediaAssetId),
-        mediaUrl(row.posterMediaAssetId),
-        row.fallbackImageUrl,
-      ]),
-      mediaUrl(branchRecord?.bannerImageMediaId),
-      branchRecord?.bannerImage,
-      mediaUrl(branchRecord?.photoMediaId),
-      branchRecord?.photo,
-      mediaUrl(schoolRecord?.bannerImageMediaId),
-      schoolRecord?.bannerImage,
-      mediaUrl(schoolRecord?.photoMediaId),
-      schoolRecord?.photo,
+    const defaultImageCandidates = [
       mediaUrl((settings as AnyRow)?.dashboardHeroImageMediaId),
       (settings as AnyRow)?.dashboardHeroImage,
+      mediaUrl(identity.branch?.bannerImageMediaId),
+      identity.branch?.bannerImage,
+      mediaUrl(identity.school?.bannerImageMediaId),
+      identity.school?.bannerImage,
+      mediaUrl(identity.branch?.photoMediaId),
+      identity.branch?.photo,
+      mediaUrl(identity.school?.photoMediaId),
+      identity.school?.photo,
       mediaUrl((settings as AnyRow)?.dashboardBannerImageMediaId),
       (settings as AnyRow)?.dashboardBannerImage,
-      (settings as AnyRow)?.bannerImage,
-      (settings as AnyRow)?.photo,
-      ...media
-        .filter((row) => String(row.assetKind || "") === "image")
-        .map((row) =>
-          row.publicUrl ||
-          row.remoteUrl ||
-          row.previewDataUrl ||
-          row.thumbnailDataUrl ||
-          row.localObjectUrl,
-        ),
     ]
       .map((value) => text(value))
       .filter(Boolean);
 
-    return candidates[0] || "";
+    const slides: HeroSlide[] = [];
+
+    // Preserve the existing dashboard image as the permanent first slide.
+    if (defaultImageCandidates[0]) {
+      slides.push({
+        id: "dashboard-hero-image",
+        type: "image",
+        src: defaultImageCandidates[0],
+        durationSeconds: 7,
+        transition: "fade",
+      });
+    }
+
+    const highlightSlides = (rows.portalHighlights || [])
+      .filter(activeRow)
+      .filter((row) => row?.metadata?.placement !== "gallery")
+      .filter((row) => {
+        const audiences = Array.isArray(row.audiences)
+          ? row.audiences.map((value: unknown) =>
+              String(value).toLowerCase(),
+            )
+          : [
+              String(
+                row.audience || row.portal || row.role || "all",
+              ).toLowerCase(),
+            ];
+
+        if (
+          !audiences.some((value: string) =>
+            ["all", "branch_admin", "branch-admin", "admin"].includes(value),
+          )
+        ) {
+          return false;
+        }
+
+        const status = String(row.status || "published").toLowerCase();
+        if (!["published", "scheduled", "active"].includes(status)) {
+          return false;
+        }
+
+        const startAt = Number(row.startAt || 0);
+        const endAt = Number(row.endAt || 0);
+
+        if (startAt && startAt > now) return false;
+        if (endAt && endAt < now) return false;
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          n(a.displayOrder || a.order) -
+          n(b.displayOrder || b.order),
+      )
+      .map((row, index): HeroSlide | null => {
+        const type =
+          String(row.mediaType || "").toLowerCase() === "video"
+            ? "video"
+            : "image";
+
+        const src =
+          mediaUrl(row.mediaAssetId) ||
+          (type === "image" ? text(row.fallbackImageUrl) : "");
+
+        const poster =
+          mediaUrl(row.posterMediaAssetId) ||
+          text(row.fallbackImageUrl);
+
+        if (!src) return null;
+
+        return {
+          id: cleanId(idOf(row)) || `portal-highlight-${index}`,
+          type,
+          src,
+          poster: poster || undefined,
+          title: text(row.title),
+          subtitle: text(row.subtitle || row.description),
+          durationSeconds: Math.max(
+            3,
+            Math.min(30, n(row.durationSeconds || 7)),
+          ),
+          transition:
+            row.transition === "slide" ? "slide" : "fade",
+          actionType: text(row.actionType),
+          actionLabel: text(row.actionLabel),
+          actionValue: text(row.actionValue),
+        };
+      })
+      .filter((row): row is HeroSlide => Boolean(row));
+
+    slides.push(...highlightSlides);
+    return slides;
   }, [
-    rows.portalHighlights,
-    rows.mediaAssets,
-    rows.branches,
-    rows.schools,
-    settings,
-    activeBranch,
-    activeSchool,
-    branchId,
-    schoolId,
     identity,
+    rows.mediaAssets,
+    rows.portalHighlights,
+    settings,
   ]);
+
+  const [heroSlideIndex, setHeroSlideIndex] = useState(0);
+  const activeHeroSlide =
+    heroSlides[heroSlideIndex % Math.max(1, heroSlides.length)] || null;
+
+  useEffect(() => {
+    if (!heroSlides.length) {
+      setHeroSlideIndex(0);
+      return;
+    }
+
+    if (heroSlideIndex >= heroSlides.length) {
+      setHeroSlideIndex(0);
+      return;
+    }
+
+    // Videos advance when playback ends.
+    if (activeHeroSlide?.type === "video") return;
+
+    const timer = window.setTimeout(() => {
+      setHeroSlideIndex((current) => (current + 1) % heroSlides.length);
+    }, (activeHeroSlide?.durationSeconds || 7) * 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activeHeroSlide?.durationSeconds,
+    activeHeroSlide?.id,
+    activeHeroSlide?.type,
+    heroSlideIndex,
+    heroSlides.length,
+  ]);
+
+  function advanceHero() {
+    if (heroSlides.length <= 1) return;
+    setHeroSlideIndex((current) => (current + 1) % heroSlides.length);
+  }
+
+  function openHeroAction(slide: HeroSlide) {
+    if (!slide.actionType || slide.actionType === "none") return;
+
+    if (slide.actionType === "portal_route" && slide.actionValue) {
+      openRoute(slide.actionValue);
+      return;
+    }
+
+    if (
+      slide.actionType === "external_url" &&
+      slide.actionValue &&
+      typeof window !== "undefined"
+    ) {
+      window.open(slide.actionValue, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    if (slide.actionType === "announcement") {
+      openRoute("announcements");
+      return;
+    }
+
+    if (slide.actionType === "calendar_event") {
+      openRoute("calendar");
+    }
+  }
 
   const branchRecord = identity.branch;
   const schoolRecord = identity.school;
@@ -1123,9 +1262,67 @@ export default function BranchAdminDashboard({
       {searchResults.map(item=><button key={item.key} className="branch-row" onClick={()=>openRoute(item.routeKey)}><span className="branch-avatar">{item.icon}</span><span className="branch-main"><strong>{item.label}</strong><small>{item.note}</small><em>{areaLabel(item.area)}</em></span><span className="branch-side"><Chip tone={item.tone}>{item.value}</Chip><i>›</i></span></button>)}
       {!searchResults.length ? <Empty title="Nothing matches that search" text="Try a module name such as students, attendance, reports, fees or settings."/> : null}
     </section> : <>
-      <section className={`bd-hero ${heroImage ? "has-image" : ""}`} style={heroImage ? {backgroundImage:`linear-gradient(90deg,rgba(7,15,32,.88),rgba(7,15,32,.32)),url(${JSON.stringify(heroImage).slice(1,-1)})`} : undefined}>
+      <section
+        className={`bd-hero ${activeHeroSlide ? "has-media" : ""} ${
+          activeHeroSlide?.transition === "slide"
+            ? "slide-transition"
+            : "fade-transition"
+        }`}
+      >
+        {activeHeroSlide ? (
+          <div key={activeHeroSlide.id} className="bd-hero-media">
+            {activeHeroSlide.type === "video" ? (
+              <video
+                src={activeHeroSlide.src}
+                poster={activeHeroSlide.poster}
+                autoPlay
+                muted
+                playsInline
+                preload="metadata"
+                onEnded={advanceHero}
+                onError={advanceHero}
+              />
+            ) : (
+              <img src={activeHeroSlide.src} alt="" />
+            )}
+            <span className="bd-hero-shade" />
+          </div>
+        ) : null}
+
         <div className="bd-hero-copy"><span>{greeting}</span><h1>{userName}</h1><p>Welcome to <strong>{summary.schoolName}</strong><small className="bd-branch-name">{summary.branchName}</small></p><blockquote>“{motto}”</blockquote></div>
+
+        {activeHeroSlide?.title ? (
+          <div className="bd-highlight-copy">
+            <b>{activeHeroSlide.title}</b>
+            {activeHeroSlide.subtitle ? (
+              <small>{activeHeroSlide.subtitle}</small>
+            ) : null}
+            {activeHeroSlide.actionLabel ? (
+              <button
+                type="button"
+                onClick={() => openHeroAction(activeHeroSlide)}
+              >
+                {activeHeroSlide.actionLabel}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="bd-hero-stats"><span><b>{summary.students}</b> Students</span><span><b>{summary.teachers}</b> Teachers</span><span><b>{summary.classes}</b> Classes</span></div>
+
+        {heroSlides.length > 1 ? (
+          <div className="bd-hero-dots" aria-label="Hero slides">
+            {heroSlides.map((slide, index) => (
+              <button
+                key={slide.id}
+                type="button"
+                className={index === heroSlideIndex ? "active" : ""}
+                onClick={() => setHeroSlideIndex(index)}
+                aria-label={`Show hero slide ${index + 1}`}
+              />
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="bd-quick-actions" aria-label="Quick actions">{quickActions.map(([route,icon,label])=><button key={route} onClick={()=>openRoute(route)}><span>{icon}</span><b>{label}</b></button>)}</section>
@@ -1155,7 +1352,7 @@ const css = `
 @keyframes spin{to{transform:rotate(360deg)}}
 .bd-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;padding:8px;padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--bd-primary) 10%,transparent),transparent 34rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overflow-x:hidden}.bd-page *{box-sizing:border-box;min-width:0}.bd-page button,.bd-page input{font:inherit}.bd-page button{cursor:pointer;-webkit-tap-highlight-color:transparent}.bd-search-card,.bd-card,.bd-state,.bd-search-results,.branch-row,.bd-sheet{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.1));box-shadow:0 12px 30px rgba(15,23,42,.05)}
 .bd-search-card{position:sticky;top:6px;z-index:20;display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;align-items:center;gap:7px;padding:7px;border-radius:22px;backdrop-filter:blur(16px)}.status-dot-mini{width:9px;height:9px;border-radius:99px}.status-dot-mini.green{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.12)}.status-dot-mini.gray{background:#94a3b8}.bd-search{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:43px;padding:0 12px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.bd-search>span{font-size:18px;color:var(--muted,#64748b);font-weight:1000}.bd-search input{width:100%;border:0;outline:0;background:transparent;color:var(--text,#111827);font-size:14px;font-weight:750}.bd-search input::placeholder{color:var(--muted,#64748b)}.bd-clear,.bd-refresh,.bd-more{width:40px;height:40px;border-radius:99px;border:1px solid var(--border,rgba(0,0,0,.1));background:var(--surface,#fff);color:var(--text,#111827);font-size:18px;font-weight:1000}.bd-refresh{background:var(--bd-primary);border-color:var(--bd-primary);color:#fff}
-.bd-hero{position:relative;min-height:270px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--bd-primary) 95%,#111827),color-mix(in srgb,var(--bd-primary) 55%,#0f172a));box-shadow:0 22px 60px color-mix(in srgb,var(--bd-primary) 20%,transparent);background-position:center;background-size:cover}.bd-hero:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.18),transparent 26%);pointer-events:none}.bd-hero-copy,.bd-hero-stats{position:relative;z-index:1}.bd-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}.bd-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}.bd-hero p{margin:0;font-size:14px}.bd-branch-name{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}.bd-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}.bd-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}.bd-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}.bd-hero-stats b{font-size:15px}
+.bd-hero{position:relative;min-height:270px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--bd-primary) 95%,#111827),color-mix(in srgb,var(--bd-primary) 55%,#0f172a));box-shadow:0 22px 60px color-mix(in srgb,var(--bd-primary) 20%,transparent)}.bd-hero:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.18),transparent 26%);pointer-events:none;z-index:1}.bd-hero-media{position:absolute;inset:0;z-index:0}.bd-hero-media img,.bd-hero-media video{width:100%;height:100%;object-fit:cover;display:block}.bd-hero-shade{position:absolute;inset:0;background:linear-gradient(90deg,rgba(7,15,32,.88),rgba(7,15,32,.32))}.bd-hero.fade-transition .bd-hero-media{animation:bdHeroFade .55s ease}.bd-hero.slide-transition .bd-hero-media{animation:bdHeroSlide .55s ease}@keyframes bdHeroFade{from{opacity:.25}to{opacity:1}}@keyframes bdHeroSlide{from{opacity:.5;transform:translateX(3%)}to{opacity:1;transform:none}}.bd-hero-copy,.bd-hero-stats,.bd-highlight-copy,.bd-hero-dots{position:relative;z-index:2}.bd-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}.bd-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}.bd-hero p{margin:0;font-size:14px}.bd-branch-name{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}.bd-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}.bd-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}.bd-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}.bd-hero-stats b{font-size:15px}.bd-highlight-copy{align-self:flex-start;display:grid;gap:3px;margin-top:auto;margin-bottom:10px;max-width:min(520px,90%)}.bd-highlight-copy>b{font-size:15px}.bd-highlight-copy>small{font-size:10px;line-height:1.45;opacity:.88}.bd-highlight-copy>button{width:max-content;margin-top:5px;padding:7px 10px;border:1px solid rgba(255,255,255,.25);border-radius:999px;background:rgba(255,255,255,.14);color:#fff;font-size:10px;font-weight:900;backdrop-filter:blur(8px)}.bd-hero-dots{position:absolute;right:16px;bottom:16px;display:flex;gap:5px}.bd-hero-dots button{width:7px;height:7px;padding:0;border:0;border-radius:99px;background:rgba(255,255,255,.42)}.bd-hero-dots button.active{width:20px;background:#fff}
 .bd-quick-actions{display:grid;grid-template-columns:repeat(5,minmax(74px,1fr));gap:8px;margin-top:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}.bd-quick-actions::-webkit-scrollbar{display:none}.bd-quick-actions button{min-height:76px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:22px;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);display:grid;place-items:center;align-content:center;gap:7px;box-shadow:0 10px 24px rgba(15,23,42,.04)}.bd-quick-actions span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 11%,transparent);color:var(--bd-primary);font-size:17px;font-weight:1000}.bd-quick-actions b{font-size:11px;font-weight:950;white-space:nowrap}
 .bd-dashboard-grid{display:grid;gap:10px;margin-top:10px}.bd-card{padding:14px;border-radius:26px}.bd-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}.bd-section-head span{display:block;color:var(--muted,#64748b);font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.bd-section-head h2{margin:3px 0 0;font-size:17px;font-weight:1000;letter-spacing:-.035em}.bd-section-head>button,.bd-section-head>b{border:0;border-radius:999px;padding:7px 10px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent);color:var(--bd-primary);font-size:10px;font-weight:950}.attendance-card{background:linear-gradient(145deg,color-mix(in srgb,var(--bd-primary) 7%,var(--surface,#fff)),var(--surface,#fff))}.attendance-main strong{display:block;font-size:46px;line-height:1;font-weight:1000;letter-spacing:-.07em}.attendance-main span{color:var(--muted,#64748b);font-size:12px;font-weight:850}.attendance-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:15px}.attendance-grid div{padding:10px 7px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);text-align:center}.attendance-grid b,.attendance-grid small{display:block}.attendance-grid b{font-size:17px}.attendance-grid small{margin-top:3px;color:var(--muted,#64748b);font-size:9px;font-weight:850}
 .bd-stack{display:grid;gap:7px}.event-row,.notice-row{width:100%;border:0;border-radius:17px;padding:9px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:left}.event-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:9px;align-items:center}.event-row time{font-size:10px;font-weight:950;color:var(--bd-primary)}.event-row b,.event-row small,.notice-row b,.notice-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-row b,.notice-row b{font-size:12px;font-weight:1000}.event-row small,.notice-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}.notice-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;align-items:center}.notice-row>span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent)}.community-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.metric{padding:13px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent)}.metric span,.metric strong,.metric small{display:block}.metric span{font-size:18px}.metric strong{margin-top:10px;font-size:24px;line-height:1;font-weight:1000;letter-spacing:-.05em}.metric small{margin-top:4px;color:var(--muted,#64748b);font-size:10px;font-weight:850}
