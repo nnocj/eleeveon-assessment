@@ -24,7 +24,7 @@ import RolePortalShell, {
 import { TEACHER_ROLES } from "../lib/auth/roleRedirect";
 
 import Teacherdashboard from "./modules/Teacherdashboard";
-import TeacherAssessmentEntry from "./modules/AssessmentEntry";
+import TeacherAssessmentEntry from "./modules/StudentAssessmentEntry";
 import StudentAttendance from "./modules/StudentAttendance";
 import CourseOutline from "./modules/TeacherCourseOutline";
 
