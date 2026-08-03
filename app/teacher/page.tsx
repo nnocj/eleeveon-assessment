@@ -78,7 +78,7 @@ export const NAV_SECTIONS: RoleNavSection[] = [
     title: "Records",
     defaultOpen: false,
     items: [
-      { key: "assessmentEntry", label: "Assessment Entry", icon: "📝" },
+      { key: "teacherAssessmentEntry", label: "Assessment Entry", icon: "📝" },
       { key: "teacherReportRemarks", label: "Report Remarks", icon: "📄" },
       { key: "broadsheets", label: "Broadsheets", icon: "📊" },
     ],
