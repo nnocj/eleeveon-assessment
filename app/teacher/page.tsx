@@ -26,7 +26,6 @@ import { TEACHER_ROLES } from "../lib/auth/roleRedirect";
 import Teacherdashboard from "./modules/Teacherdashboard";
 import TeacherAssessmentEntry from "./modules/AssessmentEntry";
 import StudentAttendance from "./modules/StudentAttendance";
-import AssessmentEntry from "./modules/AssessmentEntry";
 import CourseOutline from "./modules/Courseoutline";
 
 import Teacherstudents from "./modules/Teacherstudents";
@@ -136,7 +135,6 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   studentAttendance: StudentAttendance,
   courseOutline: CourseOutline,
 
-  assessmentEntry: AssessmentEntry,
   teacherStudents: Teacherstudents,
   studentProgress: Studentprogress,
 
