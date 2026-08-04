@@ -1,10 +1,8 @@
 /**
- * app/lib/sync/syncEngine.ts
- * --------------------------------------------------------------------------
  * Public synchronization facade.
  */
-
 export {
+  getActiveSyncMode,
   getActiveSyncOptions,
   getActiveSyncPromise,
   getLastSyncResult,
@@ -14,9 +12,32 @@ export {
   subscribeToSync,
 } from "./runSync";
 
-export type { RunSyncOptions, SyncListener, SyncTrigger } from "./runSync";
-export { startAutoSync } from "./autoSync";
-export type { AutoSyncOptions } from "./autoSync";
+export type {
+  RunSyncOptions,
+  SyncListener,
+  SyncTrigger,
+} from "./runSync";
+
+export {
+  resolveSyncPolicy,
+} from "./resolveSyncPolicy";
+
+export {
+  assertLocalMutationAllowed,
+  ReadOnlyWorkspaceError,
+} from "./syncMutationPolicy";
+
+export type {
+  EffectiveSyncMode,
+  EffectiveSyncPolicy,
+} from "./syncPolicy";
+
+export {
+  startAutoSync,
+} from "./autoSync";
+export type {
+  AutoSyncOptions,
+} from "./autoSync";
 
 export {
   cancelScheduledSync,
@@ -30,14 +51,23 @@ export {
   triggerSyncNow,
 } from "./syncScheduler";
 
-export type { ScheduleSyncOptions } from "./syncScheduler";
+export type {
+  ScheduleSyncOptions,
+} from "./syncScheduler";
 
 export function stopSynchronizationForLogout() {
   void import("./syncScheduler")
-    .then(({ cancelScheduledSync }) => cancelScheduledSync())
+    .then(
+      ({ cancelScheduledSync }) =>
+        cancelScheduledSync(),
+    )
     .catch(() => undefined);
 
   if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent("eleeveon:stop-auto-sync"));
+    window.dispatchEvent(
+      new CustomEvent(
+        "eleeveon:stop-auto-sync",
+      ),
+    );
   }
 }
