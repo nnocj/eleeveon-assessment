@@ -1,41 +1,65 @@
-# Eleeveon Schools Components Upgrade
+My recommendation for the next implementation order
 
-Drop this `components` folder into `app/components`.
+Now that the database is stable, I would avoid jumping straight into the UI. Instead, build the runtime foundation in this order:
 
-## What changed
+Phase 1 — Entitlement Engine ⭐⭐⭐⭐⭐
+src/entitlements/
 
-- `SyncBootstrap.tsx`
-  - Keeps the same public behavior and context dependencies.
-  - Adds safe upgraded sync support for device registration and platform cache refresh.
-  - Uses dynamic imports so the app does not crash if an older sync folder is temporarily present.
+EntitlementResolver
+EntitlementService
+PolicyService
+ResourceLimitGuard
+FeatureGuard
+UsageService
 
-- `SyncStatusStrip.tsx`
-  - Keeps the same UI purpose.
-  - Adds optional diagnostics from the upgraded sync layer: pending records, conflicts, errors, and last sync.
+This becomes the single source of truth for permissions and limits.
 
-- `payments/payment-utils.ts`
-  - Safer JSON handling for empty/non-JSON backend responses.
-  - Supports more token key names.
-  - Adds `getPaymentRedirectUrl()` to support both old and upgraded billing response shapes.
+Phase 2 — Subscription Engine
+Billing
 
-- `payments/PaymentCheckout.tsx`
-  - Keeps the same props and route behavior.
-  - Redirects correctly whether the backend returns `authorizationUrl` at the root or inside provider/payment objects.
+Subscription calculator
+Renewals
+Proration
+Private offers
+Pricing overrides
+Phase 3 — Offline Licence Engine
+Perpetual licences
 
-## Compatibility notes
+Activation
+Device validation
+Offline grace
+Version locking
+Upgrade offers
+Phase 4 — Sync Policy
+Full Sync
 
-The role portal components were preserved to avoid breaking existing dashboard imports. This upgrade is designed to work with the upgraded Prisma, db.ts, sync folder, and backend source while keeping the current frontend stable.
+Hybrid Sync
 
+Offline
 
-Compact Print — easiest next; same structure but tighter.
-Bordered Traditional — close to Classic Formal, just stronger borders/table styling.
-Modern Clean — cleaner cards, softer spacing.
-Letterhead Premium — branding-heavy header.
-Side Profile — student photo/profile emphasis.
-Cambridge — international academic style.
-IB — clean international layout.
-Kindergarten — softer early-years design.
-Montessori — calm spacious early-years design.
-University Transcript — transcript-style academic record.
+Developer
 
-Best approach: build one template at a time from Classic Formal, changing layout/styling only, not logic.
+Read-only
+
+This is where runSync() begins respecting the entitlement instead of assuming every account syncs the same way.
+
+Phase 5 — Frontend Context
+SubscriptionContext
+
+useAccess()
+
+FeatureUnavailableDialog
+
+QuotaReachedDialog
+
+Every screen simply asks:
+
+const access = useAccess();
+
+if (!access.can("attendance")) {
+    ...
+}
+
+instead of checking plans or subscription state.
+
+After that, I would move to the assessment hierarchy and then the intelligent scheduling engine, because those are the two largest functional upgrades remaining. They can then be built on top of the stable commercial and entitlement foundation you've just completed.
