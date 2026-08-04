@@ -59,9 +59,6 @@ type CountMetric = {
 const HIDDEN_DASHBOARD_KEYS = new Set(["parentDashboard"]);
 
 const TABLE_NAMES = [
-  "schools",
-  "branches",
-  "appUsers",
   "parents",
   "students",
   "studentParents",
@@ -86,8 +83,6 @@ const TABLE_NAMES = [
   "studentFeeInvoiceItems",
   "studentFeePayments",
   "payments",
-  "portalHighlights",
-  "mediaAssets",
 ] as const;
 
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
@@ -464,21 +459,14 @@ function metricFor(routeKey: string, rows: Record<string, AnyRow[]>, summary: An
   return { value: "Open", note: "Module is listed from Parent navigation. Add a metric mapping when data is ready.", tone: "gray" };
 }
 
-
 export default function Parentdashboard({ navigate, navSections }: RouteProps) {
   const router = useRouter();
   const { accountId, authenticated, loading: accountLoading } = useAccount();
   const { settings, loading: settingsLoading } = useSettings();
-  const {
-    activeSchoolId,
-    activeBranchId,
-    activeSchool,
-    activeBranch,
-  } = useActiveBranch();
+  const { activeSchoolId, activeBranchId, activeSchool, activeBranch } = useActiveBranch();
   const { activeParentId, activeMembership } = useActiveMembership();
+  const primary = settings?.primaryColor || "var(--primary-color,#2563eb)";
 
-  const primary =
-    settings?.primaryColor || "var(--primary-color,#2563eb)";
   const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
 
   const schoolId = selectedSchoolId({
@@ -502,7 +490,10 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
     cleanId(activeParentId);
 
   const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<ViewMode>("cards");
   const [query, setQuery] = useState("");
+  const [area, setArea] = useState<AreaFilter>("all");
+  const [filterOpen, setFilterOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [rowsByTable, setRowsByTable] = useState<Record<string, AnyRow[]>>({});
 
@@ -523,14 +514,9 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
     try {
       const loaded = await Promise.all(
         TABLE_NAMES.map(async (tableName) => {
-          const tableRows = await safeArray(tableName);
-          return [
-            tableName,
-            tableRows.filter((row) =>
-              scoped(row, { accountId, schoolId, branchId }),
-            ),
-          ] as const;
-        }),
+          const rows = await safeArray(tableName);
+          return [tableName, rows.filter((row) => scoped(row, { accountId, schoolId, branchId }))] as const;
+        })
       );
 
       setRowsByTable(Object.fromEntries(loaded));
@@ -543,50 +529,18 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
 
   useEffect(() => {
     if (accountLoading || settingsLoading) return;
-    void load();
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    authenticated,
-    accountId,
-    schoolId,
-    branchId,
-    parentId,
-    accountLoading,
-    settingsLoading,
-  ]);
+  }, [authenticated, accountId, schoolId, branchId, parentId, accountLoading, settingsLoading]);
 
   const rows = rowsByTable;
 
-  const identity = useMemo(() => {
+  const parent = useMemo(() => {
+    const parents = rows.parents || [];
     const membership = workspaceMembership(openWorkspace, activeMembership);
-    const storedUser =
-      safeJson<AnyRow>("currentUser") ||
-      safeJson<AnyRow>("authUser") ||
-      safeJson<AnyRow>("user");
-
-    const branchRows = (rows.branches || []).filter(activeRow);
-    const schoolRows = (rows.schools || []).filter(activeRow);
-    const parentRows = (rows.parents || []).filter(activeRow);
-
-    const branch =
-      branchRows.find((row) => sameId(idOf(row), branchId)) ||
-      (activeBranch as AnyRow) ||
-      membership?.branch ||
-      branchRows[0] ||
-      null;
-
-    const resolvedSchoolId =
-      cleanId(branch?.schoolId) || schoolId || null;
-
-    const school =
-      schoolRows.find((row) => sameId(idOf(row), resolvedSchoolId)) ||
-      (activeSchool as AnyRow) ||
-      membership?.school ||
-      schoolRows[0] ||
-      null;
+    const memberEmail = membership?.email || membership?.parentEmail || (openWorkspace as any)?.email;
 
     const membershipParentId = firstId(
-      parentId,
       membership?.parentLocalId,
       membership?.parentId,
       membership?.parent?.id,
@@ -594,452 +548,126 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
       safeRead("activeParentId"),
     );
 
-    const parent =
-      parentRows.find((row) => sameId(idOf(row), membershipParentId)) ||
-      parentRows.find((row) =>
-        sameId(
-          row.email || row.parentEmail,
-          membership?.email || membership?.parentEmail,
-        ),
+    return (
+      parents.find((row) => parentId && sameId(idOf(row), parentId)) ||
+      parents.find(
+        (row) => membershipParentId && sameId(idOf(row), membershipParentId),
       ) ||
-      null;
-
-    const userId = firstId(
-      membership?.userId,
-      membership?.appUserId,
-      storedUser?.id,
+      parents.find(
+        (row) =>
+          memberEmail &&
+          sameId(row.email || row.parentEmail, memberEmail),
+      ) ||
+      null
     );
-
-    const appUser =
-      (rows.appUsers || []).find((row) => sameId(idOf(row), userId)) ||
-      storedUser ||
-      membership?.user ||
-      membership?.appUser ||
-      null;
-
-    return {
-      parent,
-      branch,
-      school,
-      parentName: text(
-        parent?.fullName ||
-          parent?.name ||
-          appUser?.fullName ||
-          appUser?.name ||
-          openWorkspace?.fullName ||
-          openWorkspace?.userName ||
-          openWorkspace?.memberName ||
-          membership?.fullName ||
-          membership?.name,
-        "Parent",
-      ),
-      schoolName: text(
-        school?.name ||
-          membership?.schoolName ||
-          (settings as AnyRow)?.schoolName,
-        "School",
-      ),
-      branchName: text(
-        branch?.name ||
-          membership?.branchName ||
-          (settings as AnyRow)?.branchName,
-        "Branch",
-      ),
-    };
-  }, [
-    rows.parents,
-    rows.branches,
-    rows.schools,
-    rows.appUsers,
-    parentId,
-    branchId,
-    schoolId,
-    openWorkspace,
-    activeMembership,
-    activeParentId,
-    activeBranch,
-    activeSchool,
-    settings,
-  ]);
+  }, [activeMembership, activeParentId, openWorkspace, parentId, rows.parents]);
 
   const childLinks = useMemo(() => {
-    const resolvedParentId = parentId || cleanId(idOf(identity.parent));
-    if (!resolvedParentId) return [];
-
-    return (rows.studentParents || []).filter((row) =>
-      sameId(row.parentId || row.parentLocalId, resolvedParentId),
-    );
-  }, [identity.parent, parentId, rows.studentParents]);
+    const links = rows.studentParents || [];
+    if (!parentId && !parent) return [];
+    const resolvedParentId = parentId || idOf(parent);
+    return links.filter((row) => !resolvedParentId || sameId(row.parentId || row.parentLocalId, resolvedParentId));
+  }, [parent, parentId, rows.studentParents]);
 
   const children = useMemo(() => {
-    const students = (rows.students || []).filter(activeRow);
-    const linkedIds = new Set(
-      childLinks
-        .map((row) => cleanId(row.studentId || row.studentLocalId))
-        .filter(Boolean),
-    );
+    const students = rows.students || [];
+    const linkedIds = new Set(childLinks.map((row) => String(row.studentId || row.studentLocalId)).filter(Boolean));
 
     if (linkedIds.size) {
-      return students.filter((student) =>
-        linkedIds.has(cleanId(idOf(student))),
-      );
+      return students.filter((student) => linkedIds.has(String(idOf(student))) || linkedIds.has(String(student.studentId)));
     }
 
-    const membership = workspaceMembership(openWorkspace, activeMembership);
-    const parentEmail =
-      identity.parent?.email ||
-      identity.parent?.parentEmail ||
-      membership?.parentEmail;
-    const parentPhone =
-      identity.parent?.phone ||
-      identity.parent?.parentPhone ||
-      membership?.parentPhone;
+    const parentEmail = parent?.email || parent?.parentEmail || workspaceMembership(openWorkspace, activeMembership)?.parentEmail;
+    const parentPhone = parent?.phone || parent?.parentPhone || workspaceMembership(openWorkspace, activeMembership)?.parentPhone;
 
-    return students.filter(
-      (student) =>
-        (parentEmail && sameId(student.parentEmail, parentEmail)) ||
-        (parentPhone && sameId(student.parentPhone, parentPhone)),
-    );
-  }, [
-    activeMembership,
-    childLinks,
-    identity.parent,
-    openWorkspace,
-    rows.students,
-  ]);
+    return students.filter((student) => {
+      if (parentEmail && sameId(student.parentEmail, parentEmail)) return true;
+      if (parentPhone && sameId(student.parentPhone, parentPhone)) return true;
+      return false;
+    });
+  }, [activeMembership, childLinks, openWorkspace, parent, rows.students]);
 
   const childIds = useMemo(
-    () =>
-      new Set(
-        children
-          .map((child) => cleanId(idOf(child)))
-          .filter(Boolean),
-      ),
-    [children],
-  );
-
-  const childClassIds = useMemo(
-    () =>
-      new Set(
-        children
-          .map((child) =>
-            cleanId(child.currentClassId || child.classId),
-          )
-          .filter(Boolean),
-      ),
-    [children],
+    () => new Set(children.map((child) => String(idOf(child))).filter(Boolean)),
+    [children]
   );
 
   const summary = useMemo(() => {
     const today = todayKey();
-    const enrollments = (rows.studentEnrollments || []).filter((row) =>
-      childIds.has(cleanId(row.studentId)),
-    );
-    const attendance = (rows.attendance || []).filter((row) =>
-      childIds.has(cleanId(row.studentId)),
-    );
-    const results = (rows.computedResults || []).filter((row) =>
-      childIds.has(cleanId(row.studentId)),
-    );
-    const reportCards = (rows.reportCards || []).filter((row) =>
-      childIds.has(cleanId(row.studentId)),
-    );
-    const invoices = (rows.studentFeeInvoices || []).filter((row) =>
-      childIds.has(cleanId(row.studentId)),
-    );
-    const payments = [
-      ...(rows.studentFeePayments || []),
-      ...(rows.payments || []),
-    ].filter(
-      (row) =>
-        !row.studentId ||
-        childIds.has(cleanId(row.studentId)),
-    );
-    const todayAttendance = attendance.filter((row) =>
-      String(row.date || row.createdAt || "").startsWith(today),
-    );
-    const sessions = (rows.scheduleSessions || []).filter(
-      (row) =>
-        (row.studentId && childIds.has(cleanId(row.studentId))) ||
-        (row.classId && childClassIds.has(cleanId(row.classId))) ||
-        (!row.studentId && !row.classId),
-    );
+    const enrollments = (rows.studentEnrollments || []).filter((row) => childIds.has(String(row.studentId)));
+    const attendance = (rows.attendance || []).filter((row) => childIds.has(String(row.studentId)));
+    const results = (rows.computedResults || []).filter((row) => childIds.has(String(row.studentId)));
+    const reportCards = (rows.reportCards || []).filter((row) => childIds.has(String(row.studentId)));
+    const invoices = (rows.studentFeeInvoices || []).filter((row) => childIds.has(String(row.studentId)));
+    const payments = [...(rows.studentFeePayments || []), ...(rows.payments || [])].filter((row) => !row.studentId || childIds.has(String(row.studentId)));
+    const todayAttendance = attendance.filter((row) => String(row.date || row.createdAt || "").startsWith(today));
+    const sessions = (rows.scheduleSessions || []).filter((row) => {
+      if (row.studentId && childIds.has(String(row.studentId))) return true;
+      if (row.classId) {
+        return children.some((child) => sameId(child.currentClassId || child.classId, row.classId));
+      }
+      return !row.studentId && !row.classId;
+    });
 
     const averageScore = results.length
-      ? Math.round(
-          results.reduce(
-            (total, row) =>
-              total +
-              n(
-                row.percentage ||
-                  row.average ||
-                  row.score ||
-                  row.totalScore,
-              ),
-            0,
-          ) / Math.max(1, results.length),
-        )
+      ? Math.round(results.reduce((total, row) => total + n(row.percentage || row.average || row.score || row.totalScore), 0) / Math.max(1, results.length))
       : 0;
 
-    const invoiceTotal = invoices.reduce(
-      (total, row) =>
-        total +
-        n(row.total || row.amount || row.balance || row.netAmount),
-      0,
-    );
-    const paidTotal = payments.reduce(
-      (total, row) => total + n(row.amount || row.total),
-      0,
-    );
+    const invoiceTotal = invoices.reduce((total, row) => total + n(row.total || row.amount || row.balance || row.netAmount), 0);
+    const paidTotal = payments.reduce((total, row) => total + n(row.amount || row.total), 0);
+    const feeBalance = Math.max(0, invoiceTotal - paidTotal);
 
     return {
-      parentName: identity.parentName,
-      schoolName: identity.schoolName,
-      branchName: identity.branchName,
-      children: children.length,
+      parentName: rowName(parent) !== "Unnamed" ? rowName(parent) : text(openWorkspace?.memberName || openWorkspace?.fullName || openWorkspace?.userName, "Parent"),
+      children: count(children),
       enrollments: count(enrollments),
       attendance: count(attendance),
-      presentToday: todayAttendance.filter(
-        (row) =>
-          String(row.status || "").toLowerCase() === "present",
-      ).length,
-      absentToday: todayAttendance.filter((row) =>
-        ["absent", "excused"].includes(
-          String(row.status || "").toLowerCase(),
-        ),
-      ).length,
-      lateToday: todayAttendance.filter(
-        (row) => String(row.status || "").toLowerCase() === "late",
-      ).length,
+      presentToday: todayAttendance.filter((row) => String(row.status || "").toLowerCase() === "present").length,
       todayAttendance: todayAttendance.length,
+      absent: attendance.filter((row) => ["absent", "excused"].includes(String(row.status || "").toLowerCase())).length,
       results: count(results),
       reportCards: count(reportCards),
       averageScore,
       invoices: count(invoices),
       payments: count(payments),
       paidTotal,
-      feeBalance: Math.max(0, invoiceTotal - paidTotal),
-      currencyCode: text(
-        invoices[0]?.currencyCode ||
-          payments[0]?.currencyCode,
-        "GHS",
-      ),
+      feeBalance,
+      currencyCode: text(invoices[0]?.currencyCode || payments[0]?.currencyCode, "GHS"),
       announcements: count(rows.announcements || []),
       messages: count(rows.messageThreads || []),
       events: count(rows.calendarEvents || []),
       sessions: count(sessions),
     };
-  }, [
-    childClassIds,
-    childIds,
-    children.length,
-    identity,
-    rows,
-  ]);
+  }, [children, childIds, openWorkspace, parent, rows]);
 
-  const modules = useMemo<DashboardModule[]>(
-    () =>
-      buildNavModules(navSections).map((module) => ({
-        ...module,
-        ...metricFor(module.routeKey, rows, summary),
-      })),
-    [navSections, rows, summary],
-  );
+  const modules = useMemo<DashboardModule[]>(() => {
+    const navModules = buildNavModules(navSections);
+    return navModules.map((module) => ({ ...module, ...metricFor(module.routeKey, rows, summary) }));
+  }, [navSections, rows, summary]);
 
-  const q = query.trim().toLowerCase();
-
-  const searchResults = useMemo(() => {
-    if (!q) return [];
-
-    return modules
-      .filter((item) =>
-        `${item.label} ${item.note} ${item.area}`
-          .toLowerCase()
-          .includes(q),
-      )
-      .slice(0, 12);
-  }, [modules, q]);
-
-  const announcements = useMemo(
-    () =>
-      (rows.announcements || [])
-        .filter(activeRow)
-        .sort(
-          (a, b) =>
-            n(b.publishAt || b.sentAt || b.updatedAt || b.createdAt) -
-            n(a.publishAt || a.sentAt || a.updatedAt || a.createdAt),
-        )
-        .slice(0, 4),
-    [rows.announcements],
-  );
-
-  const events = useMemo(
-    () =>
-      (rows.calendarEvents || [])
-        .filter(activeRow)
-        .sort(
-          (a, b) =>
-            n(a.startAt || a.startDate || a.date) -
-            n(b.startAt || b.startDate || b.date),
-        )
-        .slice(0, 5),
-    [rows.calendarEvents],
-  );
+  const filteredModules = useMemo(() => {
+    const q = query.toLowerCase().trim();
+    return modules.filter((item) => {
+      if (area !== "all" && item.area !== area) return false;
+      if (!q) return true;
+      return `${item.label} ${item.note} ${item.value} ${item.area}`.toLowerCase().includes(q);
+    });
+  }, [area, modules, query]);
 
   const recent = useMemo(() => {
-    const source: AnyRow[] = [
-      ...(rows.computedResults || [])
-        .filter((row) => childIds.has(cleanId(row.studentId)))
-        .map((row) => ({
-          ...row,
-          _kind: "Result",
-          _icon: "📊",
-          _title: text(
-            row.subjectName || row.title,
-            "New result available",
-          ),
-          _date: row.updatedAt || row.createdAt,
-        })),
-      ...(rows.reportCards || [])
-        .filter((row) => childIds.has(cleanId(row.studentId)))
-        .map((row) => ({
-          ...row,
-          _kind: "Report card",
-          _icon: "📄",
-          _title: text(
-            row.title || row.periodName,
-            "Report card available",
-          ),
-          _date:
-            row.publishedAt || row.updatedAt || row.createdAt,
-        })),
-      ...(rows.studentFeePayments || [])
-        .filter(
-          (row) =>
-            !row.studentId ||
-            childIds.has(cleanId(row.studentId)),
-        )
-        .map((row) => ({
-          ...row,
-          _kind: "Payment",
-          _icon: "💳",
-          _title: money(
-            row.amount || row.total,
-            row.currencyCode || "GHS",
-          ),
-          _date: row.paidAt || row.updatedAt || row.createdAt,
-        })),
-      ...(rows.announcements || []).map((row) => ({
-        ...row,
-        _kind: "Announcement",
-        _icon: "📣",
-        _title: text(row.title, "School announcement"),
-        _date:
-          row.sentAt ||
-          row.publishAt ||
-          row.updatedAt ||
-          row.createdAt,
-      })),
+    const records: AnyRow[] = [
+      ...children.map((row) => ({ ...row, _kind: "Child", _icon: "🧒", _title: rowName(row), _date: row.updatedAt || row.createdAt })),
+      ...(rows.announcements || []).map((row) => ({ ...row, _kind: "Announcement", _icon: "📣", _title: text(row.title, "Announcement"), _date: row.sentAt || row.publishAt || row.updatedAt || row.createdAt })),
+      ...(rows.computedResults || []).filter((row) => childIds.has(String(row.studentId))).map((row) => ({ ...row, _kind: "Result", _icon: "📊", _title: text(row.subjectName || row.title, "Result"), _date: row.updatedAt || row.createdAt })),
+      ...(rows.reportCards || []).filter((row) => childIds.has(String(row.studentId))).map((row) => ({ ...row, _kind: "Report Card", _icon: "📄", _title: text(row.title || row.periodName, "Report Card"), _date: row.publishedAt || row.updatedAt || row.createdAt })),
+      ...(rows.studentFeePayments || []).filter((row) => !row.studentId || childIds.has(String(row.studentId))).map((row) => ({ ...row, _kind: "Payment", _icon: "💳", _title: money(row.amount || row.total, row.currencyCode || "GHS"), _date: row.paidAt || row.updatedAt || row.createdAt })),
+      ...(rows.calendarEvents || []).map((row) => ({ ...row, _kind: "Event", _icon: "📆", _title: text(row.title, "Calendar event"), _date: row.startAt || row.startTime || row.date || row.updatedAt || row.createdAt })),
     ];
 
-    return source
-      .sort((a, b) => n(b._date) - n(a._date))
-      .slice(0, 6);
-  }, [childIds, rows]);
+    return records.sort((a, b) => n(b._date) - n(a._date)).slice(0, 8);
+  }, [children, childIds, rows]);
 
-  const heroImage = useMemo(() => {
-    const media = (rows.mediaAssets || []).filter(activeRow);
-    const highlights = (rows.portalHighlights || [])
-      .filter(activeRow)
-      .filter((row) => {
-        const audience = String(
-          row.audience || row.portal || row.role || "all",
-        ).toLowerCase();
-        const status = String(row.status || "").toLowerCase();
-        return (
-          ["all", "parent", "parents"].includes(audience) &&
-          (!status ||
-            ["published", "scheduled", "active"].includes(status))
-        );
-      })
-      .sort(
-        (a, b) => n(a.displayOrder || a.order) - n(b.displayOrder || b.order),
-      );
-
-    const mediaUrl = (mediaId: unknown) => {
-      const asset = media.find((row) =>
-        sameId(idOf(row), mediaId),
-      );
-
-      return text(
-        asset?.publicUrl ||
-          asset?.remoteUrl ||
-          asset?.previewDataUrl ||
-          asset?.thumbnailDataUrl ||
-          asset?.localObjectUrl,
-      );
-    };
-
-    const branch = identity.branch;
-    const school = identity.school;
-
-    const candidates = [
-      ...highlights.flatMap((row) => [
-        mediaUrl(row.mediaAssetId),
-        mediaUrl(row.posterMediaAssetId),
-        row.fallbackImageUrl,
-      ]),
-      mediaUrl(branch?.bannerImageMediaId),
-      branch?.bannerImage,
-      mediaUrl(branch?.photoMediaId),
-      branch?.photo,
-      mediaUrl(school?.bannerImageMediaId),
-      school?.bannerImage,
-      mediaUrl(school?.photoMediaId),
-      school?.photo,
-      mediaUrl((settings as AnyRow)?.dashboardHeroImageMediaId),
-      (settings as AnyRow)?.dashboardHeroImage,
-      mediaUrl((settings as AnyRow)?.dashboardBannerImageMediaId),
-      (settings as AnyRow)?.dashboardBannerImage,
-      ...media
-        .filter(
-          (row) =>
-            String(row.assetKind || "").toLowerCase() === "image",
-        )
-        .map(
-          (row) =>
-            row.publicUrl ||
-            row.remoteUrl ||
-            row.previewDataUrl ||
-            row.thumbnailDataUrl ||
-            row.localObjectUrl,
-        ),
-    ]
-      .map((value) => text(value))
-      .filter(Boolean);
-
-    return candidates[0] || "";
-  }, [
-    identity,
-    rows.mediaAssets,
-    rows.portalHighlights,
-    settings,
-  ]);
-
-  const motto = text(
-    (settings as AnyRow)?.motto ||
-      identity.branch?.motto ||
-      identity.school?.motto,
-    "Learning today. Leading tomorrow.",
-  );
-
-  const hour = new Date().getHours();
-  const greeting =
-    hour < 12
-      ? "Good morning"
-      : hour < 17
-        ? "Good afternoon"
-        : "Good evening";
+  const activeFilterCount = area !== "all" ? 1 : 0;
 
   function openRoute(routeKey: string) {
     if (navigate) {
@@ -1048,126 +676,64 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
     }
 
     try {
-      window.dispatchEvent(
-        new CustomEvent("eleeveon:portal-route", {
-          detail: { key: routeKey },
-        }),
-      );
-      window.dispatchEvent(
-        new CustomEvent("role-portal:navigate", {
-          detail: { key: routeKey },
-        }),
-      );
-      window.dispatchEvent(
-        new CustomEvent("portal:navigate", {
-          detail: routeKey,
-        }),
-      );
+      window.dispatchEvent(new CustomEvent("eleeveon:portal-route", { detail: { key: routeKey } }));
+      window.dispatchEvent(new CustomEvent("role-portal:navigate", { detail: { key: routeKey } }));
+      window.dispatchEvent(new CustomEvent("portal:navigate", { detail: routeKey }));
     } catch {
       // Optional shell fallback.
     }
   }
 
   if (loading || accountLoading || settingsLoading) {
-    return (
-      <State
-        primary={primary}
-        title="Opening parent dashboard..."
-        text="Preparing your children, attendance, fees, announcements and school activity."
-      />
-    );
+    return <State primary={primary} title="Opening parent dashboard..." text="Loading your children, attendance, fees, payments and messages." />;
   }
 
   if (!authenticated || !accountId) {
-    return (
-      <State
-        primary={primary}
-        title="Redirecting to login..."
-        text="You must sign in before viewing the parent portal."
-      />
-    );
+    return <State primary={primary} title="Redirecting to login..." text="You must sign in before viewing the parent portal." />;
   }
 
-  const quickActions = [
-    ["children", "🧒", "Children"],
-    ["childAttendance", "✓", "Attendance"],
-    ["childResults", "📊", "Results"],
-    ["childFees", "💳", "Fees"],
-    ["announcements", "📣", "Notices"],
-  ] as const;
-
   return (
-    <main
-      className="pd-page"
-      style={{ "--pd-primary": primary } as React.CSSProperties}
-    >
+    <main className="pd-page" style={{ "--pd-primary": primary } as React.CSSProperties}>
       <style>{css}</style>
 
-      <section className="pd-search-card">
-        <span
-          className={`status-dot-mini ${
-            summary.children ? "green" : "gray"
-          }`}
-          title={summary.parentName}
-        />
+      <section className="pd-search-card" aria-label="Parent dashboard search and actions">
+        <span className={`status-dot-mini ${summary.children ? "green" : "gray"}`} title={`${summary.parentName}: ${summary.children} child(ren)`} />
 
         <label className="pd-search">
           <span>⌕</span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search children, attendance, results..."
-            aria-label="Search parent modules"
-          />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search parent modules..." aria-label="Search parent dashboard" />
         </label>
 
-        {query ? (
-          <button
-            className="pd-clear"
-            onClick={() => setQuery("")}
-            aria-label="Clear search"
-          >
-            ×
-          </button>
-        ) : null}
+        <button type="button" className="pd-add-inline" onClick={load} aria-label="Refresh parent dashboard" title="Refresh">↻</button>
 
-        <button
-          className="pd-refresh"
-          onClick={() => void load()}
-          aria-label="Refresh dashboard"
-        >
-          ↻
+        <button type="button" className={`pd-filter-button ${activeFilterCount ? "active" : ""}`} onClick={() => setFilterOpen(true)} aria-label="Open filters" title="Filters">
+          <SliderIcon />
+          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
         </button>
 
-        <button
-          className="pd-more"
-          onClick={() => setMoreOpen(true)}
-          aria-label="More options"
-        >
-          ⋯
-        </button>
+        <button type="button" className="pd-icon-button" onClick={() => setMoreOpen(true)} aria-label="More options">⋯</button>
       </section>
 
-      {q ? (
-        <section className="pd-search-results">
-          <div className="pd-section-head">
-            <div>
-              <span>Search results</span>
-              <h2>
-                {searchResults.length
-                  ? `Matching “${query.trim()}”`
-                  : "No matches found"}
-              </h2>
-            </div>
-            <b>{searchResults.length}</b>
-          </div>
+      <section className="pd-parent-strip" aria-label="Current parent context">
+        <strong>{summary.parentName}</strong>
+        <span>{summary.children} child{summary.children === 1 ? "" : "ren"}</span>
+        <Chip tone={summary.feeBalance ? "orange" : "green"}>{summary.feeBalance ? `${money(summary.feeBalance, summary.currencyCode)} due` : "Clear"}</Chip>
+      </section>
 
-          {searchResults.map((item) => (
-            <button
-              key={item.key}
-              className="parent-row"
-              onClick={() => openRoute(item.routeKey)}
-            >
+      {(area !== "all" || query.trim()) && (
+        <section className="pd-filter-chips" aria-label="Active filters">
+          {area !== "all" && <button type="button" onClick={() => setArea("all")}>Area: {areaLabel(area)} ×</button>}
+          {query.trim() && <button type="button" onClick={() => setQuery("")}>Search: {query.trim()} ×</button>}
+        </section>
+      )}
+
+      {view === "analytics" ? <AnalyticsView summary={summary} modules={modules} recent={recent} /> : null}
+      {view === "table" ? <TableView modules={filteredModules} openRoute={openRoute} /> : null}
+
+      {view === "cards" ? (
+        <section className="pd-list">
+          {filteredModules.map((item) => (
+            <button key={item.key} type="button" className="parent-row" onClick={() => openRoute(item.routeKey)}>
               <span className="parent-avatar">{item.icon}</span>
               <span className="parent-main">
                 <strong>{item.label}</strong>
@@ -1181,596 +747,175 @@ export default function Parentdashboard({ navigate, navSections }: RouteProps) {
             </button>
           ))}
 
-          {!searchResults.length ? (
-            <Empty
-              title="Nothing matches that search"
-              text="Try children, attendance, results, fees, announcements or calendar."
-            />
-          ) : null}
+          {!filteredModules.length ? <Empty title="No matching parent modules" text="Clear filters or search to show your parent modules." /> : null}
         </section>
-      ) : (
-        <>
-          <section
-            className={`pd-hero ${heroImage ? "has-image" : ""}`}
-            style={
-              heroImage
-                ? {
-                    backgroundImage: `linear-gradient(90deg,rgba(7,15,32,.88),rgba(7,15,32,.32)),url(${JSON.stringify(
-                      heroImage,
-                    ).slice(1, -1)})`,
-                  }
-                : undefined
-            }
-          >
-            <div className="pd-hero-copy">
-              <span>{greeting}</span>
-              <h1>{summary.parentName}</h1>
-              <p>
-                Welcome to <strong>{summary.schoolName}</strong>
-                <small className="pd-branch-name">
-                  {summary.branchName}
-                </small>
-              </p>
-              <blockquote>“{motto}”</blockquote>
-            </div>
+      ) : null}
 
-            <div className="pd-hero-stats">
-              <span>
-                <b>{summary.children}</b>{" "}
-                {summary.children === 1 ? "Child" : "Children"}
-              </span>
-              <span>
-                <b>{summary.presentToday}</b> Present
-              </span>
-              <span>
-                <b>
-                  {money(
-                    summary.feeBalance,
-                    summary.currencyCode,
-                  )}
-                </b>{" "}
-                Due
-              </span>
-            </div>
-          </section>
-
-          <section
-            className="pd-quick-actions"
-            aria-label="Quick actions"
-          >
-            {quickActions.map(([route, icon, label]) => (
-              <button
-                key={route}
-                onClick={() => openRoute(route)}
-              >
-                <span>{icon}</span>
-                <b>{label}</b>
-              </button>
+      {recent.length ? (
+        <section className="pd-recent">
+          <div className="pd-section-head">
+            <h2>Recent Activity</h2>
+            <span>{recent.length}</span>
+          </div>
+          <div className="pd-recent-list">
+            {recent.map((item, index) => (
+              <article key={`${item._kind}-${idOf(item) || index}`} className="recent-row">
+                <span>{item._icon}</span>
+                <b>{item._title}</b>
+                <small>{item._kind} · {dateLabel(item._date)}</small>
+              </article>
             ))}
-          </section>
+          </div>
+        </section>
+      ) : null}
 
-          <section className="pd-dashboard-grid">
-            <article className="pd-card">
-              <div className="pd-section-head">
-                <div>
-                  <span>My family</span>
-                  <h2>Children</h2>
-                </div>
-                <button onClick={() => openRoute("children")}>
-                  View all
-                </button>
-              </div>
-
-              <div className="pd-child-list">
-                {children.length ? (
-                  children.slice(0, 4).map((child, index) => {
-                    const childId = cleanId(idOf(child));
-                    const enrollment = (
-                      rows.studentEnrollments || []
-                    ).find(
-                      (row) =>
-                        childId &&
-                        sameId(row.studentId, childId) &&
-                        activeRow(row),
-                    );
-                    const classId =
-                      enrollment?.classId ||
-                      child.currentClassId ||
-                      child.classId;
-                    const classRow = (rows.classes || []).find(
-                      (row) => sameId(idOf(row), classId),
-                    );
-                    const attendanceToday = (
-                      rows.attendance || []
-                    ).find(
-                      (row) =>
-                        childId &&
-                        sameId(row.studentId, childId) &&
-                        String(
-                          row.date || row.createdAt || "",
-                        ).startsWith(todayKey()),
-                    );
-
-                    return (
-                      <button
-                        key={childId || index}
-                        className="pd-child-row"
-                        onClick={() => openRoute("children")}
-                      >
-                        <span className="pd-child-avatar">
-                          {text(child.fullName || child.name, "C")
-                            .slice(0, 1)
-                            .toUpperCase()}
-                        </span>
-                        <span>
-                          <b>{rowName(child)}</b>
-                          <small>
-                            {text(
-                              classRow?.name,
-                              "Class not assigned",
-                            )}
-                          </small>
-                        </span>
-                        <Chip
-                          tone={statusTone(
-                            attendanceToday?.status,
-                          )}
-                        >
-                          {text(
-                            attendanceToday?.status,
-                            "No mark",
-                          )}
-                        </Chip>
-                      </button>
-                    );
-                  })
-                ) : (
-                  <MiniEmpty
-                    icon="🧒"
-                    text="No linked children were found."
-                  />
-                )}
-              </div>
-            </article>
-
-            <article className="pd-card attendance-card">
-              <div className="pd-section-head">
-                <div>
-                  <span>Today</span>
-                  <h2>Attendance</h2>
-                </div>
-                <button
-                  onClick={() => openRoute("childAttendance")}
-                >
-                  Open
-                </button>
-              </div>
-
-              <div className="attendance-main">
-                <strong>{summary.presentToday}</strong>
-                <span>children present today</span>
-              </div>
-
-              <div className="attendance-grid">
-                <div>
-                  <b>{summary.absentToday}</b>
-                  <small>Absent</small>
-                </div>
-                <div>
-                  <b>{summary.lateToday}</b>
-                  <small>Late</small>
-                </div>
-                <div>
-                  <b>{summary.todayAttendance}</b>
-                  <small>Recorded</small>
-                </div>
-                <div>
-                  <b>{summary.averageScore || "—"}</b>
-                  <small>Average</small>
-                </div>
-              </div>
-            </article>
-
-            <article className="pd-card fees-card">
-              <div className="pd-section-head">
-                <div>
-                  <span>Account</span>
-                  <h2>Fees & payments</h2>
-                </div>
-                <button onClick={() => openRoute("childFees")}>
-                  Statement
-                </button>
-              </div>
-
-              <div className="pd-fee-total">
-                <strong>
-                  {money(
-                    summary.feeBalance,
-                    summary.currencyCode,
-                  )}
-                </strong>
-                <span>
-                  {summary.feeBalance
-                    ? "outstanding balance"
-                    : "account currently clear"}
-                </span>
-              </div>
-
-              <div className="pd-fee-meta">
-                <div>
-                  <b>{summary.invoices}</b>
-                  <small>Invoices</small>
-                </div>
-                <div>
-                  <b>{summary.payments}</b>
-                  <small>Payments</small>
-                </div>
-                <div>
-                  <b>
-                    {money(
-                      summary.paidTotal,
-                      summary.currencyCode,
-                    )}
-                  </b>
-                  <small>Paid</small>
-                </div>
-              </div>
-            </article>
-
-            <article className="pd-card">
-              <div className="pd-section-head">
-                <div>
-                  <span>School day</span>
-                  <h2>Upcoming</h2>
-                </div>
-                <button onClick={() => openRoute("calendar")}>
-                  Calendar
-                </button>
-              </div>
-
-              <div className="pd-stack">
-                {events.length ? (
-                  events.map((event, index) => (
-                    <button
-                      key={cleanId(idOf(event)) || index}
-                      onClick={() => openRoute("calendar")}
-                      className="event-row"
-                    >
-                      <time>
-                        {dateLabel(
-                          event.startAt ||
-                            event.startDate ||
-                            event.date,
-                        ).split(",")[0]}
-                      </time>
-                      <span>
-                        <b>
-                          {text(
-                            event.title || event.name,
-                            "School event",
-                          )}
-                        </b>
-                        <small>
-                          {text(
-                            event.location || event.venue,
-                            "School calendar",
-                          )}
-                        </small>
-                      </span>
-                    </button>
-                  ))
-                ) : (
-                  <MiniEmpty
-                    icon="🗓️"
-                    text="No upcoming events yet."
-                  />
-                )}
-              </div>
-            </article>
-
-            <article className="pd-card announcements-card">
-              <div className="pd-section-head">
-                <div>
-                  <span>Notice board</span>
-                  <h2>Announcements</h2>
-                </div>
-                <button
-                  onClick={() => openRoute("announcements")}
-                >
-                  View all
-                </button>
-              </div>
-
-              <div className="pd-stack">
-                {announcements.length ? (
-                  announcements.map((item, index) => (
-                    <button
-                      key={cleanId(idOf(item)) || index}
-                      onClick={() =>
-                        openRoute("announcements")
-                      }
-                      className="notice-row"
-                    >
-                      <span>📣</span>
-                      <div>
-                        <b>{text(item.title, "Announcement")}</b>
-                        <small>
-                          {text(
-                            item.message ||
-                              item.body ||
-                              item.content,
-                            "Open to read this school update.",
-                          ).slice(0, 100)}
-                        </small>
-                      </div>
-                    </button>
-                  ))
-                ) : (
-                  <MiniEmpty
-                    icon="📣"
-                    text="No announcements published."
-                  />
-                )}
-              </div>
-            </article>
-          </section>
-
-          <section className="pd-card pd-recent">
-            <div className="pd-section-head">
-              <div>
-                <span>Latest changes</span>
-                <h2>Recent activity</h2>
-              </div>
-              <b>{recent.length}</b>
-            </div>
-
-            <div className="pd-recent-list">
-              {recent.length ? (
-                recent.map((item, index) => (
-                  <article
-                    key={`${item._kind}-${
-                      cleanId(idOf(item)) || index
-                    }`}
-                    className="recent-row"
-                  >
-                    <span>{item._icon}</span>
-                    <b>{item._title}</b>
-                    <small>
-                      {item._kind} · {dateLabel(item._date)}
-                    </small>
-                  </article>
-                ))
-              ) : (
-                <MiniEmpty
-                  icon="✨"
-                  text="Your children's school activity will appear here."
-                />
-              )}
-            </div>
-          </section>
-        </>
-      )}
+      {filterOpen ? <FilterSheet area={area} setArea={setArea} onClose={() => setFilterOpen(false)} /> : null}
 
       {moreOpen ? (
-        <div
-          className="pd-sheet-backdrop"
-          role="dialog"
-          aria-modal="true"
-        >
-          <section className="pd-sheet">
-            <div className="pd-sheet-head">
-              <div>
-                <h2>Parent home</h2>
-                <p>
-                  Useful parent destinations and dashboard controls.
-                </p>
-              </div>
-              <button onClick={() => setMoreOpen(false)}>✕</button>
-            </div>
-
-            <div className="pd-menu-list">
-              <button
-                onClick={() => {
-                  setMoreOpen(false);
-                  void load();
-                }}
-              >
-                <span>↻</span>
-                <b>Refresh dashboard</b>
-                <small>Reload family data from this device</small>
-              </button>
-
-              <button
-                onClick={() => {
-                  setMoreOpen(false);
-                  openRoute("payments");
-                }}
-              >
-                <span>🧾</span>
-                <b>Payment history</b>
-                <small>Review payments and receipts</small>
-              </button>
-
-              <button
-                onClick={() => {
-                  setMoreOpen(false);
-                  openRoute("messages");
-                }}
-              >
-                <span>✉️</span>
-                <b>Messages</b>
-                <small>Open school conversations</small>
-              </button>
-
-              <button
-                onClick={() => {
-                  setMoreOpen(false);
-                  openRoute("parentProfile");
-                }}
-              >
-                <span>👤</span>
-                <b>Parent profile</b>
-                <small>Review your contact information</small>
-              </button>
-            </div>
-          </section>
-        </div>
+        <MoreSheet
+          view={view}
+          setView={(mode) => { setView(mode); setMoreOpen(false); }}
+          summary={summary}
+          onRefresh={async () => { setMoreOpen(false); await load(); }}
+          onClose={() => setMoreOpen(false)}
+        />
       ) : null}
     </main>
-  );
-}
-
-function MiniEmpty({
-  icon,
-  text: body,
-}: {
-  icon: string;
-  text: string;
-}) {
-  return (
-    <div className="mini-empty">
-      <span>{icon}</span>
-      <p>{body}</p>
-    </div>
   );
 }
 
 function State({
   primary,
   title,
-  text: body,
+  text,
 }: {
   primary: string;
   title: string;
   text: string;
 }) {
   return (
-    <main
-      className="pd-page"
-      style={{ "--pd-primary": primary } as React.CSSProperties}
-    >
+    <main className="pd-page" style={{ "--pd-primary": primary } as React.CSSProperties}>
       <style>{css}</style>
       <section className="pd-state">
         <div className="pd-spinner" />
         <h2>{title}</h2>
-        <p>{body}</p>
+        <p>{text}</p>
       </section>
     </main>
   );
 }
 
-const css = `
-@keyframes spin{to{transform:rotate(360deg)}}
-.pd-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;padding:8px;padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--pd-primary) 10%,transparent),transparent 34rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overflow-x:hidden}
-.pd-page *{box-sizing:border-box;min-width:0}
-.pd-page button,.pd-page input{font:inherit}
-.pd-page button{cursor:pointer;-webkit-tap-highlight-color:transparent}
-.pd-search-card,.pd-card,.pd-state,.pd-search-results,.parent-row,.pd-sheet{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.1));box-shadow:0 12px 30px rgba(15,23,42,.05)}
-.pd-search-card{position:sticky;top:6px;z-index:20;display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;align-items:center;gap:7px;padding:7px;border-radius:22px;backdrop-filter:blur(16px)}
-.status-dot-mini{width:9px;height:9px;border-radius:99px}
-.status-dot-mini.green{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.12)}
-.status-dot-mini.gray{background:#94a3b8}
-.pd-search{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:43px;padding:0 12px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}
-.pd-search>span{font-size:18px;color:var(--muted,#64748b);font-weight:1000}
-.pd-search input{width:100%;border:0;outline:0;background:transparent;color:var(--text,#111827);font-size:14px;font-weight:750}
-.pd-search input::placeholder{color:var(--muted,#64748b)}
-.pd-clear,.pd-refresh,.pd-more{width:40px;height:40px;border-radius:99px;border:1px solid var(--border,rgba(0,0,0,.1));background:var(--surface,#fff);color:var(--text,#111827);font-size:18px;font-weight:1000}
-.pd-refresh{background:var(--pd-primary);border-color:var(--pd-primary);color:#fff}
-.pd-hero{position:relative;min-height:270px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--pd-primary) 95%,#111827),color-mix(in srgb,var(--pd-primary) 55%,#0f172a));box-shadow:0 22px 60px color-mix(in srgb,var(--pd-primary) 20%,transparent);background-position:center;background-size:cover}
-.pd-hero:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.18),transparent 26%);pointer-events:none}
-.pd-hero-copy,.pd-hero-stats{position:relative;z-index:1}
-.pd-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}
-.pd-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}
-.pd-hero p{margin:0;font-size:14px}
-.pd-branch-name{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}
-.pd-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}
-.pd-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
-.pd-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}
-.pd-hero-stats b{font-size:15px}
-.pd-quick-actions{display:grid;grid-template-columns:repeat(5,minmax(74px,1fr));gap:8px;margin-top:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
-.pd-quick-actions::-webkit-scrollbar{display:none}
-.pd-quick-actions button{min-height:76px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:22px;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);display:grid;place-items:center;align-content:center;gap:7px;box-shadow:0 10px 24px rgba(15,23,42,.04)}
-.pd-quick-actions span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--pd-primary) 11%,transparent);color:var(--pd-primary);font-size:17px;font-weight:1000}
-.pd-quick-actions b{font-size:11px;font-weight:950;white-space:nowrap}
-.pd-dashboard-grid{display:grid;gap:10px;margin-top:10px}
-.pd-card{padding:14px;border-radius:26px}
-.pd-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}
-.pd-section-head span{display:block;color:var(--muted,#64748b);font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}
-.pd-section-head h2{margin:3px 0 0;font-size:17px;font-weight:1000;letter-spacing:-.035em}
-.pd-section-head>button,.pd-section-head>b{border:0;border-radius:999px;padding:7px 10px;background:color-mix(in srgb,var(--pd-primary) 10%,transparent);color:var(--pd-primary);font-size:10px;font-weight:950}
-.pd-child-list,.pd-stack,.pd-recent-list{display:grid;gap:7px}
-.pd-child-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;width:100%;padding:9px;border:0;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:left}
-.pd-child-avatar{width:38px;height:38px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--pd-primary) 12%,transparent);color:var(--pd-primary);font-size:15px;font-weight:1000}
-.pd-child-row b,.pd-child-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pd-child-row b{font-size:12px}
-.pd-child-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}
-.attendance-card{background:linear-gradient(145deg,color-mix(in srgb,var(--pd-primary) 7%,var(--surface,#fff)),var(--surface,#fff))}
-.attendance-main strong{display:block;font-size:46px;line-height:1;font-weight:1000;letter-spacing:-.07em}
-.attendance-main span{color:var(--muted,#64748b);font-size:12px;font-weight:850}
-.attendance-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:15px}
-.attendance-grid div,.pd-fee-meta div{padding:10px 7px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);text-align:center}
-.attendance-grid b,.attendance-grid small,.pd-fee-meta b,.pd-fee-meta small{display:block}
-.attendance-grid b,.pd-fee-meta b{font-size:17px}
-.attendance-grid small,.pd-fee-meta small{margin-top:3px;color:var(--muted,#64748b);font-size:9px;font-weight:850}
-.pd-fee-total strong{display:block;font-size:34px;line-height:1;font-weight:1000;letter-spacing:-.06em}
-.pd-fee-total span{display:block;margin-top:6px;color:var(--muted,#64748b);font-size:11px;font-weight:800}
-.pd-fee-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:15px}
-.event-row,.notice-row{width:100%;border:0;border-radius:17px;padding:9px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:left}
-.event-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:9px;align-items:center}
-.event-row time{font-size:10px;font-weight:950;color:var(--pd-primary)}
-.event-row b,.event-row small,.notice-row b,.notice-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.event-row b,.notice-row b{font-size:12px;font-weight:1000}
-.event-row small,.notice-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}
-.notice-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;align-items:center}
-.notice-row>span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--pd-primary) 10%,transparent)}
-.pd-recent{margin-top:10px}
-.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;padding:9px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 5%,transparent)}
-.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--pd-primary) 10%,transparent)}
-.recent-row b,.recent-row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.recent-row b{font-size:12px}
-.recent-row small{font-size:10px;color:var(--muted,#64748b);font-weight:750}
-.mini-empty{min-height:110px;display:grid;place-items:center;align-content:center;text-align:center;color:var(--muted,#64748b)}
-.mini-empty span{font-size:26px}
-.mini-empty p{margin:6px 0 0;font-size:11px;font-weight:800}
-.pd-search-results{margin-top:10px;padding:12px;border-radius:26px}
-.parent-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;margin-top:7px;padding:10px;border-radius:20px;text-align:left;color:inherit}
-.parent-avatar{width:46px;height:46px;display:grid;place-items:center;border-radius:17px;background:color-mix(in srgb,var(--pd-primary) 11%,transparent);font-size:21px}
-.parent-main strong,.parent-main small,.parent-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.parent-main strong{font-size:13px;font-weight:1000}
-.parent-main small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:800}
-.parent-main em{margin-top:3px;color:var(--pd-primary);font-size:9px;font-style:normal;font-weight:900}
-.parent-side{display:flex;align-items:center;gap:7px}
-.parent-side i{font-style:normal;color:var(--muted,#64748b)}
-.pd-chip{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:950;text-transform:capitalize}
-.pd-chip.green{background:rgba(34,197,94,.12);color:#16a34a}
-.pd-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}
-.pd-chip.orange{background:rgba(245,158,11,.14);color:#b45309}
-.pd-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}
-.pd-chip.gray{background:rgba(100,116,139,.12);color:#64748b}
-.pd-chip.red{background:rgba(239,68,68,.12);color:#dc2626}
-.pd-empty{min-height:220px;display:grid;place-items:center;align-content:center;text-align:center}
-.pd-empty div{font-size:28px}
-.pd-empty h3{margin:8px 0 0}
-.pd-empty p{max-width:30rem;margin:5px 0 0;color:var(--muted,#64748b);font-size:12px}
-.pd-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.5);backdrop-filter:blur(12px)}
-.pd-sheet{width:min(520px,100%);padding:14px;border-radius:28px}
-.pd-sheet-head{display:flex;justify-content:space-between;gap:10px}
-.pd-sheet-head h2{margin:0;font-size:20px}
-.pd-sheet-head p{margin:4px 0 0;color:var(--muted,#64748b);font-size:11px}
-.pd-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:99px;background:var(--surface,#fff);color:inherit}
-.pd-menu-list{display:grid;gap:8px;margin-top:12px}
-.pd-menu-list button{display:grid;grid-template-columns:40px minmax(0,1fr);column-gap:10px;align-items:center;width:100%;padding:9px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:18px;background:var(--surface,#fff);color:inherit;text-align:left}
-.pd-menu-list button>span{grid-row:span 2;width:40px;height:40px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--pd-primary) 10%,transparent)}
-.pd-menu-list button>b,.pd-menu-list button>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pd-menu-list button>b{font-size:12px}
-.pd-menu-list button>small{font-size:10px;color:var(--muted,#64748b)}
-.pd-state{min-height:min(430px,calc(100dvh - 32px));width:min(540px,100%);margin:0 auto;display:grid;place-items:center;align-content:center;gap:9px;padding:22px;border-radius:28px;text-align:center}
-.pd-spinner{width:38px;height:38px;border-radius:99px;border:4px solid color-mix(in srgb,var(--pd-primary) 18%,transparent);border-top-color:var(--pd-primary);animation:spin .8s linear infinite}
-.pd-state h2{margin:0;font-size:21px}
-.pd-state p{margin:0;max-width:34rem;color:var(--muted,#64748b);font-size:12px;line-height:1.6}
-@media(min-width:760px){.pd-page{padding:12px}.pd-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.announcements-card{grid-column:span 2}.pd-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(min-width:1180px){.pd-dashboard-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.announcements-card{grid-column:auto}.pd-child-list{max-height:270px;overflow:auto}}
-@media(max-width:620px){.pd-search-card{grid-template-columns:auto minmax(0,1fr) auto auto auto}.pd-quick-actions{grid-template-columns:repeat(5,minmax(78px,1fr))}.attendance-grid{grid-template-columns:repeat(2,1fr)}.pd-fee-meta{grid-template-columns:1fr}.pd-hero-stats span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis}}
-@media(prefers-reduced-motion:reduce){.pd-spinner{animation:none}}
-`;
+function FilterSheet({ area, setArea, onClose }: { area: AreaFilter; setArea: (value: AreaFilter) => void; onClose: () => void }) {
+  return (
+    <div className="pd-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="pd-sheet small">
+        <div className="pd-sheet-head">
+          <div>
+            <h2>Filters</h2>
+            <p>Choose which parent area to show.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close filters">✕</button>
+        </div>
 
+        <div className="pd-form compact">
+          <label>
+            <span>Area</span>
+            <select value={area} onChange={(event) => setArea(event.target.value as AreaFilter)}>
+              <option value="all">All areas</option>
+              <option value="children">My Children</option>
+              <option value="fees">Fees & Payments</option>
+              <option value="communication">Communication</option>
+              <option value="timetable">Timetable</option>
+              <option value="preferences">Preferences</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="pd-sheet-actions">
+          <button type="button" onClick={() => setArea("all")}>Reset</button>
+          <button type="button" className="primary" onClick={onClose}>Apply</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MoreSheet({ view, setView, summary, onRefresh, onClose }: { view: ViewMode; setView: (value: ViewMode) => void; summary: AnyRow; onRefresh: () => void | Promise<void>; onClose: () => void }) {
+  return (
+    <div className="pd-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="pd-sheet small">
+        <div className="pd-sheet-head">
+          <div>
+            <h2>More</h2>
+            <p>Advanced views stay here so the parent home remains compact.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close menu">✕</button>
+        </div>
+
+        <div className="pd-menu-list">
+          <button type="button" className={view === "cards" ? "active" : ""} onClick={() => setView("cards")}><span>☰</span><b>List view</b><small>Compact parent modules</small></button>
+          <button type="button" className={view === "table" ? "active" : ""} onClick={() => setView("table")}><span>☷</span><b>Table view</b><small>Dense module list</small></button>
+          <button type="button" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>◔</span><b>Analytics</b><small>{summary.children} children · {summary.attendance} attendance · {summary.invoices} invoices</small></button>
+          <button type="button" onClick={onRefresh}><span>↻</span><b>Refresh</b><small>Reload local parent data</small></button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TableView({ modules, openRoute }: { modules: DashboardModule[]; openRoute: (routeKey: string) => void }) {
+  return (
+    <section className="pd-table-card">
+      <div className="pd-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Parent Modules ({modules.length})</th>
+              <th>Area</th>
+              <th>Value</th>
+              <th>Status</th>
+              <th>Note</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {modules.map((item) => (
+              <tr key={item.key}>
+                <td><strong>{item.icon} {item.label}</strong><span>{item.routeKey}</span></td>
+                <td>{areaLabel(item.area)}</td>
+                <td>{item.value}</td>
+                <td><Chip tone={item.tone}>{item.tone}</Chip></td>
+                <td>{item.note}</td>
+                <td><div className="pd-table-actions"><button type="button" onClick={() => openRoute(item.routeKey)}>Open</button></div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!modules.length ? <div className="pd-empty-table">No parent module matches your filters.</div> : null}
+      </div>
+    </section>
+  );
+}
+
+function AnalyticsView({ summary, modules, recent }: { summary: AnyRow; modules: DashboardModule[]; recent: AnyRow[] }) {
+  const areaRows = ["children", "fees", "communication", "timetable", "preferences", "other"].map((area) => ({
+    label: areaLabel(area),
+    value: modules.filter((module) => module.area === area).length,
+  })).filter((row) => row.value > 0);
+
+  return (
+    <section className="pd-analysis-grid">
+      <article className="pd-analysis"><span>Children</span><strong>{summary.children}</strong><p>{summary.enrollments} enrollment record(s) across your children.</p></article>
+      <article className="pd-analysis"><span>Attendance</span><strong>{summary.presentToday}</strong><p>{summary.todayAttendance} attendance record(s) today, {summary.absent} absent/excused total.</p></article>
+      <article className="pd-analysis"><span>Results</span><strong>{summary.averageScore}%</strong><p>{summary.results} computed result record(s), {summary.reportCards} report card(s).</p></article>
+      <article className="pd-analysis"><span>Fees</span><strong>{money(summary.feeBalance, summary.currencyCode)}</strong><p>{summary.invoices} invoice(s), {summary.payments} payment record(s).</p></article>
+      <article className="pd-analysis wide"><span>Module Areas</span><strong>{modules.length}</strong><div className="pd-analysis-list">{areaRows.map((row) => <section key={row.label}><div><b>{row.label}</b><small>{row.value}</small></div><div className="pd-progress"><i style={{ width: `${Math.max(6, Math.round((row.value / Math.max(1, modules.length)) * 100))}%` }} /></div></section>)}</div></article>
+      <article className="pd-analysis wide"><span>Recent Activity</span><strong>{recent.length}</strong><p>Recent records from children, announcements, results, report cards, payments and events.</p></article>
+    </section>
+  );
+}
+
+const css = `
+@keyframes spin{to{transform:rotate(360deg)}}.pd-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;width:100%;max-width:100%;min-width:0;padding:calc(8px * var(--local-density-scale,1));padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--pd-primary) 9%,transparent),transparent 30rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:var(--font-size,14px);overflow-x:hidden}.pd-page *,.pd-page *::before,.pd-page *::after{box-sizing:border-box;min-width:0}.pd-page button,.pd-page input,.pd-page select{font:inherit;max-width:100%}.pd-page button{-webkit-tap-highlight-color:transparent}.pd-page input,.pd-page select{width:100%;min-height:44px;border:1px solid var(--input-border,var(--border,rgba(0,0,0,.10)));border-radius:16px;padding:0 12px;background:var(--input-bg,var(--surface,#fff));color:var(--input-text,var(--text,#111827));outline:none;font-weight:750}.pd-page input:focus,.pd-page select:focus{border-color:color-mix(in srgb,var(--pd-primary) 52%,var(--border,rgba(0,0,0,.10)));box-shadow:0 0 0 4px color-mix(in srgb,var(--pd-primary) 12%,transparent)}.pd-state,.pd-search-card,.parent-row,.pd-table-card,.pd-analysis,.pd-empty,.pd-sheet,.pd-recent,.recent-row,.pd-parent-strip{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.10));box-shadow:0 12px 28px rgba(15,23,42,.045)}.pd-state{min-height:min(420px,calc(100dvh - 32px));width:min(520px,100%);margin:0 auto;display:grid;place-items:center;align-content:center;gap:10px;padding:22px;border-radius:28px;text-align:center}.pd-spinner{width:38px;height:38px;border-radius:999px;border:4px solid color-mix(in srgb,var(--pd-primary) 18%,transparent);border-top-color:var(--pd-primary);animation:spin .8s linear infinite}.pd-state h2{margin:0;font-size:22px;font-weight:1000;letter-spacing:-.04em}.pd-state p{max-width:34rem;margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.pd-search-card{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;gap:8px;align-items:center;margin-top:2px;padding:8px;border-radius:24px}.pd-search{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:44px;padding:0 11px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.pd-search span{color:var(--muted,#64748b);font-size:17px;font-weight:1000}.pd-search input{min-height:42px;border:0;padding:0;border-radius:0;background:transparent;box-shadow:none;font-size:14px}.pd-icon-button,.pd-filter-button,.pd-add-inline{width:42px;height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;display:grid;place-items:center;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);font-size:18px;font-weight:1000;cursor:pointer;box-shadow:0 10px 22px rgba(15,23,42,.045)}.pd-add-inline{border-color:var(--pd-primary);background:var(--pd-primary);color:#fff;box-shadow:0 12px 28px color-mix(in srgb,var(--pd-primary) 22%,transparent)}.pd-slider-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.pd-filter-button{position:relative;background:color-mix(in srgb,var(--pd-primary) 8%,var(--card-bg,#fff));color:var(--pd-primary)}.pd-filter-button.active{background:var(--pd-primary);color:#fff;border-color:var(--pd-primary)}.pd-filter-button b{position:absolute;top:-4px;right:-4px;min-width:19px;height:19px;display:grid;place-items:center;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;border:2px solid var(--card-bg,#fff)}.status-dot-mini{width:10px;height:10px;border-radius:999px;display:inline-flex;box-shadow:0 0 0 4px color-mix(in srgb,var(--muted,#64748b) 10%,transparent)}.status-dot-mini.green{background:#22c55e}.status-dot-mini.orange{background:#f59e0b}.status-dot-mini.gray{background:var(--muted,#64748b)}.pd-parent-strip{display:flex;align-items:center;gap:8px;justify-content:space-between;margin-top:8px;padding:9px 10px;border-radius:20px}.pd-parent-strip strong,.pd-parent-strip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pd-parent-strip strong{font-size:13px;font-weight:1000}.pd-parent-strip span{color:var(--muted,#64748b);font-size:12px;font-weight:850}.pd-filter-chips{display:flex;gap:7px;overflow-x:auto;padding:8px 1px 0;scrollbar-width:none}.pd-filter-chips::-webkit-scrollbar{display:none}.pd-filter-chips button{flex:0 0 auto;min-height:31px;border:0;border-radius:999px;padding:0 10px;background:color-mix(in srgb,var(--pd-primary) 11%,transparent);color:var(--pd-primary);font-size:11px;font-weight:950;white-space:nowrap;cursor:pointer}.pd-list{display:grid;gap:7px;margin-top:10px}.parent-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:22px;text-align:left;cursor:pointer;color:inherit}.parent-avatar{width:48px;height:48px;display:grid;place-items:center;border-radius:18px;background:color-mix(in srgb,var(--pd-primary) 12%,var(--surface,#fff));font-size:22px}.parent-main,.parent-main strong,.parent-main small,.parent-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.parent-main strong{color:var(--text,#111827);font-size:14px;font-weight:1000;letter-spacing:-.02em}.parent-main small{margin-top:3px;color:var(--muted,#64748b);font-size:12px;font-weight:850}.parent-main em{margin-top:3px;color:color-mix(in srgb,var(--muted,#64748b) 86%,var(--text,#111827));font-size:11px;font-weight:750;font-style:normal}.parent-side{display:flex;align-items:center;gap:7px}.parent-side i{color:var(--muted,#64748b);font-style:normal;font-weight:1000}.pd-chip{max-width:100%;display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}.pd-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.pd-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.pd-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.pd-chip.gray{background:color-mix(in srgb,var(--muted,#64748b) 14%,transparent);color:var(--muted,#64748b)}.pd-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.pd-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.pd-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.50);backdrop-filter:blur(12px)}.pd-sheet{width:min(760px,100%);max-height:min(88dvh,760px);overflow-y:auto;padding:14px;border-radius:28px 28px 22px 22px;box-shadow:0 30px 90px rgba(15,23,42,.32);animation:sheetIn .18s var(--ease)}.pd-sheet.small{width:min(520px,100%)}@keyframes sheetIn{from{transform:translateY(16px);opacity:.7}to{transform:translateY(0);opacity:1}}.pd-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:12px}.pd-sheet-head h2{margin:0;color:var(--text,#111827);font-size:21px;font-weight:1000;letter-spacing:-.05em}.pd-sheet-head p{margin:5px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5;font-weight:750}.pd-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;background:var(--surface,#fff);color:var(--text,#111827);font-weight:1000;cursor:pointer;flex:0 0 auto}.pd-form{display:grid;gap:10px}.pd-form label{display:grid;gap:6px}.pd-form span{color:var(--muted,#64748b);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em}.pd-menu-list{display:grid;gap:8px}.pd-menu-list button{width:100%;display:grid;grid-template-columns:42px minmax(0,1fr);column-gap:10px;align-items:center;min-height:58px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:18px;padding:9px;background:var(--surface,#fff);color:var(--text,#111827);text-align:left;cursor:pointer}.pd-menu-list button span{grid-row:span 2;width:42px;height:42px;display:grid;place-items:center;border-radius:16px;background:color-mix(in srgb,var(--pd-primary) 10%,transparent);color:var(--pd-primary);font-weight:1000}.pd-menu-list button b,.pd-menu-list button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pd-menu-list button b{font-size:13px;font-weight:1000}.pd-menu-list button small{margin-top:2px;color:var(--muted,#64748b);font-size:11px;font-weight:750}.pd-menu-list button.active{border-color:color-mix(in srgb,var(--pd-primary) 34%,var(--border,rgba(0,0,0,.10)));background:color-mix(in srgb,var(--pd-primary) 8%,var(--surface,#fff))}.pd-sheet-actions{position:sticky;bottom:-14px;display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:14px;padding:12px 0 2px;background:linear-gradient(to top,var(--card-bg,var(--surface,#fff)) 70%,transparent)}.pd-sheet-actions button{min-height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;padding:0 16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff));color:var(--text,#111827);font-size:12px;font-weight:950;cursor:pointer}.pd-sheet-actions button.primary{border-color:var(--pd-primary);background:var(--pd-primary);color:#fff;box-shadow:0 14px 32px color-mix(in srgb,var(--pd-primary) 25%,transparent)}.pd-table-card,.pd-analysis,.pd-empty{padding:13px;border-radius:24px}.pd-table-card{margin-top:10px}.pd-table-scroll{width:100%;max-width:100%;overflow-x:auto;border-radius:18px;border:1px solid var(--border,rgba(0,0,0,.08))}.pd-table-scroll table{width:100%;min-width:920px;border-collapse:collapse;background:var(--card-bg,var(--surface,var(--bg,transparent)))}.pd-table-scroll th,.pd-table-scroll td{padding:10px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));vertical-align:top;text-align:left;font-size:13px}.pd-table-scroll th{background:var(--table-header-bg,color-mix(in srgb,var(--pd-primary) 6%,var(--card-bg,var(--surface,var(--bg,transparent)))));color:var(--table-header-text,var(--muted,var(--text)));font-size:11px;font-weight:1000;text-transform:uppercase;letter-spacing:.07em}.pd-table-scroll td strong,.pd-table-scroll td span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pd-table-scroll td span{margin-top:3px;color:var(--muted,#64748b);font-size:11px}.pd-table-actions{display:flex;gap:7px;overflow-x:auto}.pd-table-actions button{flex:0 0 auto;min-height:34px;border:1px solid var(--pd-primary);border-radius:999px;padding:0 12px;background:var(--pd-primary);color:#fff;font-size:11px;font-weight:950;cursor:pointer}.pd-empty-table{padding:22px;text-align:center;color:var(--muted,#64748b);font-weight:850}.pd-analysis-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin-top:10px}.pd-analysis span,.pd-section-head span{color:var(--muted,#64748b);font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.pd-analysis strong{display:block;margin-top:8px;font-size:clamp(22px,7vw,30px);line-height:1;font-weight:1000;letter-spacing:-.06em;overflow-wrap:anywhere}.pd-analysis p{margin:8px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5}.pd-analysis-list{display:grid;gap:10px;margin-top:12px}.pd-analysis-list section{display:grid;gap:6px;padding:10px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent)}.pd-analysis-list section>div:first-child{display:flex;justify-content:space-between;gap:10px}.pd-analysis-list b,.pd-analysis-list small{font-size:12px}.pd-analysis-list small{color:var(--muted,#64748b);font-weight:850}.pd-progress{height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted,#64748b) 18%,transparent);overflow:hidden}.pd-progress i{display:block;height:100%;border-radius:inherit;background:var(--pd-primary)}.pd-empty{display:grid;place-items:center;align-content:center;gap:8px;min-height:220px;text-align:center;border-style:dashed}.pd-empty div{width:56px;height:56px;display:grid;place-items:center;border-radius:22px;background:color-mix(in srgb,var(--pd-primary) 12%,var(--surface,#fff));font-size:28px}.pd-empty h3{margin:0;font-size:18px;font-weight:1000}.pd-empty p{margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.pd-recent{margin-top:10px;border-radius:24px;padding:12px}.pd-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.pd-section-head h2{margin:0;color:var(--text,#111827);font-size:15px;font-weight:1000;letter-spacing:-.03em}.pd-recent-list{display:grid;gap:7px}.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;border-radius:18px;padding:9px}.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--pd-primary) 10%,transparent)}.recent-row b,.recent-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row b{font-size:12px;font-weight:1000}.recent-row small{font-size:11px;color:var(--muted,#64748b);font-weight:800}@media (min-width:680px){.pd-page{padding:calc(12px * var(--local-density-scale,1));padding-bottom:44px}.pd-search-card{grid-template-columns:auto minmax(0,1fr) 48px 48px 48px}.pd-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.parent-row{border-radius:24px;padding:12px}.pd-analysis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.pd-analysis.wide{grid-column:span 2}.pd-sheet-backdrop{place-items:center;padding:18px}.pd-sheet{border-radius:28px;padding:18px}.pd-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:1040px){.pd-page{padding:calc(16px * var(--local-density-scale,1));padding-bottom:48px}.pd-search-card,.pd-parent-strip,.pd-list,.pd-analysis-grid,.pd-table-card,.pd-filter-chips,.pd-recent{max-width:1180px;margin-left:auto;margin-right:auto}.pd-list{grid-template-columns:repeat(3,minmax(0,1fr))}.pd-analysis-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.pd-analysis.wide{grid-column:span 2}.pd-recent-list{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (max-width:520px){.pd-page{padding:calc(7px * var(--local-density-scale,1));padding-bottom:max(38px,env(safe-area-inset-bottom))}.pd-icon-button,.pd-filter-button,.pd-add-inline{width:40px;height:40px}.parent-row{grid-template-columns:auto minmax(0,1fr);align-items:start}.parent-side{grid-column:1/-1;justify-content:flex-end}.pd-parent-strip{display:grid;grid-template-columns:minmax(0,1fr) auto}.pd-parent-strip span{grid-row:2}.pd-sheet{border-radius:24px 24px 18px 18px;padding:12px}.pd-sheet-actions{display:grid;grid-template-columns:minmax(0,1fr)}.pd-sheet-actions button{width:100%}}
+`;

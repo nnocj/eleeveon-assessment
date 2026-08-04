@@ -18,7 +18,7 @@
  * - dashboard images
  * - portal images
  * - report card branding
- * - record-based gallery highlights using the Portal Highlights architecture
+ * - gallery fallback images
  * - report card templates and display controls
  *
  * Branch-admin difference:
@@ -70,8 +70,7 @@
  * - owner records are saved with empty string fallbacks and null media IDs so old links cannot survive merge updates
  * - removed mediaAssets and their mediaBlobs are soft-deleted locally and marked pending sync
  * - Save All performs all writes first, then reloads once so removed images cannot rehydrate mid-save
- * - gallery items use portalHighlights records with placement='gallery'
- * - Portal Highlights and Gallery items can opt into source-driven website publishing
+ * - gallery removals persist after Save instead of reappearing after reload
  * - MediaSheet, SchoolSheet and BranchSheet receive clearImage as props so remove actions are in scope
  *
  * Report card template/settings upgrade:
@@ -108,10 +107,6 @@ import {
   resolveOwnerMediaUrl,
   revokeMediaObjectUrl,
   saveImageAsset,
-  savePortalHighlightMedia,
-  savePortalHighlightPoster,
-  commitPortalHighlightMedia,
-  softDeletePortalHighlightMedia,
 } from "../../lib/media/mediaAssetUtils";
 
 import {
@@ -239,7 +234,6 @@ type SettingsSection =
   | "branch"
   | "appearance"
   | "dashboardMedia"
-  | "portalHighlights"
   | "reportMedia"
   | "reportTemplates"
   | "identityCredentials"
@@ -291,122 +285,8 @@ type SettingsForm = {
   classroomPlaceholderImageMediaId?: string;
   subjectPlaceholderImage: string;
   subjectPlaceholderImageMediaId?: string;
+  schoolGalleryMediaIds: string[];
 };
-
-type PortalAudience =
-  | "all"
-  | "branch_admin"
-  | "admin"
-  | "teacher"
-  | "student"
-  | "parent"
-  | "accountant";
-
-type PortalHighlightRow = {
-  id?: string;
-  accountId?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  title: string;
-  subtitle?: string | null;
-  description?: string | null;
-  mediaType: "image" | "video";
-  placement: "hero" | "gallery";
-  mediaAssetId?: string | null;
-  posterMediaAssetId?: string | null;
-  fallbackImageUrl?: string | null;
-  audiences: PortalAudience[];
-  actionType: "none" | "portal_route" | "external_url" | "announcement" | "calendar_event";
-  actionLabel?: string | null;
-  actionValue?: string | null;
-  displayOrder?: number;
-  startAt?: number | null;
-  endAt?: number | null;
-  durationSeconds?: number | null;
-  autoplay?: boolean;
-  loop?: boolean;
-  muted?: boolean;
-  transition?: "fade" | "slide" | "crossfade";
-  status?: "draft" | "scheduled" | "published" | "expired" | "archived";
-  publishedAt?: number | null;
-  active?: boolean;
-  isDeleted?: boolean;
-
-  publishToWebsite?: boolean;
-  websitePublicationStatus?: "draft" | "scheduled" | "published" | "hidden" | "archived";
-  websiteFeatured?: boolean;
-  websiteDisplayOrder?: number;
-  websiteStartAt?: number | null;
-  websiteEndAt?: number | null;
-  websitePublishedAt?: number | null;
-
-  metadata?: Record<string, unknown> | null;
-  _mediaUrl?: string;
-  _posterUrl?: string;
-};
-
-type PortalHighlightDraft = {
-  id?: string;
-  ownerTempKey: string;
-  title: string;
-  subtitle: string;
-  description: string;
-  mediaType: "image" | "video";
-  placement: "hero" | "gallery";
-  mediaAssetId: string;
-  mediaUrl: string;
-  posterMediaAssetId: string;
-  posterUrl: string;
-  audiences: PortalAudience[];
-  actionType: PortalHighlightRow["actionType"];
-  actionLabel: string;
-  actionValue: string;
-  displayOrder: number;
-  startAtInput: string;
-  endAtInput: string;
-  durationSeconds: number;
-  autoplay: boolean;
-  loop: boolean;
-  muted: boolean;
-  transition: "fade" | "slide" | "crossfade";
-  status: "draft" | "scheduled" | "published";
-  active: boolean;
-
-  publishToWebsite: boolean;
-  websiteFeatured: boolean;
-};
-
-function newPortalHighlightDraft(): PortalHighlightDraft {
-  return {
-    ownerTempKey: createSharedMediaSessionKey(MediaOwners.PORTAL_HIGHLIGHTS),
-    title: "",
-    subtitle: "",
-    description: "",
-    mediaType: "image",
-    placement: "hero",
-    mediaAssetId: "",
-    mediaUrl: "",
-    posterMediaAssetId: "",
-    posterUrl: "",
-    audiences: ["all"],
-    actionType: "none",
-    actionLabel: "",
-    actionValue: "",
-    displayOrder: 0,
-    startAtInput: "",
-    endAtInput: "",
-    durationSeconds: 7,
-    autoplay: true,
-    loop: false,
-    muted: true,
-    transition: "fade",
-    status: "published",
-    active: true,
-
-    publishToWebsite: false,
-    websiteFeatured: false,
-  };
-}
 
 type TenantRow = {
   accountId?: string | null;
@@ -655,6 +535,7 @@ const defaultForm = (
   teacherPortalImage: "",
   classroomPlaceholderImage: "",
   subjectPlaceholderImage: "",
+  schoolGalleryMediaIds: [],
 });
 
 function studentReportTemplateDefinitionOptions(): ReportTemplateRow[] {
@@ -2053,6 +1934,18 @@ function makeSettingsPayload(
     )
       ? (payload as any).subjectPlaceholderImageMediaId
       : (existing as any)?.subjectPlaceholderImageMediaId,
+    schoolGalleryMediaIds: Array.isArray(
+      (payload as any).schoolGalleryMediaIds,
+    )
+      ? (payload as any).schoolGalleryMediaIds
+          .map((value: unknown) => idOf(value))
+          .filter(Boolean)
+      : Array.isArray((existing as any)?.schoolGalleryMediaIds)
+        ? (existing as any).schoolGalleryMediaIds
+            .map((value: unknown) => idOf(value))
+            .filter(Boolean)
+        : [],
+
     createdAt: existing?.createdAt || payload.createdAt || now,
     updatedAt: now,
     version: Number(existing?.version || 0) + 1,
@@ -2395,10 +2288,6 @@ export default function Branchsettings() {
     useState<ReportTemplateSettingsRow | null>(null);
   const [reportTemplateAssignmentRow, setReportTemplateAssignmentRow] =
     useState<ReportTemplateAssignmentRow | null>(null);
-  const [portalHighlights, setPortalHighlights] = useState<PortalHighlightRow[]>([]);
-  const [portalHighlightDraft, setPortalHighlightDraft] =
-    useState<PortalHighlightDraft>(newPortalHighlightDraft());
-  const [savingPortalHighlight, setSavingPortalHighlight] = useState(false);
 
   const [form, setForm] = useState<SettingsForm>(
     defaultForm(selectedSchoolId, selectedBranchId),
@@ -2636,7 +2525,66 @@ export default function Branchsettings() {
       if (url) settingUrls[field] = url;
     }
 
+    const galleryIds = Array.isArray(
+      (currentSetting as any)?.schoolGalleryMediaIds,
+    )
+      ? (currentSetting as any).schoolGalleryMediaIds
+          .map((value: unknown) => idOf(value))
+          .filter(Boolean)
+      : [];
 
+    for (const assetId of galleryIds) {
+      /*
+       * A gallery is a multi-image field. Resolving by owner + fieldKey would
+       * repeatedly return the first matching asset, while resolving a fallback
+       * without owner identity is rejected by resolveOwnerMediaUrl().
+       *
+       * Resolve each saved media UUID directly so every gallery item receives
+       * its own local blob URL or synchronized remote URL.
+       */
+      try {
+        const url = await resolveMediaAssetUrlById(assetId, {
+          accountId: selectedAccountId,
+          ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+          ownerId: settingIdValue || undefined,
+          fieldKey: GALLERY_FIELD_KEY,
+        });
+
+        if (url) {
+          next[galleryAssetPreviewKey(assetId)] = url;
+        }
+      } catch (error) {
+        console.error(
+          "Failed to resolve gallery media asset:",
+          {
+            assetId,
+            ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+            fieldKey: GALLERY_FIELD_KEY,
+            error,
+          },
+        );
+      }
+    }
+
+    setMediaPreviewUrls((current) => {
+      /*
+       * Preserve previews for gallery assets staged during the current edit.
+       * saveImageAsset writes mediaAssets immediately and triggers dataRevision,
+       * so load() may run before Save Gallery commits those IDs to settings.
+       */
+      for (const assetId of stagedGalleryMediaIdsRef.current) {
+        const key = galleryAssetPreviewKey(assetId);
+        if (current[key] && !next[key]) {
+          next[key] = current[key];
+        }
+      }
+
+      Object.entries(current).forEach(([key, url]) => {
+        if (!next[key]) revokeMediaObjectUrl(url);
+      });
+
+      return next;
+    });
 
     return {
       schoolLogoUrl,
@@ -3017,6 +2965,18 @@ export default function Branchsettings() {
           "",
         subjectPlaceholderImageMediaId: (currentSetting as any)
           ?.subjectPlaceholderImageMediaId,
+        schoolGalleryMediaIds: Array.from(
+          new Set([
+            ...(Array.isArray(
+              (currentSetting as any)?.schoolGalleryMediaIds,
+            )
+              ? (currentSetting as any).schoolGalleryMediaIds
+                  .map((value: unknown) => idOf(value))
+                  .filter(Boolean)
+              : []),
+            ...stagedGalleryMediaIdsRef.current,
+          ]),
+        ),
       });
 
       setReportTemplateForm({
@@ -3121,6 +3081,111 @@ export default function Branchsettings() {
     );
   }, [filteredAcademicPeriods, form.currentAcademicPeriodId]);
 
+  const refreshGalleryPreviews = async () => {
+    const assetIds = Array.from(
+      new Set(
+        (form.schoolGalleryMediaIds || [])
+          .map((value) => cleanId(value))
+          .filter(Boolean),
+      ),
+    );
+
+    if (!assetIds.length) return;
+
+    const ownerId = cleanId(settingsRow?.id || form.id) || undefined;
+    const ownerTempKey = settingsMediaSessionKeyRef.current;
+
+    const resolvedEntries = await Promise.all(
+      assetIds.map(async (assetId) => {
+        try {
+          const url = await resolveMediaAssetUrlById(assetId, {
+            accountId: selectedAccountId,
+            ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+            ownerId,
+            ownerTempKey,
+            fieldKey: GALLERY_FIELD_KEY,
+          });
+
+          return [assetId, url] as const;
+        } catch (error) {
+          console.warn("Gallery preview resolution failed:", {
+            assetId,
+            ownerId,
+            ownerTempKey,
+            error,
+          });
+
+          return [assetId, ""] as const;
+        }
+      }),
+    );
+
+    setMediaPreviewUrls((current) => {
+      const next = { ...current };
+
+      for (const [assetId, url] of resolvedEntries) {
+        if (!url) continue;
+
+        const key = galleryAssetPreviewKey(assetId);
+        const previous = next[key];
+
+        if (previous && previous !== url) {
+          revokeResolvedMediaUrl(previous);
+        }
+
+        next[key] = url;
+      }
+
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (sectionOpen !== "gallery" || !form.schoolGalleryMediaIds.length) {
+      return;
+    }
+
+    let cancelled = false;
+    const timers: number[] = [];
+
+    const run = async () => {
+      if (cancelled) return;
+      await refreshGalleryPreviews();
+    };
+
+    void run();
+
+    /*
+     * Retry after IndexedDB/sync hydration. A settings row and its media IDs
+     * may become available slightly before all mediaAssets/mediaBlobs rows.
+     */
+    timers.push(window.setTimeout(() => void run(), 300));
+    timers.push(window.setTimeout(() => void run(), 1200));
+
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [
+    sectionOpen,
+    dataRevision,
+    settingsRow?.id,
+    form.id,
+    selectedAccountId,
+    form.schoolGalleryMediaIds.join("|"),
+  ]);
+
+  const galleryItems = useMemo(
+    () =>
+      (form.schoolGalleryMediaIds || [])
+        .map((assetId) => ({
+          assetId,
+          url: mediaPreviewUrls[galleryAssetPreviewKey(assetId)] || "",
+        }))
+        .filter((item) => Boolean(item.assetId)),
+    [form.schoolGalleryMediaIds, mediaPreviewUrls],
+  );
+
   const assetCount =
     [
       schoolForm.logo,
@@ -3137,12 +3202,7 @@ export default function Branchsettings() {
       form.reportCardBackgroundImage,
       form.reportCardWatermark,
       form.reportCardSignatureImage,
-    ].filter(Boolean).length +
-    portalHighlights.filter(
-      (row) =>
-        row.active !== false &&
-        row.placement === "gallery",
-    ).length;
+    ].filter(Boolean).length + (form.schoolGalleryMediaIds?.length || 0);
 
   const completion = useMemo(() => {
     const checks = [
@@ -3472,6 +3532,131 @@ export default function Branchsettings() {
     }
   };
 
+  const handleGalleryUpload = async (files: FileList | null) => {
+    if (!files?.length) return;
+    if (!requireTenant()) return;
+
+    try {
+      const ownerTempKey = settingsMediaSessionKeyRef.current;
+      const addedIds: string[] = [];
+
+      /*
+       * Process files sequentially and register each staged asset immediately.
+       * createLocal(mediaAssets) publishes a data revision for every image; if
+       * we wait for Promise.all, load() can run before the batch is registered
+       * and temporarily discard every preview.
+       */
+      for (const file of Array.from(files)) {
+        const result = await saveImageAsset(file, {
+          accountId: selectedAccountId,
+          schoolId: cleanId(selectedSchoolId) || undefined,
+          branchId: cleanId(selectedBranchId) || undefined,
+          ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+          ownerTempKey,
+          fieldKey: GALLERY_FIELD_KEY,
+          variant: "gallery",
+          replaceExisting: false,
+        });
+
+        const assetId = cleanId(result.assetId);
+        if (!assetId) continue;
+
+        addedIds.push(assetId);
+        stagedGalleryMediaIdsRef.current.add(assetId);
+
+        setMediaPreviewUrls((current) => {
+          const key = galleryAssetPreviewKey(assetId);
+          const previous = current[key];
+
+          if (previous && previous !== result.previewUrl) {
+            revokeMediaObjectUrl(previous);
+          }
+
+          return {
+            ...current,
+            [key]: result.previewUrl,
+          };
+        });
+
+        setForm((current) => ({
+          ...current,
+          schoolGalleryMediaIds: Array.from(
+            new Set([
+              ...(current.schoolGalleryMediaIds || []),
+              assetId,
+            ]),
+          ),
+        }));
+      }
+
+      if (!addedIds.length) {
+        throw new Error("No gallery media assets were created.");
+      }
+
+      setPendingMediaRemovals((current) =>
+        current.filter(
+          (removal) =>
+            !addedIds.includes(idOf(removal.assetId)) ||
+            removal.ownerTable !== SETTINGS_MEDIA_OWNER_TABLE ||
+            removal.fieldKey !== GALLERY_FIELD_KEY,
+        ),
+      );
+
+      showToast(
+        "success",
+        `${addedIds.length} gallery image(s) prepared. Click Save Gallery to commit them.`,
+      );
+    } catch (error: any) {
+      console.error("Failed to process gallery images:", error);
+      showToast("error", error?.message || "Failed to process gallery images.");
+    }
+  };
+
+  const removeGalleryImage = (assetIdValue: string) => {
+    const assetId = cleanId(assetIdValue);
+    if (!assetId) return;
+
+    stagedGalleryMediaIdsRef.current.delete(assetId);
+
+    const ownerId = cleanId(settingsRow?.id || form.id) || undefined;
+
+    queueMediaRemoval(
+      createPendingRemoval({
+        assetId,
+        ownerTable: SETTINGS_MEDIA_OWNER_TABLE,
+        fieldKey: GALLERY_FIELD_KEY,
+        accountId: selectedAccountId,
+        schoolId: selectedSchoolId,
+        branchId: selectedBranchId,
+        ownerId,
+        ownerTempKey: ownerId ? null : settingsMediaSessionKeyRef.current,
+      }),
+    );
+
+    setForm((current) => ({
+      ...current,
+      schoolGalleryMediaIds: (current.schoolGalleryMediaIds || []).filter(
+        (currentAssetId) => cleanId(currentAssetId) !== assetId,
+      ),
+    }));
+
+    setMediaPreviewUrls((current) => {
+      const key = galleryAssetPreviewKey(assetId);
+      const url = current[key];
+
+      if (url) {
+        revokeResolvedMediaUrl(url);
+      }
+
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
+  // ======================================================
+  // SAVE HANDLERS
+  // ======================================================
 
   const persistPendingMediaRemovals = async () => {
     const removals = pendingMediaRemovals.filter(
@@ -3659,6 +3844,9 @@ export default function Branchsettings() {
         subjectPlaceholderImageMediaId: mediaIdOrNull(
           form.subjectPlaceholderImageMediaId,
         ),
+        schoolGalleryMediaIds: (form.schoolGalleryMediaIds || [])
+          .map(mediaIdOrNull)
+          .filter(Boolean) as string[],
       };
 
       const payload = makeSettingsPayload(
@@ -3671,6 +3859,7 @@ export default function Branchsettings() {
           currentAcademicStructureId:
             form.currentAcademicStructureId || undefined,
           currentAcademicPeriodId: form.currentAcademicPeriodId || undefined,
+          schoolGalleryMediaIds: settingsMediaPatch.schoolGalleryMediaIds,
           isDeleted: false,
         } as Partial<SchoolBranchSetting>,
         settingsRow || undefined,
@@ -3755,6 +3944,11 @@ export default function Branchsettings() {
             assetId: form.subjectPlaceholderImageMediaId,
             fieldKey: "subjectPlaceholderImage",
           },
+          ...(form.schoolGalleryMediaIds || []).map((assetId) => ({
+            assetId,
+            fieldKey: GALLERY_FIELD_KEY,
+            allowMultiple: true,
+          })),
         ];
 
         await commitMediaAssetsToOwner({
@@ -4339,356 +4533,9 @@ export default function Branchsettings() {
     document.head.appendChild(link);
   }, [form.logo, schoolForm.logo, branchForm.logo]);
 
-  const loadPortalHighlights = async () => {
-    if (!selectedAccountId || !selectedSchoolId || !selectedBranchId) {
-      setPortalHighlights([]);
-      return;
-    }
-
-    const table = (db as any).portalHighlights;
-    if (!table?.toArray) {
-      setPortalHighlights([]);
-      return;
-    }
-
-    const rows = ((await table.toArray()) as PortalHighlightRow[])
-      .filter(
-        (row) =>
-          !row.isDeleted &&
-          row.accountId === selectedAccountId &&
-          sameId(row.schoolId, selectedSchoolId) &&
-          sameId(row.branchId, selectedBranchId),
-      )
-      .sort(
-        (a, b) =>
-          Number(a.displayOrder || 0) - Number(b.displayOrder || 0),
-      );
-
-    const resolved = await Promise.all(
-      rows.map(async (row) => {
-        let mediaUrl = String(row.fallbackImageUrl || "");
-        let posterUrl = "";
-
-        if (row.mediaAssetId) {
-          try {
-            mediaUrl =
-              (await resolveMediaAssetUrlById(row.mediaAssetId, {
-                accountId: selectedAccountId,
-                ownerTable: MediaOwners.PORTAL_HIGHLIGHTS,
-                ownerId: row.id,
-              })) || mediaUrl;
-          } catch {}
-        }
-
-        if (row.posterMediaAssetId) {
-          try {
-            posterUrl =
-              (await resolveMediaAssetUrlById(row.posterMediaAssetId, {
-                accountId: selectedAccountId,
-                ownerTable: MediaOwners.PORTAL_HIGHLIGHTS,
-                ownerId: row.id,
-              })) || "";
-          } catch {}
-        }
-
-        return { ...row, _mediaUrl: mediaUrl, _posterUrl: posterUrl };
-      }),
-    );
-
-    setPortalHighlights(resolved);
-  };
-
-  useEffect(() => {
-    void loadPortalHighlights();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAccountId, selectedSchoolId, selectedBranchId, dataRevision]);
-
-  const editPortalHighlight = (
-    row?: PortalHighlightRow | null,
-    placement: "hero" | "gallery" = "hero",
-  ) => {
-    if (!row) {
-      setPortalHighlightDraft({
-        ...newPortalHighlightDraft(),
-        placement,
-        audiences: placement === "gallery" ? ["all"] : ["all"],
-      });
-      return;
-    }
-
-    setPortalHighlightDraft({
-      id: idOf(row.id) || undefined,
-      ownerTempKey: createSharedMediaSessionKey(MediaOwners.PORTAL_HIGHLIGHTS),
-      title: row.title || "",
-      subtitle: row.subtitle || "",
-      description: row.description || "",
-      mediaType: row.mediaType || "image",
-      placement: row.placement === "gallery" ? "gallery" : placement,
-      mediaAssetId: idOf(row.mediaAssetId),
-      mediaUrl: row._mediaUrl || row.fallbackImageUrl || "",
-      posterMediaAssetId: idOf(row.posterMediaAssetId),
-      posterUrl: row._posterUrl || "",
-      audiences:
-        Array.isArray(row.audiences) && row.audiences.length
-          ? row.audiences
-          : ["all"],
-      actionType: row.actionType || "none",
-      actionLabel: row.actionLabel || "",
-      actionValue: row.actionValue || "",
-      displayOrder: Number(row.displayOrder || 0),
-      startAtInput: row.startAt
-        ? new Date(row.startAt).toISOString().slice(0, 16)
-        : "",
-      endAtInput: row.endAt
-        ? new Date(row.endAt).toISOString().slice(0, 16)
-        : "",
-      durationSeconds: Number(row.durationSeconds || 7),
-      autoplay: row.autoplay !== false,
-      loop: row.loop === true,
-      muted: row.muted !== false,
-      transition: row.transition || "fade",
-      status:
-        row.status === "draft" || row.status === "scheduled"
-          ? row.status
-          : "published",
-      active: row.active !== false,
-
-      publishToWebsite: row.publishToWebsite === true,
-      websiteFeatured: row.websiteFeatured === true,
-    });
-  };
-
-  const uploadPortalHighlightPrimary = async (file?: File) => {
-    if (!file || !selectedAccountId) return;
-
-    try {
-      const saved = await savePortalHighlightMedia(file, {
-        accountId: selectedAccountId,
-        schoolId: selectedSchoolId,
-        branchId: selectedBranchId,
-        highlightId: portalHighlightDraft.id,
-        ownerTempKey: portalHighlightDraft.ownerTempKey,
-        replaceExisting: true,
-      });
-
-      setPortalHighlightDraft((current) => ({
-        ...current,
-        mediaType: saved.kind === "video" ? "video" : "image",
-        mediaAssetId: saved.assetId,
-        mediaUrl: saved.previewUrl,
-      }));
-    } catch (error) {
-      showToast(
-        "error",
-        error instanceof Error ? error.message : "Could not save highlight media.",
-      );
-    }
-  };
-
-  const uploadPortalHighlightPosterFile = async (file?: File) => {
-    if (!file || !selectedAccountId) return;
-
-    try {
-      const saved = await savePortalHighlightPoster(file, {
-        accountId: selectedAccountId,
-        schoolId: selectedSchoolId,
-        branchId: selectedBranchId,
-        highlightId: portalHighlightDraft.id,
-        ownerTempKey: portalHighlightDraft.ownerTempKey,
-        replaceExisting: true,
-      });
-
-      setPortalHighlightDraft((current) => ({
-        ...current,
-        posterMediaAssetId: saved.assetId,
-        posterUrl: saved.previewUrl,
-      }));
-    } catch (error) {
-      showToast(
-        "error",
-        error instanceof Error ? error.message : "Could not save video poster.",
-      );
-    }
-  };
-
-  const savePortalHighlight = async () => {
-    if (
-      !selectedAccountId ||
-      !selectedSchoolId ||
-      !selectedBranchId ||
-      !portalHighlightDraft.title.trim()
-    ) {
-      showToast("error", `Add a title before saving the ${portalHighlightDraft.placement === "gallery" ? "gallery item" : "Portal Highlight"}.`);
-      return;
-    }
-
-    if (!portalHighlightDraft.mediaAssetId && !portalHighlightDraft.mediaUrl) {
-      showToast("error", `Select an image or video for this ${portalHighlightDraft.placement === "gallery" ? "gallery item" : "Portal Highlight"}.`);
-      return;
-    }
-
-    setSavingPortalHighlight(true);
-
-    try {
-      const payload: PortalHighlightRow = {
-        accountId: selectedAccountId,
-        schoolId: selectedSchoolId,
-        branchId: selectedBranchId,
-        title: portalHighlightDraft.title.trim(),
-        subtitle: portalHighlightDraft.subtitle.trim() || null,
-        description: portalHighlightDraft.description.trim() || null,
-        mediaType: portalHighlightDraft.mediaType,
-        placement: portalHighlightDraft.placement,
-        mediaAssetId: portalHighlightDraft.mediaAssetId || null,
-        posterMediaAssetId:
-          portalHighlightDraft.posterMediaAssetId || null,
-        fallbackImageUrl:
-          portalHighlightDraft.mediaType === "image"
-            ? portalHighlightDraft.mediaUrl || null
-            : portalHighlightDraft.posterUrl || null,
-        audiences: portalHighlightDraft.audiences.length
-          ? portalHighlightDraft.audiences
-          : ["all"],
-        actionType: portalHighlightDraft.actionType,
-        actionLabel: portalHighlightDraft.actionLabel.trim() || null,
-        actionValue: portalHighlightDraft.actionValue.trim() || null,
-        displayOrder: portalHighlightDraft.displayOrder,
-        startAt: portalHighlightDraft.startAtInput
-          ? new Date(portalHighlightDraft.startAtInput).getTime()
-          : null,
-        endAt: portalHighlightDraft.endAtInput
-          ? new Date(portalHighlightDraft.endAtInput).getTime()
-          : null,
-        durationSeconds: Math.max(
-          3,
-          Math.min(30, portalHighlightDraft.durationSeconds || 7),
-        ),
-        autoplay: portalHighlightDraft.autoplay,
-        loop: portalHighlightDraft.loop,
-        muted: true,
-        transition: portalHighlightDraft.transition,
-        status: portalHighlightDraft.status,
-        active: portalHighlightDraft.active,
-        publishedAt:
-          portalHighlightDraft.status === "published"
-            ? Date.now()
-            : null,
-
-        publishToWebsite: portalHighlightDraft.publishToWebsite,
-        websitePublicationStatus: portalHighlightDraft.publishToWebsite
-          ? portalHighlightDraft.status
-          : "hidden",
-        websiteFeatured: portalHighlightDraft.websiteFeatured,
-        websiteDisplayOrder: portalHighlightDraft.displayOrder,
-        websiteStartAt: portalHighlightDraft.startAtInput
-          ? new Date(portalHighlightDraft.startAtInput).getTime()
-          : null,
-        websiteEndAt: portalHighlightDraft.endAtInput
-          ? new Date(portalHighlightDraft.endAtInput).getTime()
-          : null,
-        websitePublishedAt:
-          portalHighlightDraft.publishToWebsite &&
-          portalHighlightDraft.status === "published"
-            ? Date.now()
-            : null,
-      };
-
-      let savedId = portalHighlightDraft.id || "";
-
-      if (savedId) {
-        await updateLocal(
-          "portalHighlights" as any,
-          savedId,
-          payload as any,
-        );
-      } else {
-        const created = await createLocal(
-          "portalHighlights" as any,
-          payload as any,
-        );
-        savedId = idOf(
-          typeof created === "string" || typeof created === "number"
-            ? created
-            : (created as any)?.id,
-        );
-      }
-
-      if (!savedId) throw new Error("Could not create the Portal Highlight.");
-
-      await commitPortalHighlightMedia({
-        accountId: selectedAccountId,
-        highlightId: savedId,
-        ownerTempKey: portalHighlightDraft.ownerTempKey,
-        mediaAssetId: portalHighlightDraft.mediaAssetId,
-        posterMediaAssetId: portalHighlightDraft.posterMediaAssetId,
-      });
-
-      setPortalHighlightDraft({
-        ...newPortalHighlightDraft(),
-        placement: portalHighlightDraft.placement,
-      });
-      await loadPortalHighlights();
-      showToast("success", portalHighlightDraft.placement === "gallery" ? "Gallery item saved." : "Portal Highlight saved.");
-    } catch (error) {
-      showToast(
-        "error",
-        error instanceof Error ? error.message : "Could not save Portal Highlight.",
-      );
-    } finally {
-      setSavingPortalHighlight(false);
-    }
-  };
-
-  const removePortalHighlight = async (row: PortalHighlightRow) => {
-    const highlightId = idOf(row.id);
-    if (!highlightId || !window.confirm(`Remove “${row.title}”?`)) return;
-
-    setSavingPortalHighlight(true);
-    try {
-      await softDeletePortalHighlightMedia({
-        accountId: selectedAccountId || undefined,
-        highlightId,
-      });
-      await softDeleteLocal("portalHighlights" as any, highlightId);
-      await loadPortalHighlights();
-      if (sameId(portalHighlightDraft.id, highlightId)) {
-        setPortalHighlightDraft({
-          ...newPortalHighlightDraft(),
-          placement: portalHighlightDraft.placement,
-        });
-      }
-      showToast("success", row.placement === "gallery" ? "Gallery item removed." : "Portal Highlight removed.");
-    } catch (error) {
-      showToast(
-        "error",
-        error instanceof Error ? error.message : "Could not remove Portal Highlight.",
-      );
-    } finally {
-      setSavingPortalHighlight(false);
-    }
-  };
-
   // ======================================================
   // PREVIEW
   // ======================================================
-
-  useEffect(() => {
-    if (sectionOpen === "portalHighlights") {
-      setPortalHighlightDraft((current) =>
-        current.id || current.placement === "hero"
-          ? current
-          : { ...newPortalHighlightDraft(), placement: "hero" },
-      );
-    }
-
-    if (sectionOpen === "gallery") {
-      setPortalHighlightDraft((current) =>
-        current.id || current.placement === "gallery"
-          ? current
-          : { ...newPortalHighlightDraft(), placement: "gallery" },
-      );
-    }
-  }, [sectionOpen]);
 
   const previewStyle: React.CSSProperties = {
     background:
@@ -4778,14 +4625,6 @@ export default function Branchsettings() {
             : "gray",
       },
       {
-        key: "portalHighlights" as SettingsSection,
-        icon: "🎞️",
-        title: "Portal Highlights",
-        subtitle: `${portalHighlights.filter((row) => row.active !== false && row.placement !== "gallery").length} active slide(s)`,
-        detail: "Rotating image and short-video stories for dashboard heroes",
-        tone: portalHighlights.length ? "green" : "gray",
-      },
-      {
         key: "reportMedia" as SettingsSection,
         icon: "📄",
         title: "Report Branding",
@@ -4841,15 +4680,9 @@ export default function Branchsettings() {
         key: "gallery" as SettingsSection,
         icon: "🌄",
         title: "Gallery",
-        subtitle: `${
-          portalHighlights.filter(
-            (row) => row.active !== false && row.placement === "gallery",
-          ).length
-        } active item(s)`,
-        detail: "Record-based image and video gallery using the Portal Highlights workflow",
-        tone: portalHighlights.some((row) => row.placement === "gallery")
-          ? "green"
-          : "gray",
+        subtitle: `${form.schoolGalleryMediaIds.length} image(s)`,
+        detail: "Branch experience images",
+        tone: form.schoolGalleryMediaIds.length ? "green" : "gray",
       },
     ];
 
@@ -5174,25 +5007,6 @@ export default function Branchsettings() {
         />
       )}
 
-      {sectionOpen === "portalHighlights" && (
-        <PortalHighlightsSheet
-          title="Portal Highlights"
-          description="The saved Dashboard Hero Image remains the first slide. These highlights follow it as rotating image or short-video slides."
-          entityLabel="Highlight"
-          emptyText="No Portal Highlights yet."
-          rows={portalHighlights.filter((row) => row.placement !== "gallery")}
-          draft={portalHighlightDraft}
-          saving={savingPortalHighlight}
-          setDraft={setPortalHighlightDraft}
-          editRow={(row) => editPortalHighlight(row, "hero")}
-          uploadPrimary={uploadPortalHighlightPrimary}
-          uploadPoster={uploadPortalHighlightPosterFile}
-          saveRow={savePortalHighlight}
-          removeRow={removePortalHighlight}
-          onClose={() => setSectionOpen(null)}
-        />
-      )}
-
       {sectionOpen === "reportMedia" && (
         <MediaSheet
           title="Report Card Branding"
@@ -5294,20 +5108,13 @@ export default function Branchsettings() {
       )}
 
       {sectionOpen === "gallery" && (
-        <PortalHighlightsSheet
-          title="Gallery"
-          description="Gallery items use the same record-based workflow as Portal Highlights: image or video media, ordering, scheduling, visibility, actions and persistent removal."
-          entityLabel="Gallery Item"
-          emptyText="No gallery items yet."
-          rows={portalHighlights.filter((row) => row.placement === "gallery")}
-          draft={portalHighlightDraft}
-          saving={savingPortalHighlight}
-          setDraft={setPortalHighlightDraft}
-          editRow={(row) => editPortalHighlight(row, "gallery")}
-          uploadPrimary={uploadPortalHighlightPrimary}
-          uploadPoster={uploadPortalHighlightPosterFile}
-          saveRow={savePortalHighlight}
-          removeRow={removePortalHighlight}
+        <GallerySheet
+          items={galleryItems}
+          saving={savingSettings}
+          handleGalleryUpload={handleGalleryUpload}
+          removeGalleryImage={removeGalleryImage}
+          refreshGalleryPreviews={refreshGalleryPreviews}
+          saveGallery={saveSchoolBranchSettings}
           onClose={() => setSectionOpen(null)}
         />
       )}
@@ -5651,12 +5458,6 @@ function MoreSheet({
       icon: "🖼️",
       label: "Dashboard Media",
       note: "Portal and dashboard images",
-    },
-    {
-      key: "portalHighlights",
-      icon: "🎞️",
-      label: "Portal Highlights",
-      note: "Rotating dashboard images and short videos",
     },
     {
       key: "reportMedia",
@@ -7682,336 +7483,6 @@ function ReportTemplateSheet({
   );
 }
 
-function PortalHighlightsSheet({
-  title,
-  description,
-  entityLabel,
-  emptyText,
-  rows,
-  draft,
-  saving,
-  setDraft,
-  editRow,
-  uploadPrimary,
-  uploadPoster,
-  saveRow,
-  removeRow,
-  onClose,
-}: {
-  title: string;
-  description: string;
-  entityLabel: string;
-  emptyText: string;
-  rows: PortalHighlightRow[];
-  draft: PortalHighlightDraft;
-  saving: boolean;
-  setDraft: React.Dispatch<React.SetStateAction<PortalHighlightDraft>>;
-  editRow: (row?: PortalHighlightRow | null) => void;
-  uploadPrimary: (file?: File) => void | Promise<void>;
-  uploadPoster: (file?: File) => void | Promise<void>;
-  saveRow: () => void | Promise<void>;
-  removeRow: (row: PortalHighlightRow) => void | Promise<void>;
-  onClose: () => void;
-}) {
-  const audienceOptions: Array<[PortalAudience, string]> = [
-    ["all", "All portals"],
-    ["branch_admin", "Branch Admin"],
-    ["admin", "School Admin"],
-    ["teacher", "Teachers"],
-    ["student", "Students"],
-    ["parent", "Parents"],
-    ["accountant", "Accountants"],
-  ];
-
-  const toggleAudience = (audience: PortalAudience) => {
-    setDraft((current) => {
-      if (audience === "all") {
-        return { ...current, audiences: ["all"] };
-      }
-
-      const withoutAll = current.audiences.filter((item) => item !== "all");
-      const exists = withoutAll.includes(audience);
-      const audiences = exists
-        ? withoutAll.filter((item) => item !== audience)
-        : [...withoutAll, audience];
-
-      return { ...current, audiences: audiences.length ? audiences : ["all"] };
-    });
-  };
-
-  return (
-    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className="ba-sheet portal-highlight-sheet">
-        <div className="ba-sheet-head">
-          <div>
-            <h2>{title}</h2>
-            <p>{description}</p>
-          </div>
-          <button type="button" onClick={onClose}>✕</button>
-        </div>
-
-        <div className="portal-highlight-layout">
-          <div className="portal-highlight-list">
-            <div className="portal-highlight-list-head">
-              <b>Saved {title.toLowerCase()}</b>
-              <button type="button" onClick={() => editRow(null)}>＋ New</button>
-            </div>
-
-            {rows.length ? rows.map((row) => (
-              <article key={row.id || row.title} className="portal-highlight-row">
-                <div className="portal-highlight-thumb">
-                  {row.mediaType === "video" ? (
-                    row._posterUrl || row.fallbackImageUrl ? (
-                      <img src={row._posterUrl || row.fallbackImageUrl || ""} alt="" />
-                    ) : <span>▶</span>
-                  ) : row._mediaUrl || row.fallbackImageUrl ? (
-                    <img src={row._mediaUrl || row.fallbackImageUrl || ""} alt="" />
-                  ) : <span>🖼️</span>}
-                </div>
-                <div>
-                  <b>{row.title}</b>
-                  <small>
-                    {row.mediaType} · {(row.audiences || ["all"]).join(", ")}
-                  </small>
-                </div>
-                <div className="portal-highlight-row-actions">
-                  <button type="button" onClick={() => editRow(row)}>Edit</button>
-                  <button type="button" onClick={() => removeRow(row)}>×</button>
-                </div>
-              </article>
-            )) : (
-              <div className="branch-media-empty">{emptyText}</div>
-            )}
-          </div>
-
-          <div className="portal-highlight-editor">
-            <div className="ba-field-grid">
-              <Field label="Title">
-                <input
-                  value={draft.title}
-                  onChange={(event) => setDraft((current) => ({...current, title:event.target.value}))}
-                  placeholder="Science Fair Week"
-                />
-              </Field>
-              <Field label="Subtitle">
-                <input
-                  value={draft.subtitle}
-                  onChange={(event) => setDraft((current) => ({...current, subtitle:event.target.value}))}
-                  placeholder="Celebrating young innovators"
-                />
-              </Field>
-              <Field label="Display Order">
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.displayOrder}
-                  onChange={(event) => setDraft((current) => ({...current, displayOrder:Number(event.target.value || 0)}))}
-                />
-              </Field>
-              <Field label="Slide Duration">
-                <select
-                  value={draft.durationSeconds}
-                  onChange={(event) => setDraft((current) => ({...current, durationSeconds:Number(event.target.value)}))}
-                >
-                  {[5,7,10,15,20].map((value) => (
-                    <option key={value} value={value}>{value} seconds</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Status">
-                <select
-                  value={draft.status}
-                  onChange={(event) => setDraft((current) => ({...current, status:event.target.value as PortalHighlightDraft["status"]}))}
-                >
-                  <option value="published">Published</option>
-                  <option value="scheduled">Scheduled</option>
-                  <option value="draft">Draft</option>
-                </select>
-              </Field>
-              <Field label="Transition">
-                <select
-                  value={draft.transition}
-                  onChange={(event) => setDraft((current) => ({...current, transition:event.target.value as "fade" | "slide"}))}
-                >
-                  <option value="fade">Fade</option>
-                  <option value="slide">Slide</option>
-                </select>
-              </Field>
-              <Field label="Starts At">
-                <input
-                  type="datetime-local"
-                  value={draft.startAtInput}
-                  onChange={(event) => setDraft((current) => ({...current, startAtInput:event.target.value}))}
-                />
-              </Field>
-              <Field label="Ends At">
-                <input
-                  type="datetime-local"
-                  value={draft.endAtInput}
-                  onChange={(event) => setDraft((current) => ({...current, endAtInput:event.target.value}))}
-                />
-              </Field>
-            </div>
-
-            <Field label="Description">
-              <textarea
-                value={draft.description}
-                onChange={(event) => setDraft((current) => ({...current, description:event.target.value}))}
-                placeholder="Optional short message shown with this highlight."
-              />
-            </Field>
-
-            <div className="portal-highlight-media-grid">
-              <label className="portal-upload-card">
-                <b>Image or short video</b>
-                <small>Images or MP4/WebM video. Keep hero videos short and compressed.</small>
-                {draft.mediaUrl ? (
-                  draft.mediaType === "video" ? (
-                    <video src={draft.mediaUrl} poster={draft.posterUrl || undefined} muted controls playsInline />
-                  ) : (
-                    <img src={draft.mediaUrl} alt="Highlight preview" />
-                  )
-                ) : <span className="portal-upload-empty">＋ Select media</span>}
-                <input
-                  type="file"
-                  accept="image/*,video/mp4,video/webm,video/quicktime"
-                  onChange={async (event) => {
-                    const input = event.currentTarget;
-                    await uploadPrimary(input.files?.[0]);
-                    input.value = "";
-                  }}
-                />
-              </label>
-
-              {draft.mediaType === "video" ? (
-                <label className="portal-upload-card">
-                  <b>Video poster</b>
-                  <small>Still image shown before the video loads or when motion is reduced.</small>
-                  {draft.posterUrl ? (
-                    <img src={draft.posterUrl} alt="Video poster" />
-                  ) : <span className="portal-upload-empty">＋ Select poster</span>}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={async (event) => {
-                      const input = event.currentTarget;
-                      await uploadPoster(input.files?.[0]);
-                      input.value = "";
-                    }}
-                  />
-                </label>
-              ) : null}
-            </div>
-
-            <div className="portal-audiences">
-              <b>Show on</b>
-              <div>
-                {audienceOptions.map(([value, label]) => (
-                  <label key={value}>
-                    <input
-                      type="checkbox"
-                      checked={draft.audiences.includes(value)}
-                      onChange={() => toggleAudience(value)}
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div className="portal-website-publishing">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={draft.publishToWebsite}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      publishToWebsite: event.target.checked,
-                    }))
-                  }
-                />
-                <span>
-                  <b>Publish to school website</b>
-                  <small>
-                    Also expose this {draft.placement === "gallery" ? "gallery item" : "highlight"} to source-driven website sections.
-                  </small>
-                </span>
-              </label>
-
-              {draft.publishToWebsite ? (
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={draft.websiteFeatured}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        websiteFeatured: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span>
-                    <b>Feature on website</b>
-                    <small>
-                      Allow website templates to prioritize this item in featured layouts.
-                    </small>
-                  </span>
-                </label>
-              ) : null}
-            </div>
-
-            <div className="ba-field-grid">
-              <Field label="Action">
-                <select
-                  value={draft.actionType}
-                  onChange={(event) => setDraft((current) => ({...current, actionType:event.target.value as PortalHighlightDraft["actionType"]}))}
-                >
-                  <option value="none">No action</option>
-                  <option value="portal_route">Open portal module</option>
-                  <option value="external_url">External link</option>
-                  <option value="announcement">Announcement</option>
-                  <option value="calendar_event">Calendar event</option>
-                </select>
-              </Field>
-              <Field label="Action Label">
-                <input
-                  value={draft.actionLabel}
-                  onChange={(event) => setDraft((current) => ({...current, actionLabel:event.target.value}))}
-                  placeholder="Learn more"
-                />
-              </Field>
-              <Field label="Action Value">
-                <input
-                  value={draft.actionValue}
-                  onChange={(event) => setDraft((current) => ({...current, actionValue:event.target.value}))}
-                  placeholder="announcements or https://..."
-                />
-              </Field>
-              <Field label="Visibility">
-                <select
-                  value={draft.active ? "active" : "hidden"}
-                  onChange={(event) => setDraft((current) => ({...current, active:event.target.value === "active"}))}
-                >
-                  <option value="active">Active</option>
-                  <option value="hidden">Hidden</option>
-                </select>
-              </Field>
-            </div>
-          </div>
-        </div>
-
-        <div className="ba-sheet-actions">
-          <button type="button" onClick={() => editRow(null)} disabled={saving}>Clear</button>
-          <button type="button" className="primary" onClick={() => void saveRow()} disabled={saving}>
-            {saving ? "Saving..." : draft.id ? `Update ${entityLabel}` : `Add ${entityLabel}`}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
 function MediaSheet({
   title,
   text,
@@ -8067,6 +7538,119 @@ function MediaSheet({
     </div>
   );
 }
+
+function GallerySheet({
+  items,
+  saving,
+  handleGalleryUpload,
+  removeGalleryImage,
+  refreshGalleryPreviews,
+  saveGallery,
+  onClose,
+}: {
+  items: Array<{ assetId: string; url: string }>;
+  saving: boolean;
+  handleGalleryUpload: (files: FileList | null) => void | Promise<void>;
+  removeGalleryImage: (assetId: string) => void;
+  refreshGalleryPreviews: () => void | Promise<void>;
+  saveGallery: (options?: boolean | SaveOptions) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  return (
+    <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
+      <section className="ba-sheet">
+        <div className="ba-sheet-head">
+          <div>
+            <h2>Gallery</h2>
+            <p>
+              Add multiple branch images. Each image is compressed, stored as
+              its own media asset, and committed only when you save.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close gallery">
+            ✕
+          </button>
+        </div>
+
+        <div className="branch-media-block">
+          <div className="branch-media-title">Gallery Images</div>
+          <p>
+            Select one or many images. Existing images remain until you remove
+            them and save the gallery.
+          </p>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            disabled={saving}
+            onChange={async (event) => {
+              const input = event.currentTarget;
+              await handleGalleryUpload(input.files);
+              input.value = "";
+            }}
+          />
+        </div>
+
+        {items.length ? (
+          <div className="branch-gallery-grid">
+            {items.map((item, index) => (
+              <div key={item.assetId} className="branch-gallery-item">
+                {item.url ? (
+                  <img
+                    src={item.url}
+                    alt={`Gallery ${index + 1}`}
+                    loading="lazy"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="branch-media-empty"
+                    onClick={() => void refreshGalleryPreviews()}
+                  >
+                    Preview unavailable — tap to retry
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => removeGalleryImage(item.assetId)}
+                  aria-label={`Remove gallery image ${index + 1}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="branch-media-empty">
+            No gallery images have been added.
+          </div>
+        )}
+
+        <div className="ba-sheet-actions">
+          <button type="button" onClick={onClose} disabled={saving}>
+            Close
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={saving}
+            onClick={async () => {
+              const saved = await saveGallery();
+              if (saved) onClose();
+            }}
+          >
+            {saving ? "Saving..." : "Save Gallery"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// ======================================================
+// CSS
+// ======================================================
 
 const css = `
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -10264,31 +9848,4 @@ const css = `
 }
 
 
-
-.portal-highlight-sheet{width:min(980px,100%);max-height:min(94dvh,900px);overflow:auto}
-.portal-highlight-layout{display:grid;gap:12px}
-.portal-highlight-list,.portal-highlight-editor{padding:12px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:20px;background:color-mix(in srgb,var(--muted,#64748b) 4%,transparent)}
-.portal-highlight-list-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}
-.portal-highlight-list-head button,.portal-highlight-row-actions button{border:1px solid var(--border,rgba(0,0,0,.1));border-radius:999px;background:var(--surface,#fff);color:inherit;padding:6px 9px;font-size:11px;font-weight:900}
-.portal-highlight-row{display:grid;grid-template-columns:64px minmax(0,1fr) auto;align-items:center;gap:9px;padding:8px;border-radius:16px;background:var(--surface,#fff);border:1px solid var(--border,rgba(0,0,0,.08));margin-top:7px}
-.portal-highlight-thumb{width:64px;height:46px;border-radius:12px;overflow:hidden;display:grid;place-items:center;background:#0f172a;color:#fff}
-.portal-highlight-thumb img{width:100%;height:100%;object-fit:cover}
-.portal-highlight-row b,.portal-highlight-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.portal-highlight-row b{font-size:12px}.portal-highlight-row small{margin-top:3px;color:var(--muted,#64748b);font-size:9px}
-.portal-highlight-row-actions{display:flex;gap:5px}
-.portal-highlight-media-grid{display:grid;gap:10px;margin-top:10px}
-.portal-upload-card{position:relative;display:grid;gap:7px;padding:11px;border:1px dashed color-mix(in srgb,var(--ba-primary) 45%,var(--border,rgba(0,0,0,.1)));border-radius:18px;background:color-mix(in srgb,var(--ba-primary) 5%,transparent);cursor:pointer;overflow:hidden}
-.portal-upload-card small{color:var(--muted,#64748b);font-size:10px;line-height:1.5}
-.portal-upload-card img,.portal-upload-card video{width:100%;height:170px;object-fit:cover;border-radius:14px;background:#0f172a}
-.portal-upload-card input{position:absolute;inset:0;opacity:0;cursor:pointer}
-.portal-upload-empty{min-height:110px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);font-size:12px;font-weight:900}
-.portal-audiences{margin-top:12px}.portal-audiences>b{display:block;font-size:11px;margin-bottom:7px}.portal-audiences>div{display:flex;flex-wrap:wrap;gap:7px}
-.portal-audiences label{display:flex;align-items:center;gap:6px;padding:7px 9px;border-radius:999px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);font-size:10px;font-weight:850}
-.portal-website-publishing{display:grid;gap:7px;margin:12px 0;padding:10px;border:1px solid color-mix(in srgb,var(--ba-primary) 22%,var(--border,rgba(0,0,0,.1)));border-radius:17px;background:color-mix(in srgb,var(--ba-primary) 5%,transparent)}
-.portal-website-publishing label{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:8px;cursor:pointer}
-.portal-website-publishing input{margin-top:2px}
-.portal-website-publishing b,.portal-website-publishing small{display:block}
-.portal-website-publishing b{font-size:11px}
-.portal-website-publishing small{margin-top:2px;color:var(--muted,#64748b);font-size:9px;line-height:1.45}
-@media(min-width:820px){.portal-highlight-layout{grid-template-columns:320px minmax(0,1fr)}.portal-highlight-media-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 `;

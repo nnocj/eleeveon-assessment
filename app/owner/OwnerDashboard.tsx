@@ -3,7 +3,7 @@
 /**
  * app/owner/OwnerDashboard.tsx
  * ---------------------------------------------------------
- * ELEEVEON OWNER DASHBOARD V5 — ACCOUNT-WIDE HOME
+ * ELEEVEON OWNER DASHBOARD V4
  * ---------------------------------------------------------
  * Golden Standard Owner Home.
  * Account-scoped, offline-first, mobile-first, theme-safe.
@@ -30,7 +30,7 @@ import { useRouter } from "next/navigation";
 
 import { useAccount } from "../context/account-context";
 import { useSettings } from "../context/settings-context";
-import { db } from "../lib/db";
+import { db } from "../lib/db/db";
 import type { RoleNavSection } from "../components/role-portals/RolePortalShell";
 
 type AnyRow = Record<string, any>;
@@ -659,12 +659,6 @@ export default function OwnerDashboardPage({
       calendarItems: 0,
       ownerName: selectedOwnerName({ openWorkspace, user, account }),
       ownerRole: selectedOwnerRole({ openWorkspace, user }),
-      accountName: text(
-        account?.name ||
-          account?.accountName ||
-          user?.accountName,
-        "Eleeveon Account",
-      ),
     };
   }, [rows, openWorkspace, user, account]);
 
@@ -788,43 +782,6 @@ export default function OwnerDashboardPage({
     );
   }
 
-  const q = query.trim().toLowerCase();
-  const searchResults = q ? filteredModules.slice(0, 12) : [];
-
-  const quickActions = [
-    ["schools", "🏫", "Schools"],
-    ["branches", "🏢", "Branches"],
-    ["users", "👥", "Users"],
-    ["billing", "💳", "Billing"],
-    ["sync", "☁️", "Sync"],
-  ] as const;
-
-  const latestSchools = (rows.schools || [])
-    .filter(activeRow)
-    .sort(
-      (a, b) =>
-        n(b.updatedAt || b.createdAt) -
-        n(a.updatedAt || a.createdAt),
-    )
-    .slice(0, 4);
-
-  const latestInvoices = (rows.invoices || [])
-    .filter(activeRow)
-    .sort(
-      (a, b) =>
-        n(b.updatedAt || b.createdAt || b.dueDate) -
-        n(a.updatedAt || a.createdAt || a.dueDate),
-    )
-    .slice(0, 4);
-
-  const greetingHour = new Date().getHours();
-  const greeting =
-    greetingHour < 12
-      ? "Good morning"
-      : greetingHour < 17
-        ? "Good afternoon"
-        : "Good evening";
-
   return (
     <main
       className="od-page"
@@ -837,13 +794,7 @@ export default function OwnerDashboardPage({
         aria-label="Owner dashboard search and actions"
       >
         <span
-          className={`status-dot-mini ${
-            summary.openConflicts
-              ? "orange"
-              : summary.schools
-                ? "green"
-                : "gray"
-          }`}
+          className={`status-dot-mini ${summary.openConflicts ? "orange" : summary.schools ? "green" : "gray"}`}
           title={`${summary.schools} school(s), ${summary.openConflicts} conflict(s)`}
         />
 
@@ -857,17 +808,6 @@ export default function OwnerDashboardPage({
           />
         </label>
 
-        {query ? (
-          <button
-            type="button"
-            className="od-clear"
-            onClick={() => setQuery("")}
-            aria-label="Clear search"
-          >
-            ×
-          </button>
-        ) : null}
-
         <button
           type="button"
           className="od-add-inline"
@@ -880,6 +820,17 @@ export default function OwnerDashboardPage({
 
         <button
           type="button"
+          className={`od-filter-button ${activeFilterCount ? "active" : ""}`}
+          onClick={() => setFilterOpen(true)}
+          aria-label="Open filters"
+          title="Filters"
+        >
+          <SliderIcon />
+          {activeFilterCount ? <b>{activeFilterCount}</b> : null}
+        </button>
+
+        <button
+          type="button"
           className="od-icon-button"
           onClick={() => setMoreOpen(true)}
           aria-label="More options"
@@ -888,21 +839,40 @@ export default function OwnerDashboardPage({
         </button>
       </section>
 
-      {q ? (
-        <section className="od-search-results">
-          <div className="od-section-head">
-            <div>
-              <span>Search results</span>
-              <h2>
-                {searchResults.length
-                  ? `Matching “${query.trim()}”`
-                  : "No matches found"}
-              </h2>
-            </div>
-            <b>{searchResults.length}</b>
-          </div>
+      <section className="od-owner-strip" aria-label="Selected owner workspace">
+        <strong>{summary.ownerName}</strong>
+        <span>{summary.ownerRole} · Account-wide</span>
+        <Chip tone={summary.subscriptionStatus === "Not set" ? "gray" : statusTone(summary.subscriptionStatus)}>
+          {summary.subscriptionStatus}
+        </Chip>
+      </section>
 
-          {searchResults.map((item) => (
+      {(area !== "all" || query.trim()) && (
+        <section className="od-filter-chips" aria-label="Active filters">
+          {area !== "all" && (
+            <button type="button" onClick={() => setArea("all")}>
+              Area: {areaLabel(area)} ×
+            </button>
+          )}
+          {query.trim() && (
+            <button type="button" onClick={() => setQuery("")}>
+              Search: {query.trim()} ×
+            </button>
+          )}
+        </section>
+      )}
+
+      {view === "analytics" ? (
+        <AnalyticsView summary={summary} modules={modules} recent={recent} />
+      ) : null}
+
+      {view === "table" ? (
+        <TableView modules={filteredModules} openRoute={openRoute} />
+      ) : null}
+
+      {view === "cards" ? (
+        <section className="od-list">
+          {filteredModules.map((item) => (
             <button
               key={item.key}
               type="button"
@@ -922,330 +892,45 @@ export default function OwnerDashboardPage({
             </button>
           ))}
 
-          {!searchResults.length ? (
+          {!filteredModules.length ? (
             <Empty
-              title="Nothing matches that search"
-              text="Try schools, branches, users, billing, subscription, invoices, payments, sync or messages."
+              title="No matching owner modules"
+              text="Clear filters or search to show your owner modules."
             />
           ) : null}
         </section>
-      ) : (
-        <>
-          <section className="od-account-hero">
-            <div className="od-account-orb one" />
-            <div className="od-account-orb two" />
+      ) : null}
 
-            <div className="od-hero-copy">
-              <span>{greeting}</span>
-              <h1>{summary.ownerName}</h1>
-              <p>
-                Owner of <strong>{summary.accountName}</strong>
-                <small>Account-wide control centre</small>
-              </p>
-              <blockquote>
-                Manage every school, branch, user and subscription from one place.
-              </blockquote>
-            </div>
-
-            <div className="od-hero-stats">
-              <span>
-                <b>{summary.schools}</b> Schools
-              </span>
-              <span>
-                <b>{summary.branches}</b> Branches
-              </span>
-              <span>
-                <b>{summary.users}</b> Users
-              </span>
-              <span>
-                <b>{summary.planName}</b> Plan
-              </span>
-            </div>
-          </section>
-
-          <section className="od-quick-actions" aria-label="Quick actions">
-            {quickActions.map(([route, icon, label]) => (
-              <button
-                key={route}
-                type="button"
-                onClick={() => openRoute(route)}
+      {recent.length ? (
+        <section className="od-recent">
+          <div className="od-section-head">
+            <h2>Recent Activity</h2>
+            <span>{recent.length}</span>
+          </div>
+          <div className="od-recent-list">
+            {recent.map((item, index) => (
+              <article
+                key={`${item._kind}-${idOf(item) || index}`}
+                className="recent-row"
               >
-                <span>{icon}</span>
-                <b>{label}</b>
-              </button>
+                <span>{item._icon}</span>
+                <b>{item._title}</b>
+                <small>
+                  {item._kind} · {dateLabel(item._date)}
+                </small>
+              </article>
             ))}
-          </section>
+          </div>
+        </section>
+      ) : null}
 
-          <section className="od-dashboard-grid">
-            <article className="od-card od-network-card">
-              <div className="od-section-head">
-                <div>
-                  <span>Institution network</span>
-                  <h2>Schools & branches</h2>
-                </div>
-                <button onClick={() => openRoute("schools")}>
-                  Manage
-                </button>
-              </div>
-
-              <div className="od-network-main">
-                <strong>{summary.schools}</strong>
-                <span>schools across {summary.branches} branches</span>
-              </div>
-
-              <div className="od-network-meta">
-                <div>
-                  <b>{summary.branches}</b>
-                  <small>Branches</small>
-                </div>
-                <div>
-                  <b>{summary.users}</b>
-                  <small>Users</small>
-                </div>
-                <div>
-                  <b>{summary.memberships}</b>
-                  <small>Memberships</small>
-                </div>
-              </div>
-            </article>
-
-            <article className="od-card">
-              <div className="od-section-head">
-                <div>
-                  <span>Recent institutions</span>
-                  <h2>Schools</h2>
-                </div>
-                <button onClick={() => openRoute("schools")}>
-                  View all
-                </button>
-              </div>
-
-              <div className="od-stack">
-                {latestSchools.length ? (
-                  latestSchools.map((school, index) => {
-                    const schoolId = idOf(school);
-                    const branchCount = (rows.branches || []).filter(
-                      (branch) =>
-                        activeRow(branch) &&
-                        String(branch.schoolId) === String(schoolId),
-                    ).length;
-
-                    return (
-                      <button
-                        key={String(schoolId || index)}
-                        className="od-school-row"
-                        onClick={() => openRoute("schools")}
-                      >
-                        <span>🏫</span>
-                        <div>
-                          <b>{rowName(school)}</b>
-                          <small>{branchCount} branch(es)</small>
-                        </div>
-                        <Chip tone={activeRow(school) ? "green" : "gray"}>
-                          {activeRow(school) ? "Active" : "Inactive"}
-                        </Chip>
-                      </button>
-                    );
-                  })
-                ) : (
-                  <MiniEmpty
-                    icon="🏫"
-                    text="No schools have been added to this account."
-                  />
-                )}
-              </div>
-            </article>
-
-            <article className="od-card od-billing-card">
-              <div className="od-section-head">
-                <div>
-                  <span>Account billing</span>
-                  <h2>Subscription</h2>
-                </div>
-                <button onClick={() => openRoute("subscription")}>
-                  Open
-                </button>
-              </div>
-
-              <div className="od-plan-main">
-                <strong>{summary.planName}</strong>
-                <Chip tone={statusTone(summary.subscriptionStatus)}>
-                  {summary.subscriptionStatus}
-                </Chip>
-              </div>
-
-              <div className="od-billing-total">
-                <b>{money(summary.totalPaid, summary.currency)}</b>
-                <small>confirmed payments</small>
-              </div>
-
-              <div className="od-network-meta">
-                <div>
-                  <b>{summary.invoices}</b>
-                  <small>Invoices</small>
-                </div>
-                <div>
-                  <b>{summary.payments}</b>
-                  <small>Payments</small>
-                </div>
-                <div>
-                  <b>{money(summary.totalInvoice, summary.currency)}</b>
-                  <small>Invoiced</small>
-                </div>
-              </div>
-            </article>
-
-            <article className="od-card">
-              <div className="od-section-head">
-                <div>
-                  <span>Billing activity</span>
-                  <h2>Latest invoices</h2>
-                </div>
-                <button onClick={() => openRoute("invoices")}>
-                  View all
-                </button>
-              </div>
-
-              <div className="od-stack">
-                {latestInvoices.length ? (
-                  latestInvoices.map((invoice, index) => (
-                    <button
-                      key={String(idOf(invoice) || index)}
-                      className="od-invoice-row"
-                      onClick={() => openRoute("invoices")}
-                    >
-                      <span>🧾</span>
-                      <div>
-                        <b>
-                          {text(
-                            invoice.invoiceNumber || invoice.reference,
-                            "Invoice",
-                          )}
-                        </b>
-                        <small>
-                          {dateLabel(
-                            invoice.dueDate ||
-                              invoice.updatedAt ||
-                              invoice.createdAt,
-                          )}
-                        </small>
-                      </div>
-                      <Chip tone={statusTone(invoice.status)}>
-                        {text(invoice.status, "Draft")}
-                      </Chip>
-                    </button>
-                  ))
-                ) : (
-                  <MiniEmpty
-                    icon="🧾"
-                    text="No billing invoices are available."
-                  />
-                )}
-              </div>
-            </article>
-
-            <article className="od-card od-health-card">
-              <div className="od-section-head">
-                <div>
-                  <span>System health</span>
-                  <h2>Sync & access</h2>
-                </div>
-                <button onClick={() => openRoute("sync")}>
-                  Inspect
-                </button>
-              </div>
-
-              <div className="od-health-status">
-                <strong>
-                  {summary.openConflicts ? "Needs attention" : "Healthy"}
-                </strong>
-                <span>
-                  {summary.openConflicts
-                    ? `${summary.openConflicts} open sync conflict(s)`
-                    : "No open sync conflicts"}
-                </span>
-              </div>
-
-              <div className="od-network-meta">
-                <div>
-                  <b>{summary.schoolAdmins}</b>
-                  <small>School admins</small>
-                </div>
-                <div>
-                  <b>{summary.branchAdmins}</b>
-                  <small>Branch admins</small>
-                </div>
-                <div>
-                  <b>{summary.accountants}</b>
-                  <small>Accountants</small>
-                </div>
-              </div>
-            </article>
-
-            <article className="od-card">
-              <div className="od-section-head">
-                <div>
-                  <span>Communication</span>
-                  <h2>Account activity</h2>
-                </div>
-                <button onClick={() => openRoute("messages")}>
-                  Messages
-                </button>
-              </div>
-
-              <div className="od-communication-grid">
-                <button onClick={() => openRoute("ownerAnnouncements")}>
-                  <span>📢</span>
-                  <b>{summary.announcements}</b>
-                  <small>Announcements</small>
-                </button>
-                <button onClick={() => openRoute("messages")}>
-                  <span>✉️</span>
-                  <b>{summary.messages}</b>
-                  <small>Messages</small>
-                </button>
-                <button onClick={() => openRoute("calendarOverview")}>
-                  <span>📆</span>
-                  <b>{summary.calendarItems || "Open"}</b>
-                  <small>Calendar</small>
-                </button>
-              </div>
-            </article>
-          </section>
-
-          <section className="od-card od-recent">
-            <div className="od-section-head">
-              <div>
-                <span>Across your account</span>
-                <h2>Recent activity</h2>
-              </div>
-              <b>{recent.length}</b>
-            </div>
-
-            <div className="od-recent-list">
-              {recent.length ? (
-                recent.map((item, index) => (
-                  <article
-                    key={`${item._kind}-${idOf(item) || index}`}
-                    className="recent-row"
-                  >
-                    <span>{item._icon}</span>
-                    <b>{item._title}</b>
-                    <small>
-                      {item._kind} · {dateLabel(item._date)}
-                    </small>
-                  </article>
-                ))
-              ) : (
-                <MiniEmpty
-                  icon="✨"
-                  text="Account activity will appear here."
-                />
-              )}
-            </div>
-          </section>
-        </>
-      )}
+      {filterOpen ? (
+        <FilterSheet
+          area={area}
+          setArea={setArea}
+          onClose={() => setFilterOpen(false)}
+        />
+      ) : null}
 
       {moreOpen ? (
         <MoreSheet
@@ -1263,22 +948,6 @@ export default function OwnerDashboardPage({
         />
       ) : null}
     </main>
-  );
-}
-
-
-function MiniEmpty({
-  icon,
-  text: body,
-}: {
-  icon: string;
-  text: string;
-}) {
-  return (
-    <div className="od-mini-empty">
-      <span>{icon}</span>
-      <p>{body}</p>
-    </div>
   );
 }
 
@@ -1574,71 +1243,4 @@ function AnalyticsView({
 const css = `
 @keyframes spin { to { transform: rotate(360deg); } }
 .od-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;width:100%;max-width:100%;min-width:0;padding:calc(8px * var(--local-density-scale,1));padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--od-primary) 9%,transparent),transparent 30rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:var(--font-size,14px);overflow-x:hidden}.od-page *,.od-page *::before,.od-page *::after{box-sizing:border-box;min-width:0}.od-page button,.od-page input,.od-page select{font:inherit;max-width:100%}.od-page button{-webkit-tap-highlight-color:transparent}.od-page input,.od-page select{width:100%;min-height:44px;border:1px solid var(--input-border,var(--border,rgba(0,0,0,.10)));border-radius:16px;padding:0 12px;background:var(--input-bg,var(--surface,#fff));color:var(--input-text,var(--text,#111827));outline:none;font-weight:750}.od-page input:focus,.od-page select:focus{border-color:color-mix(in srgb,var(--od-primary) 52%,var(--border,rgba(0,0,0,.10)));box-shadow:0 0 0 4px color-mix(in srgb,var(--od-primary) 12%,transparent)}.od-state,.od-search-card,.od-owner-strip,.owner-row,.od-table-card,.od-analysis,.od-empty,.od-sheet,.od-recent,.recent-row{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.10));box-shadow:0 12px 28px rgba(15,23,42,.045)}.od-state{min-height:min(420px,calc(100dvh - 32px));width:min(520px,100%);margin:0 auto;display:grid;place-items:center;align-content:center;gap:10px;padding:22px;border-radius:28px;text-align:center}.od-spinner{width:38px;height:38px;border-radius:999px;border:4px solid color-mix(in srgb,var(--od-primary) 18%,transparent);border-top-color:var(--od-primary);animation:spin .8s linear infinite}.od-state h2{margin:0;font-size:22px;font-weight:1000;letter-spacing:-.04em}.od-state p{max-width:34rem;margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.od-search-card{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;gap:8px;align-items:center;margin-top:2px;padding:8px;border-radius:24px}.od-search{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:44px;padding:0 11px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.od-search span{color:var(--muted,#64748b);font-size:17px;font-weight:1000}.od-search input{min-height:42px;border:0;padding:0;border-radius:0;background:transparent;box-shadow:none;font-size:14px}.od-icon-button,.od-filter-button,.od-add-inline{width:42px;height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;display:grid;place-items:center;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);font-size:18px;font-weight:1000;cursor:pointer;box-shadow:0 10px 22px rgba(15,23,42,.045)}.od-add-inline{border-color:var(--od-primary);background:var(--od-primary);color:#fff;box-shadow:0 12px 28px color-mix(in srgb,var(--od-primary) 22%,transparent)}.od-slider-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.od-filter-button{position:relative;background:color-mix(in srgb,var(--od-primary) 8%,var(--card-bg,#fff));color:var(--od-primary)}.od-filter-button.active{background:var(--od-primary);color:#fff;border-color:var(--od-primary)}.od-filter-button b{position:absolute;top:-4px;right:-4px;min-width:19px;height:19px;display:grid;place-items:center;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;border:2px solid var(--card-bg,#fff)}.status-dot-mini{width:10px;height:10px;border-radius:999px;display:inline-flex;box-shadow:0 0 0 4px color-mix(in srgb,var(--muted,#64748b) 10%,transparent)}.status-dot-mini.green{background:#22c55e}.status-dot-mini.orange{background:#f59e0b}.status-dot-mini.gray{background:var(--muted,#64748b)}.od-owner-strip{display:flex;align-items:center;gap:8px;justify-content:space-between;margin-top:8px;padding:9px 10px;border-radius:20px}.od-owner-strip strong,.od-owner-strip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.od-owner-strip strong{font-size:13px;font-weight:1000}.od-owner-strip span{color:var(--muted,#64748b);font-size:12px;font-weight:850}.od-filter-chips{display:flex;gap:7px;overflow-x:auto;padding:8px 1px 0;scrollbar-width:none}.od-filter-chips::-webkit-scrollbar{display:none}.od-filter-chips button{flex:0 0 auto;min-height:31px;border:0;border-radius:999px;padding:0 10px;background:color-mix(in srgb,var(--od-primary) 11%,transparent);color:var(--od-primary);font-size:11px;font-weight:950;white-space:nowrap;cursor:pointer}.od-list{display:grid;gap:7px;margin-top:10px}.owner-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:22px;text-align:left;cursor:pointer;color:inherit}.owner-avatar{width:48px;height:48px;display:grid;place-items:center;border-radius:18px;background:color-mix(in srgb,var(--od-primary) 12%,var(--surface,#fff));font-size:22px}.owner-main,.owner-main strong,.owner-main small,.owner-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner-main strong{color:var(--text,#111827);font-size:14px;font-weight:1000;letter-spacing:-.02em}.owner-main small{margin-top:3px;color:var(--muted,#64748b);font-size:12px;font-weight:850}.owner-main em{margin-top:3px;color:color-mix(in srgb,var(--muted,#64748b) 86%,var(--text,#111827));font-size:11px;font-weight:750;font-style:normal}.owner-side{display:flex;align-items:center;gap:7px}.owner-side i{color:var(--muted,#64748b);font-style:normal;font-weight:1000}.od-chip{max-width:100%;display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}.od-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.od-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.od-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.od-chip.gray{background:color-mix(in srgb,var(--muted,#64748b) 14%,transparent);color:var(--muted,#64748b)}.od-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.od-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.od-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.50);backdrop-filter:blur(12px)}.od-sheet{width:min(760px,100%);max-height:min(88dvh,760px);overflow-y:auto;padding:14px;border-radius:28px 28px 22px 22px;box-shadow:0 30px 90px rgba(15,23,42,.32);animation:sheetIn .18s var(--ease)}.od-sheet.small{width:min(520px,100%)}@keyframes sheetIn{from{transform:translateY(16px);opacity:.7}to{transform:translateY(0);opacity:1}}.od-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:12px}.od-sheet-head h2{margin:0;color:var(--text,#111827);font-size:21px;font-weight:1000;letter-spacing:-.05em}.od-sheet-head p{margin:5px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5;font-weight:750}.od-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;background:var(--surface,#fff);color:var(--text,#111827);font-weight:1000;cursor:pointer;flex:0 0 auto}.od-form{display:grid;gap:10px}.od-form label{display:grid;gap:6px}.od-form span{color:var(--muted,#64748b);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em}.od-menu-list{display:grid;gap:8px}.od-menu-list button{width:100%;display:grid;grid-template-columns:42px minmax(0,1fr);column-gap:10px;align-items:center;min-height:58px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:18px;padding:9px;background:var(--surface,#fff);color:var(--text,#111827);text-align:left;cursor:pointer}.od-menu-list button span{grid-row:span 2;width:42px;height:42px;display:grid;place-items:center;border-radius:16px;background:color-mix(in srgb,var(--od-primary) 10%,transparent);color:var(--od-primary);font-weight:1000}.od-menu-list button b,.od-menu-list button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.od-menu-list button b{font-size:13px;font-weight:1000}.od-menu-list button small{margin-top:2px;color:var(--muted,#64748b);font-size:11px;font-weight:750}.od-menu-list button.active{border-color:color-mix(in srgb,var(--od-primary) 34%,var(--border,rgba(0,0,0,.10)));background:color-mix(in srgb,var(--od-primary) 8%,var(--surface,#fff))}.od-sheet-actions{position:sticky;bottom:-14px;display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:14px;padding:12px 0 2px;background:linear-gradient(to top,var(--card-bg,var(--surface,#fff)) 70%,transparent)}.od-sheet-actions button{min-height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;padding:0 16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff));color:var(--text,#111827);font-size:12px;font-weight:950;cursor:pointer}.od-sheet-actions button.primary{border-color:var(--od-primary);background:var(--od-primary);color:#fff;box-shadow:0 14px 32px color-mix(in srgb,var(--od-primary) 25%,transparent)}.od-table-card,.od-analysis,.od-empty{padding:13px;border-radius:24px}.od-table-card{margin-top:10px}.od-table-scroll{width:100%;max-width:100%;overflow-x:auto;border-radius:18px;border:1px solid var(--border,rgba(0,0,0,.08))}.od-table-scroll table{width:100%;min-width:920px;border-collapse:collapse;background:var(--card-bg,var(--surface,var(--bg,transparent)))}.od-table-scroll th,.od-table-scroll td{padding:10px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));vertical-align:top;text-align:left;font-size:13px}.od-table-scroll th{background:var(--table-header-bg,color-mix(in srgb,var(--od-primary) 6%,var(--card-bg,var(--surface,var(--bg,transparent)))));color:var(--table-header-text,var(--muted,var(--text)));font-size:11px;font-weight:1000;text-transform:uppercase;letter-spacing:.07em}.od-table-scroll td strong,.od-table-scroll td span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.od-table-scroll td span{margin-top:3px;color:var(--muted,#64748b);font-size:11px}.od-table-actions{display:flex;gap:7px;overflow-x:auto}.od-table-actions button{flex:0 0 auto;min-height:34px;border:1px solid var(--od-primary);border-radius:999px;padding:0 12px;background:var(--od-primary);color:#fff;font-size:11px;font-weight:950;cursor:pointer}.od-empty-table{padding:22px;text-align:center;color:var(--muted,#64748b);font-weight:850}.od-analysis-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin-top:10px}.od-analysis span,.od-section-head span{color:var(--muted,#64748b);font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.od-analysis strong{display:block;margin-top:8px;font-size:clamp(22px,7vw,30px);line-height:1;font-weight:1000;letter-spacing:-.06em;overflow-wrap:anywhere}.od-analysis p{margin:8px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5}.od-analysis-list{display:grid;gap:10px;margin-top:12px}.od-analysis-list section{display:grid;gap:6px;padding:10px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent)}.od-analysis-list section>div:first-child{display:flex;justify-content:space-between;gap:10px}.od-analysis-list b,.od-analysis-list small{font-size:12px}.od-analysis-list small{color:var(--muted,#64748b);font-weight:850}.od-progress{height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted,#64748b) 18%,transparent);overflow:hidden}.od-progress i{display:block;height:100%;border-radius:inherit;background:var(--od-primary)}.od-empty{display:grid;place-items:center;align-content:center;gap:8px;min-height:220px;text-align:center;border-style:dashed}.od-empty div{width:56px;height:56px;display:grid;place-items:center;border-radius:22px;background:color-mix(in srgb,var(--od-primary) 12%,var(--surface,#fff));font-size:28px}.od-empty h3{margin:0;font-size:18px;font-weight:1000}.od-empty p{margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.od-recent{margin-top:10px;border-radius:24px;padding:12px}.od-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.od-section-head h2{margin:0;color:var(--text,#111827);font-size:15px;font-weight:1000;letter-spacing:-.03em}.od-recent-list{display:grid;gap:7px}.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;border-radius:18px;padding:9px}.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--od-primary) 10%,transparent)}.recent-row b,.recent-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row b{font-size:12px;font-weight:1000}.recent-row small{font-size:11px;color:var(--muted,#64748b);font-weight:800}@media (min-width:680px){.od-page{padding:calc(12px * var(--local-density-scale,1));padding-bottom:44px}.od-search-card{grid-template-columns:auto minmax(0,1fr) 48px 48px 48px}.od-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.owner-row{border-radius:24px;padding:12px}.od-analysis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.od-analysis.wide{grid-column:span 2}.od-sheet-backdrop{place-items:center;padding:18px}.od-sheet{border-radius:28px;padding:18px}.od-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:1040px){.od-page{padding:calc(16px * var(--local-density-scale,1));padding-bottom:48px}.od-search-card,.od-owner-strip,.od-list,.od-analysis-grid,.od-table-card,.od-filter-chips,.od-recent{max-width:1180px;margin-left:auto;margin-right:auto}.od-list{grid-template-columns:repeat(3,minmax(0,1fr))}.od-analysis-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.od-analysis.wide{grid-column:span 2}.od-recent-list{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (max-width:520px){.od-page{padding:calc(7px * var(--local-density-scale,1));padding-bottom:max(38px,env(safe-area-inset-bottom))}.od-icon-button,.od-filter-button,.od-add-inline{width:40px;height:40px}.owner-row{grid-template-columns:auto minmax(0,1fr);align-items:start}.owner-side{grid-column:1/-1;justify-content:flex-end}.od-sheet{border-radius:24px 24px 18px 18px;padding:12px}.od-sheet-actions{display:grid;grid-template-columns:minmax(0,1fr)}.od-sheet-actions button{width:100%}}
-.od-page{padding:8px;padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--od-primary) 9%,transparent),transparent 34rem),var(--bg,#f7f8fb)}
-.od-search-card{grid-template-columns:auto minmax(0,1fr) auto auto auto}
-.od-clear{width:40px;height:40px;border-radius:99px;border:1px solid var(--border,rgba(0,0,0,.1));background:var(--surface,#fff);color:var(--text,#111827);font-size:18px;font-weight:1000}
-.od-account-hero{position:relative;min-height:285px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--od-primary) 94%,#111827),color-mix(in srgb,var(--od-primary) 48%,#020617));box-shadow:0 22px 60px color-mix(in srgb,var(--od-primary) 20%,transparent)}
-.od-account-hero:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,rgba(255,255,255,.05),transparent 52%);pointer-events:none}
-.od-account-orb{position:absolute;border-radius:999px;background:rgba(255,255,255,.1);filter:blur(2px)}
-.od-account-orb.one{width:220px;height:220px;right:-60px;top:-80px}
-.od-account-orb.two{width:120px;height:120px;right:120px;bottom:-70px}
-.od-hero-copy,.od-hero-stats{position:relative;z-index:1}
-.od-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}
-.od-account-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}
-.od-account-hero p{margin:0;font-size:14px}
-.od-account-hero p strong{display:inline}
-.od-account-hero p small{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}
-.od-account-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}
-.od-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
-.od-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}
-.od-hero-stats b{font-size:15px}
-.od-quick-actions{display:grid;grid-template-columns:repeat(5,minmax(78px,1fr));gap:8px;margin-top:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
-.od-quick-actions::-webkit-scrollbar{display:none}
-.od-quick-actions button{min-height:76px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:22px;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);display:grid;place-items:center;align-content:center;gap:7px;box-shadow:0 10px 24px rgba(15,23,42,.04)}
-.od-quick-actions span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--od-primary) 11%,transparent);color:var(--od-primary);font-size:17px;font-weight:1000}
-.od-quick-actions b{font-size:11px;font-weight:950;white-space:nowrap}
-.od-dashboard-grid{display:grid;gap:10px;margin-top:10px}
-.od-card,.od-search-results{padding:14px;border-radius:26px;background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.1));box-shadow:0 12px 30px rgba(15,23,42,.05)}
-.od-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}
-.od-section-head span{display:block;color:var(--muted,#64748b);font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}
-.od-section-head h2{margin:3px 0 0;font-size:17px;font-weight:1000;letter-spacing:-.035em}
-.od-section-head>button,.od-section-head>b{border:0;border-radius:999px;padding:7px 10px;background:color-mix(in srgb,var(--od-primary) 10%,transparent);color:var(--od-primary);font-size:10px;font-weight:950}
-.od-network-main strong{display:block;font-size:48px;line-height:1;font-weight:1000;letter-spacing:-.07em}
-.od-network-main span{color:var(--muted,#64748b);font-size:12px;font-weight:850}
-.od-network-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:15px}
-.od-network-meta div{padding:10px 7px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);text-align:center}
-.od-network-meta b,.od-network-meta small{display:block}
-.od-network-meta b{font-size:16px;overflow:hidden;text-overflow:ellipsis}
-.od-network-meta small{margin-top:3px;color:var(--muted,#64748b);font-size:9px;font-weight:850}
-.od-stack{display:grid;gap:7px}
-.od-school-row,.od-invoice-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;width:100%;padding:9px;border:0;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:left}
-.od-school-row>span:first-child,.od-invoice-row>span:first-child{width:38px;height:38px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--od-primary) 12%,transparent)}
-.od-school-row b,.od-school-row small,.od-invoice-row b,.od-invoice-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.od-school-row b,.od-invoice-row b{font-size:12px}
-.od-school-row small,.od-invoice-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}
-.od-plan-main{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.od-plan-main>strong{font-size:30px;line-height:1;font-weight:1000;letter-spacing:-.05em}
-.od-billing-total{margin-top:16px}
-.od-billing-total b,.od-billing-total small{display:block}
-.od-billing-total b{font-size:27px;letter-spacing:-.04em}
-.od-billing-total small{color:var(--muted,#64748b);font-size:10px;font-weight:800}
-.od-health-status strong,.od-health-status span{display:block}
-.od-health-status strong{font-size:24px;letter-spacing:-.04em}
-.od-health-status span{margin-top:5px;color:var(--muted,#64748b);font-size:11px;font-weight:800}
-.od-communication-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
-.od-communication-grid button{padding:12px 8px;border:0;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:center}
-.od-communication-grid span,.od-communication-grid b,.od-communication-grid small{display:block}
-.od-communication-grid span{font-size:20px}
-.od-communication-grid b{margin-top:5px;font-size:18px}
-.od-communication-grid small{margin-top:3px;color:var(--muted,#64748b);font-size:9px;font-weight:850}
-.od-recent{margin-top:10px}
-.od-recent-list{display:grid;gap:7px}
-.od-mini-empty{min-height:110px;display:grid;place-items:center;align-content:center;text-align:center;color:var(--muted,#64748b)}
-.od-mini-empty span{font-size:26px}
-.od-mini-empty p{margin:6px 0 0;font-size:11px;font-weight:800}
-.od-search-results{margin-top:10px}
-@media(min-width:760px){.od-page{padding:12px}.od-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.od-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(min-width:1180px){.od-dashboard-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:620px){.od-quick-actions{grid-template-columns:repeat(5,minmax(78px,1fr))}.od-network-meta{grid-template-columns:1fr}.od-communication-grid{grid-template-columns:1fr}}
-
 `;

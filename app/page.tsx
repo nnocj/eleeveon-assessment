@@ -858,17 +858,17 @@ export default function Home() {
         <div>
           <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5 dark:text-zinc-300">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-            School work that continues—even when the internet does not
+            Built for connected and offline school work
           </div>
 
           <h1 className="mt-7 max-w-3xl text-5xl font-semibold tracking-[-0.055em] sm:text-6xl lg:text-7xl">
-            Run the whole school from one connected platform.
+            One calm workspace for the life of a school.
           </h1>
 
           <p className="mt-7 max-w-2xl text-lg leading-8 text-zinc-600 sm:text-xl dark:text-zinc-300">
-            Prepare reports faster, keep records connected and give every role
-            the right workspace—online or offline, across one school or many
-            branches.
+            Eleeveon Schools brings administration, academics, reporting,
+            attendance, communication and public school identity into one
+            thoughtful platform.
           </p>
 
           <div className="mt-9 flex flex-col gap-3 sm:flex-row">
@@ -876,7 +876,7 @@ export default function Home() {
               href="/login"
               className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-zinc-950 px-6 text-sm font-semibold text-white shadow-lg shadow-zinc-950/10 transition hover:-translate-y-0.5 hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
             >
-              Start with Eleeveon
+              Enter Eleeveon Schools
               <ArrowIcon />
             </Link>
 
@@ -884,7 +884,7 @@ export default function Home() {
               href="#capabilities"
               className="inline-flex h-12 items-center justify-center rounded-full border border-zinc-300 bg-white px-6 text-sm font-semibold text-zinc-800 transition hover:-translate-y-0.5 hover:bg-zinc-50 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10"
             >
-              See how it works
+              Explore the platform
             </a>
           </div>
 
@@ -1057,80 +1057,6 @@ export default function Home() {
       </section>
 
 
-      <section className="relative z-10 border-y border-zinc-200 bg-zinc-950 text-white dark:border-white/10 dark:bg-white dark:text-zinc-950">
-        <div className="mx-auto w-full max-w-7xl px-5 py-24 sm:px-8">
-          <div className="grid gap-12 lg:grid-cols-[0.8fr_1.2fr] lg:items-end">
-            <div>
-              <p className="text-sm font-semibold text-blue-300 dark:text-[#2f6fed]">
-                Own it your way
-              </p>
-              <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
-                Choose how your school uses Eleeveon.
-              </h2>
-              <p className="mt-5 max-w-xl text-lg leading-8 text-white/70 dark:text-zinc-600">
-                Begin with connected cloud services, keep essential work
-                available offline, or discuss a version-locked desktop licence.
-                Your school can move forward without rebuilding its records.
-              </p>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-3">
-              {[
-                {
-                  label: "Cloud",
-                  title: "Connected everywhere",
-                  description:
-                    "Continuous updates, protected backup, remote access and connected portals.",
-                  points: ["Subscription", "Automatic updates", "Remote access"],
-                },
-                {
-                  label: "Desktop",
-                  title: "Own a fixed version",
-                  description:
-                    "A version-locked, capacity-limited installation for schools that prefer a one-time licence.",
-                  points: ["One-time licence", "Fixed version", "Paid upgrades"],
-                },
-                {
-                  label: "Hybrid",
-                  title: "Offline strength, cloud reach",
-                  description:
-                    "Keep working locally and synchronize safely when a connection becomes available.",
-                  points: ["Offline-first", "Cloud synchronization", "Migration-ready"],
-                },
-              ].map((option) => (
-                <article
-                  key={option.label}
-                  className="rounded-3xl border border-white/15 bg-white/7 p-6 backdrop-blur dark:border-zinc-200 dark:bg-zinc-50"
-                >
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-300 dark:text-[#2f6fed]">
-                    {option.label}
-                  </p>
-                  <h3 className="mt-3 text-xl font-semibold">{option.title}</h3>
-                  <p className="mt-3 text-sm leading-6 text-white/65 dark:text-zinc-600">
-                    {option.description}
-                  </p>
-                  <ul className="mt-5 space-y-2 text-sm text-white/80 dark:text-zinc-700">
-                    {option.points.map((point) => (
-                      <li key={point} className="flex items-center gap-2">
-                        <span className="h-1.5 w-1.5 rounded-full bg-blue-300 dark:bg-[#2f6fed]" />
-                        {point}
-                      </li>
-                    ))}
-                  </ul>
-                </article>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-10 rounded-3xl border border-white/15 bg-white/7 p-5 text-sm leading-6 text-white/70 dark:border-zinc-200 dark:bg-zinc-50 dark:text-zinc-600">
-            Current online checkout shows published subscription packages.
-            Desktop perpetual licences can be introduced once their one-time
-            prices, device rules, version entitlement and upgrade policy are
-            configured in the billing system.
-          </div>
-        </div>
-      </section>
-
       <section
         id="pricing"
         className="relative z-10 border-y border-zinc-200 bg-zinc-50/80 dark:border-white/10 dark:bg-white/2.5"
@@ -1140,13 +1066,13 @@ export default function Home() {
             <div className="max-w-3xl">
               <p className="text-sm font-semibold text-[#2f6fed]">Pricing</p>
               <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
-                One core platform. A price that grows with your school.
+                Choose a package that fits the school you have today.
               </h2>
               <p className="mt-5 text-lg leading-8 text-zinc-600 dark:text-zinc-300">
-                Choose by student capacity and branch needs. Every package keeps the
-                same connected Eleeveon foundation, while deployment features
-                such as offline access and cloud backup remain clearly shown
-                for each plan.
+                Each package combines a student-capacity range with the
+                Eleeveon capabilities enabled for that plan. Schools can begin
+                at the right size and move upward as enrolment, branches and
+                operational needs grow.
               </p>
             </div>
 
@@ -1301,21 +1227,6 @@ export default function Home() {
                             "A flexible Eleeveon Schools package designed around your school’s size and operational needs."}
                         </p>
 
-                        <div className="mt-5 flex flex-wrap gap-2">
-                          <span className="rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:bg-white/10 dark:text-zinc-200">
-                            {planFeatureEnabled(plan, "offlineSync")
-                              ? planFeatureEnabled(plan, "cloudBackup")
-                                ? "Hybrid-ready"
-                                : "Offline-enabled"
-                              : "Cloud-connected"}
-                          </span>
-                          {planFeatureEnabled(plan, "cloudBackup") ? (
-                            <span className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-semibold text-[#2f6fed] dark:bg-blue-500/10 dark:text-blue-300">
-                              Protected cloud backup
-                            </span>
-                          ) : null}
-                        </div>
-
                         <div className="mt-6">
                           <div className="flex items-end gap-2">
                             <strong className="text-4xl font-semibold tracking-tighter">
@@ -1348,7 +1259,8 @@ export default function Home() {
                             </p>
                           ) : (
                             <p className="mt-2 text-xs text-zinc-400">
-                              One clear price for the enabled Eleeveon capabilities.
+                              Clear package pricing with no separate
+                              feature bundle to assemble.
                             </p>
                           )}
                         </div>
@@ -1370,7 +1282,7 @@ export default function Home() {
 
                         <div className="mt-7 border-t border-zinc-200 pt-6 dark:border-white/10">
                           <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400">
-                            Included in this package
+                            What the school receives
                           </p>
 
                           <ul className="mt-4 space-y-3">
@@ -1409,12 +1321,13 @@ export default function Home() {
                                 : "bg-zinc-950 text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
                             }`}
                           >
-                            Choose {plan.name}
+                            Create account with {plan.name}
                             <ArrowIcon />
                           </button>
                           <p className="mt-3 text-center text-xs text-zinc-400">
-                            Create the owner account first. School and branch records
-                            can be added after payment.
+                            No school or branch ID is required.
+                            Create the owner account first, then
+                            continue directly to payment.
                           </p>
                         </div>
                       </article>
@@ -1496,12 +1409,13 @@ export default function Home() {
           <div className="mt-10 grid gap-4 rounded-4xl border border-zinc-200 bg-white p-6 lg:grid-cols-[1fr_auto] lg:items-center dark:border-white/10 dark:bg-zinc-900">
             <div>
               <h3 className="text-xl font-semibold">
-                Start with the school you have today.
+                Not sure which package fits?
               </h3>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                Choose according to current enrolment and branch count. You can move
-                upward later without recreating students, users, assessments
-                or reports.
+                The most important starting point is the school’s current
+                student population, number of branches and the capabilities it
+                wants enabled. The package can change later without rebuilding
+                the school’s records.
               </p>
             </div>
             <Link
@@ -1511,99 +1425,6 @@ export default function Home() {
               Open Eleeveon Schools
               <ArrowIcon />
             </Link>
-          </div>
-        </div>
-      </section>
-
-      <section className="relative z-10 mx-auto w-full max-w-7xl px-5 py-24 sm:px-8">
-        <div className="grid gap-14 lg:grid-cols-[0.9fr_1.1fr]">
-          <div>
-            <p className="text-sm font-semibold text-[#2f6fed]">
-              One complete core
-            </p>
-            <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
-              The essentials should not feel like upgrades.
-            </h2>
-            <p className="mt-5 text-lg leading-8 text-zinc-600 dark:text-zinc-300">
-              Students, staff, classes, assessments, reports, attendance,
-              communication and focused role workspaces belong to one connected
-              school foundation.
-            </p>
-
-            <div className="mt-8 rounded-3xl border border-zinc-200 bg-zinc-50 p-6 dark:border-white/10 dark:bg-white/5">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-400">
-                Growth without replacement
-              </p>
-              <p className="mt-3 text-lg font-semibold">
-                Start with the capacity you need today.
-              </p>
-              <p className="mt-2 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                When enrolment or branch count increases, move to the next
-                package while retaining the same records, users and reports.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            {[
-              ["Reports & broadsheets", "Assessment structures, grading, reusable report templates and school-ready exports."],
-              ["Offline continuity", "Keep essential work available during weak or unavailable internet, where enabled."],
-              ["Connected portals", "Focused owner, administrator, teacher, student and parent experiences."],
-              ["School identity", "ID cards, digital passes, pickup, visitor and future verification workflows."],
-              ["Public website", "A professional school presence connected to approved Eleeveon information."],
-              ["Multi-branch growth", "Expand school operations without changing the platform or rebuilding records."],
-            ].map(([title, description]) => (
-              <article
-                key={title}
-                className="rounded-3xl border border-zinc-200 bg-white p-6 dark:border-white/10 dark:bg-zinc-900/60"
-              >
-                <div className="h-1.5 w-10 rounded-full bg-[#2f6fed]" />
-                <h3 className="mt-5 font-semibold">{title}</h3>
-                <p className="mt-2 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                  {description}
-                </p>
-              </article>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-20">
-          <div className="max-w-3xl">
-            <p className="text-sm font-semibold text-[#2f6fed]">
-              Optional services
-            </p>
-            <h2 className="mt-3 text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
-              Add only the operations your school actually runs.
-            </h2>
-            <p className="mt-5 text-lg leading-8 text-zinc-600 dark:text-zinc-300">
-              Keep the core clear, then activate specialist services as the
-              school grows. Final prices should be published only after each
-              service is production-ready.
-            </p>
-          </div>
-
-          <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {[
-              ["Transport", "Routes, vehicles, stops and parent visibility.", "Planned"],
-              ["Health Office", "Restricted medical records and visit history.", "Planned"],
-              ["Inventory", "Stock, suppliers, school items and internal requests.", "Planned"],
-              ["Eleeveon Learn", "Connected learning experiences, content and assessment.", "Coming soon"],
-            ].map(([title, description, status]) => (
-              <article
-                key={title}
-                className="rounded-3xl border border-zinc-200 bg-zinc-50 p-5 dark:border-white/10 dark:bg-white/5"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="font-semibold">{title}</h3>
-                  <span className="rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-400">
-                    {status}
-                  </span>
-                </div>
-                <p className="mt-3 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                  {description}
-                </p>
-              </article>
-            ))}
           </div>
         </div>
       </section>
@@ -1698,7 +1519,7 @@ export default function Home() {
             <div className="flex items-start justify-between gap-5">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#2f6fed]">
-                  Create your Eleeveon owner account
+                  Create account and continue
                 </p>
                 <h2
                   id="public-signup-title"
@@ -1707,8 +1528,8 @@ export default function Home() {
                   Start with {signupPlan.name}
                 </h2>
                 <p className="mt-2 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                  We will create the owner account, attach the selected package and
-                  {` ${billingCycle}`} billing choice, then continue to secure
+                  We will create the owner account, attach this package and
+                  {` ${billingCycle}`} billing choice, then take you to secure
                   payment. School and branch records can be created afterward.
                 </p>
               </div>
@@ -1868,7 +1689,7 @@ export default function Home() {
               {signupLoading
                 ? "Creating your account..."
                 : Number(planPrice(signupPlan, billingCycle)) > 0
-                  ? "Create your Eleeveon owner account to payment"
+                  ? "Create account and continue to payment"
                   : "Create account and activate package"}
               {!signupLoading ? <ArrowIcon /> : null}
             </button>
