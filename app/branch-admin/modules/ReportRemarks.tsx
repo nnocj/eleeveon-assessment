@@ -324,6 +324,27 @@ function countWords(text: string) {
   return cleanText(text) ? cleanText(text).split(/\s+/).length : 0;
 }
 
+function resolvedBasisRemark(
+  value: unknown,
+  label: string,
+  metric: RemarkBasisMetric,
+) {
+  const existing = cleanText(value);
+
+  /*
+   * Grading rules can legitimately use short descriptors such as
+   * "Excellent", "Good" or "Pass". Those are useful grading labels,
+   * but they are too short to serve as report-card remarks. Preserve an
+   * existing remark only when it is already sentence-like; otherwise build
+   * the proper report remark from the grading band.
+   */
+  if (countWords(existing) >= 4) {
+    return existing;
+  }
+
+  return defaultRemarkForBand(label, metric);
+}
+
 
 function normalizeBasisNumber(
   value: unknown,
@@ -646,7 +667,16 @@ export default function ReportRemarks() {
                     100,
                   ),
                 remark:
-                  cleanText(rule.remark),
+                  resolvedBasisRemark(
+                    rule.remark,
+                    cleanText(rule.label) ||
+                      `Band ${index + 1}`,
+                    stored.metric === "total" ||
+                      stored.metric === "position" ||
+                      stored.metric === "attendance"
+                      ? stored.metric
+                      : "average",
+                  ),
               }),
             )
           : DEFAULT_REMARK_BASIS_RULES,
@@ -1257,10 +1287,8 @@ export default function ReportRemarks() {
                         100,
                       ),
                     remark:
-                      cleanText(
+                      resolvedBasisRemark(
                         rule.remark,
-                      ) ||
-                      defaultRemarkForBand(
                         label,
                         "average",
                       ),
@@ -1394,10 +1422,8 @@ export default function ReportRemarks() {
                     ).toFixed(2),
                   ),
                 remark:
-                  cleanText(
+                  resolvedBasisRemark(
                     rule.remark,
-                  ) ||
-                  defaultRemarkForBand(
                     label,
                     "total",
                   ),
