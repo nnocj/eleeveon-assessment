@@ -56,8 +56,9 @@
  * Theme + primary-colour atomic save fix:
  * - opening the Branch Settings tab is passive and never changes the active app theme
  * - Save, Save All, sheet saves and the More modal never mutate document theme variables
- * - schoolBranchSettings commits now go through SettingsContext.updateSettings(...)
- * - theme, primary colour and typography are published as one exact committed record
+ * - schoolBranchSettings commits go through SettingsContext.updateSettings(...)
+ * - unrelated section saves preserve the committed primary colour/theme/typography
+ * - only Appearance and Save All may publish edited appearance values
  * - the old post-save refresh race can no longer replace the primary colour with a fallback
  * - successful settings commits still publish schoolBranchSettings through syncEvents
  * - global theme application remains outside this page
@@ -483,6 +484,35 @@ type ReportTemplateForm = {
   showParentSignature: boolean;
   showGeneratedDate: boolean;
 
+  showAssessmentBreakdown: boolean;
+  assessmentHierarchyDisplay:
+    | "item_rules"
+    | "parents_only"
+    | "children_only"
+    | "parents_and_children"
+    | "compact";
+  showAssessmentParentItems: boolean;
+  showAssessmentChildItems: boolean;
+  showCalculatedAssessmentItems: boolean;
+  indentAssessmentChildren: boolean;
+  showAssessmentGroupHeaders: boolean;
+  flattenSingleChildAssessmentGroups: boolean;
+  assessmentMaximumVisibleDepth: number | null;
+  showAssessmentMaximumScores: boolean;
+  showAssessmentWeights: boolean;
+  showAssessmentRawScores: boolean;
+  showAssessmentWeightedScores: boolean;
+  showAssessmentHierarchyPath: boolean;
+
+  broadsheetAssessmentHierarchyDisplay:
+    | "item_rules"
+    | "parents_only"
+    | "children_only"
+    | "parents_and_children"
+    | "compact";
+  broadsheetShowAssessmentGroupHeaders: boolean;
+  broadsheetMaximumAssessmentDepth: number | null;
+
   showBookFrontCover: boolean;
   showBookStudentProfilePage: boolean;
   showBookAcademicJourneyPage: boolean;
@@ -628,6 +658,12 @@ type SaveOptions = {
   silent?: boolean;
   reloadAfterSave?: boolean;
   persistRemovals?: boolean;
+
+  /**
+   * Only the Appearance sheet or Save All may publish theme/colour/typography.
+   * Every unrelated settings save preserves the currently committed appearance.
+   */
+  includeAppearance?: boolean;
 };
 
 const defaultForm = (
@@ -791,6 +827,25 @@ function reportTemplateFormFromDefinition(
     showWatermark: true,
     showParentSignature: true,
     showGeneratedDate: selectedReportType !== "student_report",
+
+    showAssessmentBreakdown: true,
+    assessmentHierarchyDisplay: "item_rules",
+    showAssessmentParentItems: true,
+    showAssessmentChildItems: true,
+    showCalculatedAssessmentItems: true,
+    indentAssessmentChildren: true,
+    showAssessmentGroupHeaders: true,
+    flattenSingleChildAssessmentGroups: false,
+    assessmentMaximumVisibleDepth: null,
+    showAssessmentMaximumScores: true,
+    showAssessmentWeights: false,
+    showAssessmentRawScores: true,
+    showAssessmentWeightedScores: true,
+    showAssessmentHierarchyPath: false,
+
+    broadsheetAssessmentHierarchyDisplay: "parents_only",
+    broadsheetShowAssessmentGroupHeaders: true,
+    broadsheetMaximumAssessmentDepth: null,
 
     showBookFrontCover: true,
     showBookStudentProfilePage: true,
@@ -1669,6 +1724,19 @@ const reportBooleanKeys: (keyof ReportTemplateForm)[] = [
   "showWatermark",
   "showParentSignature",
   "showGeneratedDate",
+  "showAssessmentBreakdown",
+  "showAssessmentParentItems",
+  "showAssessmentChildItems",
+  "showCalculatedAssessmentItems",
+  "indentAssessmentChildren",
+  "showAssessmentGroupHeaders",
+  "flattenSingleChildAssessmentGroups",
+  "showAssessmentMaximumScores",
+  "showAssessmentWeights",
+  "showAssessmentRawScores",
+  "showAssessmentWeightedScores",
+  "showAssessmentHierarchyPath",
+  "broadsheetShowAssessmentGroupHeaders",
   "showBookFrontCover",
   "showBookStudentProfilePage",
   "showBookAcademicJourneyPage",
@@ -2162,6 +2230,42 @@ function makeReportTemplateSettingsPayload(args: {
     showWatermark: !!args.form.showWatermark,
     showParentSignature: !!args.form.showParentSignature,
     showGeneratedDate: !!args.form.showGeneratedDate,
+
+    showAssessmentBreakdown:
+      !!args.form.showAssessmentBreakdown,
+    assessmentHierarchyDisplay:
+      args.form.assessmentHierarchyDisplay,
+    showAssessmentParentItems:
+      !!args.form.showAssessmentParentItems,
+    showAssessmentChildItems:
+      !!args.form.showAssessmentChildItems,
+    showCalculatedAssessmentItems:
+      !!args.form.showCalculatedAssessmentItems,
+    indentAssessmentChildren:
+      !!args.form.indentAssessmentChildren,
+    showAssessmentGroupHeaders:
+      !!args.form.showAssessmentGroupHeaders,
+    flattenSingleChildAssessmentGroups:
+      !!args.form.flattenSingleChildAssessmentGroups,
+    assessmentMaximumVisibleDepth:
+      args.form.assessmentMaximumVisibleDepth,
+    showAssessmentMaximumScores:
+      !!args.form.showAssessmentMaximumScores,
+    showAssessmentWeights:
+      !!args.form.showAssessmentWeights,
+    showAssessmentRawScores:
+      !!args.form.showAssessmentRawScores,
+    showAssessmentWeightedScores:
+      !!args.form.showAssessmentWeightedScores,
+    showAssessmentHierarchyPath:
+      !!args.form.showAssessmentHierarchyPath,
+
+    broadsheetAssessmentHierarchyDisplay:
+      args.form.broadsheetAssessmentHierarchyDisplay,
+    broadsheetShowAssessmentGroupHeaders:
+      !!args.form.broadsheetShowAssessmentGroupHeaders,
+    broadsheetMaximumAssessmentDepth:
+      args.form.broadsheetMaximumAssessmentDepth,
 
     showBookFrontCover: !!args.form.showBookFrontCover,
     showBookStudentProfilePage: !!args.form.showBookStudentProfilePage,
@@ -3609,6 +3713,8 @@ export default function Branchsettings() {
       typeof options === "boolean" ? true : options.reloadAfterSave !== false;
     const shouldPersistRemovals =
       typeof options === "boolean" ? true : options.persistRemovals !== false;
+    const includeAppearance =
+      typeof options === "boolean" ? false : options.includeAppearance === true;
     if (!requireTenant()) return false;
 
     try {
@@ -3661,9 +3767,44 @@ export default function Branchsettings() {
         ),
       };
 
+      const committedAppearance = {
+        primaryColor:
+          (settingsRow as any)?.primaryColor ||
+          settings?.primaryColor ||
+          form.primaryColor ||
+          "#2f6fed",
+        theme:
+          ((settingsRow as any)?.theme ||
+            settings?.theme ||
+            form.theme ||
+            "light") as "light" | "dark",
+        fontFamily:
+          (settingsRow as any)?.fontFamily ||
+          settings?.fontFamily ||
+          form.fontFamily ||
+          "system-ui, -apple-system, sans-serif",
+        fontSize:
+          Number(
+            (settingsRow as any)?.fontSize ??
+              settings?.fontSize ??
+              form.fontSize ??
+              16,
+          ) || 16,
+      };
+
+      const appearancePatch = includeAppearance
+        ? {
+            primaryColor: form.primaryColor,
+            theme: form.theme,
+            fontFamily: form.fontFamily,
+            fontSize: form.fontSize,
+          }
+        : committedAppearance;
+
       const payload = makeSettingsPayload(
         {
           ...form,
+          ...appearancePatch,
           ...settingsMediaPatch,
           accountId: selectedAccountId,
           schoolId: cleanId(selectedSchoolId) || undefined,
@@ -4294,6 +4435,7 @@ export default function Branchsettings() {
         silent: true,
         reloadAfterSave: false,
         persistRemovals: false,
+        includeAppearance: true,
       });
 
       await saveReportCardTemplateSettings({
@@ -5857,8 +5999,8 @@ function AcademicSheet({
             className="primary"
             disabled={savingSettings}
             onClick={async () => {
-              await saveSchoolBranchSettings();
-              onClose();
+              const saved = await saveSchoolBranchSettings();
+              if (saved) onClose();
             }}
           >
             {savingSettings ? "Saving..." : "Save"}
@@ -6259,8 +6401,10 @@ function AppearanceSheet({
             className="primary"
             disabled={savingSettings}
             onClick={async () => {
-              await saveSchoolBranchSettings();
-              onClose();
+              const saved = await saveSchoolBranchSettings({
+                includeAppearance: true,
+              });
+              if (saved) onClose();
             }}
           >
             {savingSettings ? "Saving..." : "Save"}
@@ -7286,6 +7430,178 @@ function ReportTemplateSheet({
             ))}
           </div>
         </section>
+
+        {(activeReportType === "student_report" ||
+          activeReportType === "subject_broadsheet") && (
+          <section className="branch-settings-subsection">
+            <h3>Assessment hierarchy</h3>
+            <p>
+              Control whether printed reports use computed parent totals,
+              direct child items, or both. Item rules come from the Assessment
+              System editor.
+            </p>
+
+            <div className="ba-form compact">
+              <Field label="Hierarchy display">
+                <select
+                  value={
+                    activeReportType === "subject_broadsheet"
+                      ? form.broadsheetAssessmentHierarchyDisplay
+                      : form.assessmentHierarchyDisplay
+                  }
+                  onChange={(event) =>
+                    updateField(
+                      activeReportType === "subject_broadsheet"
+                        ? "broadsheetAssessmentHierarchyDisplay"
+                        : "assessmentHierarchyDisplay",
+                      event.target.value,
+                    )
+                  }
+                >
+                  <option value="item_rules">Use Assessment System rules</option>
+                  <option value="parents_only">Parent totals only</option>
+                  <option value="children_only">Child items only</option>
+                  <option value="parents_and_children">
+                    Parents and child items
+                  </option>
+                  <option value="compact">Compact hierarchy</option>
+                </select>
+              </Field>
+
+              <Field label="Maximum visible depth">
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="No limit"
+                  value={
+                    (activeReportType === "subject_broadsheet"
+                      ? form.broadsheetMaximumAssessmentDepth
+                      : form.assessmentMaximumVisibleDepth) ?? ""
+                  }
+                  onChange={(event) =>
+                    updateField(
+                      activeReportType === "subject_broadsheet"
+                        ? "broadsheetMaximumAssessmentDepth"
+                        : "assessmentMaximumVisibleDepth",
+                      event.target.value === ""
+                        ? null
+                        : Math.max(0, Number(event.target.value) || 0),
+                    )
+                  }
+                />
+              </Field>
+            </div>
+
+            <div className="branch-report-toggle-grid">
+              {(activeReportType === "student_report"
+                ? [
+                    {
+                      key: "showAssessmentBreakdown",
+                      label: "Assessment Breakdown",
+                      note: "Show assessment details below each subject.",
+                    },
+                    {
+                      key: "showAssessmentParentItems",
+                      label: "Parent Totals",
+                      note: "Show computed groups such as Class Work.",
+                    },
+                    {
+                      key: "showAssessmentChildItems",
+                      label: "Child Items",
+                      note: "Show tests, projects and other direct entries.",
+                    },
+                    {
+                      key: "showCalculatedAssessmentItems",
+                      label: "Calculated Items",
+                      note: "Show values calculated from child items.",
+                    },
+                    {
+                      key: "showAssessmentGroupHeaders",
+                      label: "Group Headers",
+                      note: "Show grouped assessment headings.",
+                    },
+                    {
+                      key: "indentAssessmentChildren",
+                      label: "Indent Children",
+                      note: "Visually indent nested assessment items.",
+                    },
+                    {
+                      key: "showAssessmentMaximumScores",
+                      label: "Maximum Scores",
+                      note: "Show each item's maximum score.",
+                    },
+                    {
+                      key: "showAssessmentWeights",
+                      label: "Weights",
+                      note: "Show contribution weights.",
+                    },
+                    {
+                      key: "showAssessmentRawScores",
+                      label: "Raw Scores",
+                      note: "Show entered or calculated raw scores.",
+                    },
+                    {
+                      key: "showAssessmentWeightedScores",
+                      label: "Weighted Scores",
+                      note: "Show final weighted contributions.",
+                    },
+                    {
+                      key: "showAssessmentHierarchyPath",
+                      label: "Hierarchy Path",
+                      note: "Show the full parent-to-child item path.",
+                    },
+                    {
+                      key: "flattenSingleChildAssessmentGroups",
+                      label: "Flatten Single Child Groups",
+                      note: "Avoid redundant one-child group headings.",
+                    },
+                  ]
+                : [
+                    {
+                      key: "showBroadsheetAssessmentBreakdown",
+                      label: "Assessment Breakdown",
+                      note: "Show assessment component columns.",
+                    },
+                    {
+                      key: "broadsheetShowAssessmentGroupHeaders",
+                      label: "Grouped Headers",
+                      note: "Group child columns under their parent item.",
+                    },
+                  ]
+              ).map((control) => (
+                <label
+                  key={control.key}
+                  className={`branch-report-toggle ${
+                    form[control.key as keyof ReportTemplateForm]
+                      ? "is-on"
+                      : "is-off"
+                  }`}
+                >
+                  <span>
+                    <strong>{control.label}</strong>
+                    <small>{control.note}</small>
+                  </span>
+                  <select
+                    value={
+                      form[control.key as keyof ReportTemplateForm]
+                        ? "yes"
+                        : "no"
+                    }
+                    onChange={(event) =>
+                      updateField(
+                        control.key as keyof ReportTemplateForm,
+                        event.target.value === "yes",
+                      )
+                    }
+                  >
+                    <option value="yes">Show</option>
+                    <option value="no">Hide</option>
+                  </select>
+                </label>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="branch-settings-subsection">
           <h3>
@@ -10291,4 +10607,29 @@ const css = `
 .portal-website-publishing b{font-size:11px}
 .portal-website-publishing small{margin-top:2px;color:var(--muted,#64748b);font-size:9px;line-height:1.45}
 @media(min-width:820px){.portal-highlight-layout{grid-template-columns:320px minmax(0,1fr)}.portal-highlight-media-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Role-portal modal/sheet containment -------------------------------- */
+@media (min-width:980px){
+  .ba-sheet-backdrop,
+  .ba-modal-backdrop{
+    position:fixed;
+    top:var(--eds-shell-top-offset,0px) !important;
+    right:0 !important;
+    bottom:0 !important;
+    left:var(--portal-content-left,0px) !important;
+    inset:auto 0 0 var(--portal-content-left,0px) !important;
+    width:auto;
+    height:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .ba-sheet,
+  .ba-modal{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
+
 `;

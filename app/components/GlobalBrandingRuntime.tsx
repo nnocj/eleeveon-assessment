@@ -2,51 +2,57 @@
 
 /**
  * app/components/GlobalBrandingRuntime.tsx
- * --------------------------------------------------------------------------
- * Permanent-ID global branding runtime.
+ * ---------------------------------------------------------
+ * GLOBAL BRANDING RUNTIME
+ * ---------------------------------------------------------
  *
- * Ownership:
- * - owns document title, favicon, Apple touch icon and workspace logos;
- * - does not own light/dark mode, primary-colour CSS variables or theme-color;
- * - active React contexts take precedence over persisted workspace fallbacks;
- * - effective settings take precedence over stale raw settings.
+ * Purpose:
+ * - Applies browser-level branding at all times, not only when Branchsettings opens.
+ * - Keeps favicon, Apple touch icon, document title and theme-color aligned with
+ *   the currently selected workspace.
  *
- * This prevents branding hydration from competing with ThemeContext,
- * PortalAppearanceRuntime and LocalAppearanceRuntime.
+ * Source order:
+ * 1. selected-role workspace session from eleeveon_open_workspace
+ * 2. active membership context
+ * 3. active school / branch context
+ * 4. settings context
+ * 5. default Eleeveon fallbacks from /public
+ *
+ * Ownership rule:
+ * - Developer/platform roles keep the Eleeveon title and default Eleeveon favicon.
+ * - School-facing roles see the active school name as the app title and the school
+ *   logo as favicon so the system feels owned by the institution they operate under.
+ * - School-facing roles include owner, school_admin, branch_admin, accountant,
+ *   teacher, student and parent.
+ *
+ * Media behavior:
+ * - School-facing roles prefer school logo first, then branch/settings logo.
+ * - Platform roles always use the default Eleeveon favicon.
+ * - Falls back to /favicon.ico and /android-chrome-512x512.png.
+ * - Does not mutate theme variables, does not write to IndexedDB, and does not
+ *   perform any save/sync action.
+ *
+ * Usage:
+ * - Place inside the provider tree, after ActiveBranchProvider and
+ *   ActiveMembershipProvider are available.
  */
 
-import { useEffect, useMemo, useState } from "react";
-
-import { db } from "../lib/db";
-import {
-  MediaOwners,
-  MediaFieldKeys,
-  getMediaObjectUrl,
-  getOwnerFieldMediaAsset,
-  revokeMediaObjectUrl,
-} from "../lib/media/mediaAssetUtils";
+import { useEffect, useMemo } from "react";
 
 import { useSettings } from "../context/settings-context";
 import { useActiveBranch } from "../context/active-branch-context";
 import { useActiveMembership } from "../context/active-membership-context";
 
+// ======================================================
+// CONSTANTS
+// ======================================================
+
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
+
 const DEFAULT_APP_TITLE = "Eleeveon School Management";
 const DEFAULT_FAVICON = "/favicon.ico";
 const DEFAULT_APP_ICON = "/android-chrome-512x512.png";
 const DEFAULT_APPLE_ICON = "/apple-touch-icon.png";
-
-const SCHOOL_MEDIA_OWNER_TABLE =
-  (MediaOwners as any).SCHOOLS ||
-  (MediaOwners as any).SCHOOL ||
-  "schools";
-
-const BRANCH_MEDIA_OWNER_TABLE =
-  (MediaOwners as any).BRANCHES ||
-  (MediaOwners as any).BRANCH ||
-  "branches";
-
-const LOGO_FIELD_KEY = (MediaFieldKeys as any).LOGO || "logo";
 
 const PLATFORM_ROLES = new Set([
   "developer",
@@ -60,16 +66,21 @@ const PLATFORM_ROLES = new Set([
 type OpenWorkspaceSession = {
   membership?: Record<string, any> | null;
   role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
+  schoolId?: number | string | null;
+  branchId?: number | string | null;
   memberName?: string | null;
   fullName?: string | null;
   userName?: string | null;
   openedAt?: number;
 };
 
+// ======================================================
+// SAFE BROWSER HELPERS
+// ======================================================
+
 function safeStorageRead(key: string) {
   if (typeof window === "undefined") return null;
+
   try {
     return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
   } catch {
@@ -80,6 +91,7 @@ function safeStorageRead(key: string) {
 function safeJsonRead<T>(key: string): T | null {
   const raw = safeStorageRead(key);
   if (!raw) return null;
+
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -92,20 +104,16 @@ function readOpenWorkspaceSession() {
 }
 
 function cleanText(value: unknown) {
-  return String(value ?? "").trim();
-}
-
-function cleanId(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  const id = String(value).trim();
-  return id || null;
+  return String(value || "").trim();
 }
 
 function cleanMediaUrl(value: unknown) {
   const url = cleanText(value);
+
   if (!url) return "";
   if (url.startsWith("blob:")) return "";
   if (url.startsWith("data:image/")) return "";
+
   return url;
 }
 
@@ -117,80 +125,32 @@ function isPlatformRole(role: string) {
   return PLATFORM_ROLES.has(normalizeRole(role));
 }
 
-function sameId(a: unknown, b: unknown) {
-  const left = cleanId(a);
-  const right = cleanId(b);
-  return Boolean(left && right && left === right);
-}
-
-const RUNTIME_ICON_ATTRIBUTE = "data-eleeveon-runtime-icon";
-
-function withBrandCacheBust(href: string, key: string) {
-  if (!href || href.startsWith("blob:") || href.startsWith("data:")) return href;
-  const separator = href.includes("?") ? "&" : "?";
-  return `${href}${separator}brand=${encodeURIComponent(key)}`;
-}
-
-function removeRuntimeIconLinks() {
+function upsertMeta(name: string, content: string) {
   if (typeof document === "undefined") return;
-  document
-    .querySelectorAll<HTMLLinkElement>(`link[${RUNTIME_ICON_ATTRIBUTE}="true"]`)
-    .forEach((link) => link.remove());
+
+  let meta = document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`);
+
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", name);
+    document.head.appendChild(meta);
+  }
+
+  meta.setAttribute("content", content);
 }
 
-function upsertRuntimeIconLink({
-  key,
-  rel,
-  href,
-  sizes,
-  type,
-}: {
-  key: string;
-  rel: string;
-  href: string;
-  sizes?: string;
-  type?: string;
-}) {
-  if (typeof document === "undefined" || !document.head || !href) return;
+function upsertIconLink(rel: string, href: string) {
+  if (typeof document === "undefined") return;
 
-  let link = document.head.querySelector<HTMLLinkElement>(
-    `link[${RUNTIME_ICON_ATTRIBUTE}="true"][data-eleeveon-icon-key="${key}"]`,
-  );
+  let link = document.querySelector<HTMLLinkElement>(`link[rel="${rel}"]`);
 
   if (!link) {
     link = document.createElement("link");
-    link.setAttribute(RUNTIME_ICON_ATTRIBUTE, "true");
-    link.setAttribute("data-eleeveon-icon-key", key);
+    link.setAttribute("rel", rel);
     document.head.appendChild(link);
   }
 
-  link.rel = rel;
-  link.href = href;
-  if (sizes) link.setAttribute("sizes", sizes);
-  else link.removeAttribute("sizes");
-  if (type) link.type = type;
-  else link.removeAttribute("type");
-}
-
-function applyBrowserIcons({
-  favicon,
-  appleIcon,
-  cacheKey,
-}: {
-  favicon: string;
-  appleIcon: string;
-  cacheKey: string;
-}) {
-  if (typeof document === "undefined" || !document.head) return;
-
-  const faviconHref = withBrandCacheBust(favicon || DEFAULT_FAVICON, cacheKey);
-  const appleHref = withBrandCacheBust(appleIcon || DEFAULT_APPLE_ICON, cacheKey);
-
-  upsertRuntimeIconLink({ key: "favicon-default", rel: "icon", href: faviconHref });
-  upsertRuntimeIconLink({ key: "favicon-16", rel: "icon", href: faviconHref, sizes: "16x16" });
-  upsertRuntimeIconLink({ key: "favicon-32", rel: "icon", href: faviconHref, sizes: "32x32" });
-  upsertRuntimeIconLink({ key: "shortcut-icon", rel: "shortcut icon", href: faviconHref });
-  upsertRuntimeIconLink({ key: "apple-touch-icon", rel: "apple-touch-icon", href: appleHref });
+  link.setAttribute("href", href);
 }
 
 function setDocumentTitle(title: string) {
@@ -198,337 +158,137 @@ function setDocumentTitle(title: string) {
   document.title = title || DEFAULT_APP_TITLE;
 }
 
-async function resolveOwnerLogoUrl(args: {
-  accountId?: string | null;
-  ownerTable: string;
-  ownerId?: string | null;
-  fallbackMediaId?: string | null;
-}) {
-  const ownerId = cleanId(args.ownerId);
-  if (!ownerId) return "";
-
-  const ownedAsset = await getOwnerFieldMediaAsset({
-    accountId: args.accountId || undefined,
-    ownerTable: args.ownerTable,
-    ownerId,
-    fieldKey: LOGO_FIELD_KEY,
-  });
-
-  if (
-    ownedAsset?.id &&
-    !(ownedAsset as any).isDeleted &&
-    (ownedAsset as any).active !== false
-  ) {
-    const url = await getMediaObjectUrl(String(ownedAsset.id));
-    if (url) return url;
-  }
-
-  const fallbackMediaId = cleanId(args.fallbackMediaId);
-  if (!fallbackMediaId) return "";
-
-  const fallbackAsset = await (db as any).mediaAssets?.get?.(fallbackMediaId);
-
-  const belongsToOwner =
-    fallbackAsset &&
-    !fallbackAsset.isDeleted &&
-    fallbackAsset.active !== false &&
-    (!args.accountId || fallbackAsset.accountId === args.accountId) &&
-    fallbackAsset.ownerTable === args.ownerTable &&
-    fallbackAsset.fieldKey === LOGO_FIELD_KEY &&
-    sameId(fallbackAsset.ownerId, ownerId);
-
-  if (!belongsToOwner) return "";
-  return getMediaObjectUrl(fallbackMediaId);
-}
+// ======================================================
+// COMPONENT
+// ======================================================
 
 export default function GlobalBrandingRuntime() {
-  const settingsContext = useSettings() as any;
+  const { settings } = useSettings() as any;
+
   const { activeSchool, activeBranch } = useActiveBranch() as any;
+
   const { activeMembership } = useActiveMembership() as any;
 
-  const settings =
-    settingsContext.effectiveSettings ||
-    settingsContext.settings ||
-    null;
+  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
 
-  /*
-   * Persisted workspace data is fallback-only. The active contexts represent
-   * the workspace the user is actually viewing and must always win.
-   */
-  const openWorkspace = readOpenWorkspaceSession();
-  const [resolvedSchoolLogoUrl, setResolvedSchoolLogoUrl] = useState("");
-  const [resolvedBranchLogoUrl, setResolvedBranchLogoUrl] = useState("");
-
-  const accountId = useMemo(
-    () =>
-      cleanText((activeMembership as any)?.accountId) ||
-      cleanText(settings?.accountId) ||
-      cleanText(openWorkspace?.membership?.accountId),
-    [activeMembership, openWorkspace?.membership?.accountId, settings?.accountId],
-  );
-
-  const role = useMemo(
-    () =>
+  const role = useMemo(() => {
+    return (
+      normalizeRole(openWorkspace?.role) ||
+      normalizeRole(openWorkspace?.membership?.role) ||
       normalizeRole(activeMembership?.role) ||
       normalizeRole(activeMembership?.membershipRole) ||
-      normalizeRole(activeMembership?.userRole) ||
-      normalizeRole(openWorkspace?.role) ||
-      normalizeRole(openWorkspace?.membership?.role),
-    [
-      activeMembership?.membershipRole,
-      activeMembership?.role,
-      activeMembership?.userRole,
-      openWorkspace?.membership?.role,
-      openWorkspace?.role,
-    ],
-  );
+      normalizeRole(activeMembership?.userRole)
+    );
+  }, [
+    activeMembership?.membershipRole,
+    activeMembership?.role,
+    activeMembership?.userRole,
+    openWorkspace?.membership?.role,
+    openWorkspace?.role,
+  ]);
 
   const platformRole = useMemo(() => isPlatformRole(role), [role]);
 
-  const schoolId = useMemo(
-    () =>
-      cleanId(
-        activeMembership?.schoolId ||
-          activeMembership?.school?.id ||
-          activeSchool?.id ||
-          settings?.schoolId ||
-          openWorkspace?.schoolId ||
-          openWorkspace?.membership?.schoolId ||
-          openWorkspace?.membership?.school?.id ||
-          safeStorageRead("activeSchoolId"),
-      ),
-    [
-      activeMembership?.school?.id,
-      activeMembership?.schoolId,
-      activeSchool?.id,
-      openWorkspace?.membership?.school?.id,
-      openWorkspace?.membership?.schoolId,
-      openWorkspace?.schoolId,
-      settings?.schoolId,
-    ],
-  );
-
-  const branchId = useMemo(
-    () =>
-      cleanId(
-        activeMembership?.branchId ||
-          activeMembership?.schoolBranchId ||
-          activeMembership?.branch?.id ||
-          activeBranch?.id ||
-          settings?.branchId ||
-          openWorkspace?.branchId ||
-          openWorkspace?.membership?.branchId ||
-          openWorkspace?.membership?.schoolBranchId ||
-          openWorkspace?.membership?.branch?.id ||
-          safeStorageRead("activeBranchId"),
-      ),
-    [
-      activeBranch?.id,
-      activeMembership?.branch?.id,
-      activeMembership?.branchId,
-      activeMembership?.schoolBranchId,
-      openWorkspace?.branchId,
-      openWorkspace?.membership?.branch?.id,
-      openWorkspace?.membership?.branchId,
-      openWorkspace?.membership?.schoolBranchId,
-      settings?.branchId,
-    ],
-  );
-
-  const schoolName = useMemo(
-    () =>
+  const schoolName = useMemo(() => {
+    return (
+      cleanText(openWorkspace?.membership?.school?.name) ||
+      cleanText(openWorkspace?.membership?.schoolName) ||
       cleanText(activeMembership?.school?.name) ||
       cleanText(activeMembership?.schoolName) ||
       cleanText(activeSchool?.name) ||
       cleanText(settings?.schoolName) ||
-      cleanText(settings?.name) ||
-      cleanText(openWorkspace?.membership?.school?.name) ||
-      cleanText(openWorkspace?.membership?.schoolName),
-    [
-      activeMembership?.school?.name,
-      activeMembership?.schoolName,
-      activeSchool?.name,
-      openWorkspace?.membership?.school?.name,
-      openWorkspace?.membership?.schoolName,
-      settings?.name,
-      settings?.schoolName,
-    ],
-  );
+      cleanText(settings?.name)
+    );
+  }, [
+    activeMembership?.school?.name,
+    activeMembership?.schoolName,
+    activeSchool?.name,
+    openWorkspace?.membership?.school?.name,
+    openWorkspace?.membership?.schoolName,
+    settings?.name,
+    settings?.schoolName,
+  ]);
 
-  const schoolLogoUrl = useMemo(
-    () =>
-      resolvedSchoolLogoUrl ||
+  const schoolLogoUrl = useMemo(() => {
+    return (
+      cleanMediaUrl(openWorkspace?.membership?.school?.logo) ||
       cleanMediaUrl(activeMembership?.school?.logo) ||
       cleanMediaUrl(activeSchool?.logo) ||
-      cleanMediaUrl(settings?.schoolLogo) ||
-      cleanMediaUrl(openWorkspace?.membership?.school?.logo),
-    [
-      activeMembership?.school?.logo,
-      activeSchool?.logo,
-      openWorkspace?.membership?.school?.logo,
-      resolvedSchoolLogoUrl,
-      settings?.schoolLogo,
-    ],
-  );
+      cleanMediaUrl(settings?.schoolLogo)
+    );
+  }, [
+    activeMembership?.school?.logo,
+    activeSchool?.logo,
+    openWorkspace?.membership?.school?.logo,
+    settings?.schoolLogo,
+  ]);
 
-  const branchLogoUrl = useMemo(
-    () =>
-      resolvedBranchLogoUrl ||
+  const branchLogoUrl = useMemo(() => {
+    return (
+      cleanMediaUrl(openWorkspace?.membership?.branch?.logo) ||
       cleanMediaUrl(activeMembership?.branch?.logo) ||
       cleanMediaUrl(activeBranch?.logo) ||
       cleanMediaUrl(settings?.branchLogo) ||
-      cleanMediaUrl(settings?.logo) ||
-      cleanMediaUrl(openWorkspace?.membership?.branch?.logo),
-    [
-      activeBranch?.logo,
-      activeMembership?.branch?.logo,
-      openWorkspace?.membership?.branch?.logo,
-      resolvedBranchLogoUrl,
-      settings?.branchLogo,
-      settings?.logo,
-    ],
-  );
-
-  const logoUrl = useMemo(
-    () => (platformRole ? DEFAULT_FAVICON : schoolLogoUrl || branchLogoUrl || DEFAULT_FAVICON),
-    [branchLogoUrl, platformRole, schoolLogoUrl],
-  );
-
-  const appleIconUrl = useMemo(
-    () =>
-      platformRole
-        ? DEFAULT_APPLE_ICON
-        : schoolLogoUrl || branchLogoUrl || DEFAULT_APPLE_ICON || DEFAULT_APP_ICON,
-    [branchLogoUrl, platformRole, schoolLogoUrl],
-  );
-
-  const title = useMemo(
-    () => (platformRole ? DEFAULT_APP_TITLE : schoolName || DEFAULT_APP_TITLE),
-    [platformRole, schoolName],
-  );
-
-  const iconCacheKey = useMemo(
-    () =>
-      platformRole
-        ? "platform-default"
-        : `school-${schoolId || "none"}-branch-${branchId || "none"}-${logoUrl}`,
-    [branchId, logoUrl, platformRole, schoolId],
-  );
-
-  useEffect(() => {
-    if (platformRole) {
-      setResolvedSchoolLogoUrl((current) => {
-        if (current) revokeMediaObjectUrl(current);
-        return "";
-      });
-      setResolvedBranchLogoUrl((current) => {
-        if (current) revokeMediaObjectUrl(current);
-        return "";
-      });
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadResolvedLogos = async () => {
-      try {
-        const nextSchoolUrl = schoolId
-          ? await resolveOwnerLogoUrl({
-              accountId,
-              ownerTable: SCHOOL_MEDIA_OWNER_TABLE,
-              ownerId: schoolId,
-              fallbackMediaId: cleanId(
-                openWorkspace?.membership?.school?.logoMediaId ||
-                  activeMembership?.school?.logoMediaId ||
-                  activeSchool?.logoMediaId,
-              ),
-            })
-          : "";
-
-        const nextBranchUrl = branchId
-          ? await resolveOwnerLogoUrl({
-              accountId,
-              ownerTable: BRANCH_MEDIA_OWNER_TABLE,
-              ownerId: branchId,
-              fallbackMediaId: cleanId(
-                openWorkspace?.membership?.branch?.logoMediaId ||
-                  activeMembership?.branch?.logoMediaId ||
-                  activeBranch?.logoMediaId,
-              ),
-            })
-          : "";
-
-        if (cancelled) {
-          if (nextSchoolUrl) revokeMediaObjectUrl(nextSchoolUrl);
-          if (nextBranchUrl) revokeMediaObjectUrl(nextBranchUrl);
-          return;
-        }
-
-        setResolvedSchoolLogoUrl((current) => {
-          if (current && current !== nextSchoolUrl) revokeMediaObjectUrl(current);
-          return nextSchoolUrl || "";
-        });
-
-        setResolvedBranchLogoUrl((current) => {
-          if (current && current !== nextBranchUrl) revokeMediaObjectUrl(current);
-          return nextBranchUrl || "";
-        });
-      } catch (error) {
-        console.warn("Failed to resolve global branding logo:", error);
-
-        if (!cancelled) {
-          setResolvedSchoolLogoUrl((current) => {
-            if (current) revokeMediaObjectUrl(current);
-            return "";
-          });
-          setResolvedBranchLogoUrl((current) => {
-            if (current) revokeMediaObjectUrl(current);
-            return "";
-          });
-        }
-      }
-    };
-
-    void loadResolvedLogos();
-
-    return () => {
-      cancelled = true;
-    };
+      cleanMediaUrl(settings?.logo)
+    );
   }, [
-    accountId,
-    activeBranch?.logoMediaId,
-    activeMembership?.branch?.logoMediaId,
-    activeMembership?.school?.logoMediaId,
-    activeSchool?.logoMediaId,
-    branchId,
-    openWorkspace?.membership?.branch?.logoMediaId,
-    openWorkspace?.membership?.school?.logoMediaId,
-    platformRole,
-    schoolId,
+    activeBranch?.logo,
+    activeMembership?.branch?.logo,
+    openWorkspace?.membership?.branch?.logo,
+    settings?.branchLogo,
+    settings?.logo,
   ]);
 
-  useEffect(() => {
-    return () => {
-      if (resolvedSchoolLogoUrl) revokeMediaObjectUrl(resolvedSchoolLogoUrl);
-      if (resolvedBranchLogoUrl) revokeMediaObjectUrl(resolvedBranchLogoUrl);
-    };
-  }, [resolvedBranchLogoUrl, resolvedSchoolLogoUrl]);
+  const logoUrl = useMemo(() => {
+    if (platformRole) return DEFAULT_FAVICON;
 
-  useEffect(() => setDocumentTitle(title), [title]);
+    return schoolLogoUrl || branchLogoUrl || DEFAULT_FAVICON;
+  }, [branchLogoUrl, platformRole, schoolLogoUrl]);
+
+  const appleIconUrl = useMemo(() => {
+    if (platformRole) return DEFAULT_APPLE_ICON;
+
+    return schoolLogoUrl || branchLogoUrl || DEFAULT_APPLE_ICON || DEFAULT_APP_ICON;
+  }, [branchLogoUrl, platformRole, schoolLogoUrl]);
+
+  const themeColor = useMemo(() => {
+    return (
+      cleanText(settings?.primaryColor) ||
+      cleanText(settings?.themeColor) ||
+      "#2f6fed"
+    );
+  }, [settings?.primaryColor, settings?.themeColor]);
+
+  const title = useMemo(() => {
+    if (platformRole) return DEFAULT_APP_TITLE;
+    return schoolName || DEFAULT_APP_TITLE;
+  }, [platformRole, schoolName]);
 
   useEffect(() => {
-    applyBrowserIcons({
-      favicon: logoUrl || DEFAULT_FAVICON,
-      appleIcon: appleIconUrl || DEFAULT_APPLE_ICON,
-      cacheKey: iconCacheKey,
-    });
-  }, [appleIconUrl, iconCacheKey, logoUrl]);
+    setDocumentTitle(title);
+  }, [title]);
 
   useEffect(() => {
-    return () => {
-      removeRuntimeIconLinks();
-    };
-  }, []);
+    upsertIconLink("icon", logoUrl || DEFAULT_FAVICON);
+    upsertIconLink("shortcut icon", logoUrl || DEFAULT_FAVICON);
+    upsertIconLink("apple-touch-icon", appleIconUrl || DEFAULT_APPLE_ICON);
+  }, [appleIconUrl, logoUrl]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    const root = document.documentElement;
+    root.style.setProperty("--eds-brand-primary", themeColor);
+    root.style.setProperty("--primary-color", themeColor);
+    root.style.setProperty("--dashboard-primary", themeColor);
+    root.style.setProperty("--branch-primary", themeColor);
+    root.style.setProperty("--accent-color", themeColor);
+
+    // LocalAppearanceRuntime owns the neutral light/dark window colour.
+    // Keep the brand available without forcing the OS chrome to primary blue.
+    upsertMeta("application-name", title);
+    upsertMeta("apple-mobile-web-app-title", title);
+  }, [themeColor, title]);
 
   return null;
 }

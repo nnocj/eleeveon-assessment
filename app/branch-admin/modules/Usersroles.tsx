@@ -13,28 +13,25 @@
  * - Branch admin can only assign roles below branch admin:
  *   accountant, teacher, student, parent.
  *
- * Workspace-session aligned:
- * - reads the selected workspace session written by /select-role first
- * - falls back to ActiveMembershipProvider, then ActiveBranchContext/settings/storage
- * - prevents this module from using stale school/branch context left behind by another role
- * - profile rows now load through listActiveLocal(...) to match the compact golden modules
+ * Role-portal workspace aligned:
+ * - resolves account, school and branch through useBranchWorkspaceScope()
+ * - follows the same selected-role contract as the Branch Admin academic modules
+ * - profile rows load through listActiveLocal(...) to match the compact golden modules
  * - backend auth remains the source of truth for AppUser/UserMembership access records
  */
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
-import { useActiveBranch } from "../../context/active-branch-context";
-import { useActiveMembership } from "../../context/active-membership-context";
 
 import { db, Parent, Student, Teacher } from "../../lib/db/db";
 import { apiRequest } from "../../lib/platformApi";
 import { listActiveLocal, prepareSyncData } from "../../lib/sync/syncUtils";
 
-import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
+import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
 // ======================================================
 // TYPES
 // ======================================================
@@ -52,21 +49,6 @@ type TenantRow = {
   branchId?: EntityId | null;
   isDeleted?: boolean;
   active?: boolean;
-};
-
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: EntityId | null;
-  branchId?: EntityId | null;
-  teacherId?: EntityId | null;
-  studentId?: EntityId | null;
-  parentId?: EntityId | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
 };
 
 type AppUser = TenantRow & {
@@ -199,8 +181,6 @@ const TITLES = [
   "Nana",
 ];
 
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
-
 const DEFAULT_FORM: FormState = {
   mode: "manual",
   userId: "",
@@ -226,97 +206,6 @@ function idOf(value: unknown): string {
   if (value === null || value === undefined) return "";
   const parsed = String(value).trim();
   return parsed && parsed !== "0" ? parsed : "";
-}
-
-function safeStorageRead(key: string) {
-  if (typeof window === "undefined") return null;
-
-  try {
-    return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership() {
-  return safeJsonRead<Record<string, any>>("activeMembership");
-}
-
-function firstLocalId(...values: unknown[]): string {
-  for (const value of values) {
-    const parsed = idOf(value);
-    if (parsed) return parsed;
-  }
-
-  return "";
-}
-
-function selectedWorkspaceSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeSchoolId?: unknown;
-  activeSchool?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeStorageRead("activeSchoolId"),
-  );
-}
-
-function selectedWorkspaceBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeBranchId?: unknown;
-  activeBranch?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeStorageRead("activeBranchId"),
-  );
 }
 
 async function activeRows<T>(tableName: string): Promise<T[]> {
@@ -1335,37 +1224,27 @@ function profileSub(
 // ======================================================
 
 export default function Usersroles() {
-  const dataRevision = useDataRevision();
+  const dataRevision = useBranchTableRevision([
+    "teachers",
+    "students",
+    "parents",
+    "appUsers",
+    "users",
+    "userMemberships",
+    "memberships",
+  ]);
 
   const router = useRouter();
-  const { accountId, authenticated, loading: accountLoading } = useAccount();
   const { settings, loading: settingsLoading } = useSettings();
+  const workspace = useBranchWorkspaceScope();
   const {
-    activeSchool,
-    activeSchoolId,
-    activeBranch,
-    activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch();
-  const { activeMembership } = useActiveMembership() as any;
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedWorkspaceSchoolId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeSchoolId,
-    activeSchool: activeSchool as any,
-    settings: settings as any,
-  });
-
-  const branchId = selectedWorkspaceBranchId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeBranchId,
-    activeBranch: activeBranch as any,
-    settings: settings as any,
-  });
+    accountId,
+    schoolId,
+    branchId,
+    authenticated,
+    restoring: accountLoading,
+    branchLoading: contextLoading,
+  } = workspace;
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
 
@@ -1827,6 +1706,15 @@ export default function Usersroles() {
       return;
     }
 
+    const resolvedAccountId = idOf(accountId);
+    const resolvedSchoolId = idOf(schoolId);
+    const resolvedBranchId = idOf(branchId);
+
+    if (!resolvedAccountId || !resolvedSchoolId || !resolvedBranchId) {
+      setMessage("Branch workspace is not ready. Please reopen this page and try again.");
+      return;
+    }
+
     try {
       setSaving(true);
 
@@ -1837,33 +1725,33 @@ export default function Usersroles() {
         form,
         users,
         memberships,
-        accountId: accountId!,
-        schoolId: schoolId,
-        branchId: branchId,
+        accountId: resolvedAccountId,
+        schoolId: resolvedSchoolId,
+        branchId: resolvedBranchId,
       });
 
       await cacheAuthUserLocally({
         user: response.user,
         form,
-        accountId: accountId!,
-        schoolId: schoolId,
-        branchId: branchId,
+        accountId: resolvedAccountId,
+        schoolId: resolvedSchoolId,
+        branchId: resolvedBranchId,
       });
 
       await cacheAuthMembershipLocally({
         membership: response.membership,
         user: response.user,
         form,
-        accountId: accountId!,
-        schoolId: schoolId,
-        branchId: branchId,
+        accountId: resolvedAccountId,
+        schoolId: resolvedSchoolId,
+        branchId: resolvedBranchId,
       });
 
       await updateLinkedProfileContactLocally({
         form,
-        accountId: accountId!,
-        schoolId: schoolId,
-        branchId: branchId,
+        accountId: resolvedAccountId,
+        schoolId: resolvedSchoolId,
+        branchId: resolvedBranchId,
       });
 
       setDrawerOpen(false);
@@ -1883,6 +1771,15 @@ export default function Usersroles() {
     if (!candidate.membership?.id) {
       openCandidate(candidate);
       setMessage("Create portal access first.");
+      return;
+    }
+
+    const resolvedAccountId = idOf(accountId);
+    const resolvedSchoolId = idOf(schoolId);
+    const resolvedBranchId = idOf(branchId);
+
+    if (!resolvedAccountId || !resolvedSchoolId || !resolvedBranchId) {
+      alert("Branch workspace is not ready. Please reopen this page and try again.");
       return;
     }
 
@@ -1943,9 +1840,9 @@ export default function Usersroles() {
         await cacheAuthUserLocally({
           user: candidate.user,
           form: cacheForm,
-          accountId: accountId!,
-          schoolId: schoolId,
-          branchId: branchId,
+          accountId: resolvedAccountId,
+          schoolId: resolvedSchoolId,
+          branchId: resolvedBranchId,
         });
       }
 
@@ -1955,9 +1852,9 @@ export default function Usersroles() {
           candidate.user ||
           ({ id: membership.userId, email: candidate.email } as AppUser),
         form: cacheForm,
-        accountId: accountId!,
-        schoolId: schoolId,
-        branchId: branchId,
+        accountId: resolvedAccountId,
+        schoolId: resolvedSchoolId,
+        branchId: resolvedBranchId,
       });
 
       await load();
@@ -4589,5 +4486,30 @@ const css = `
 @media(min-width:680px){.usersroles-page .usersroles-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(min-width:1040px){.usersroles-page .usersroles-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(min-width:1320px){.usersroles-page .usersroles-list{grid-template-columns:repeat(4,minmax(0,1fr))}}
+
+
+/* Role-portal modal/sheet containment -------------------------------- */
+@media (min-width:980px){
+  .ba-sheet-backdrop,
+  .ba-modal-backdrop{
+    position:fixed;
+    top:var(--eds-shell-top-offset,0px) !important;
+    right:0 !important;
+    bottom:0 !important;
+    left:var(--portal-content-left,0px) !important;
+    inset:auto 0 0 var(--portal-content-left,0px) !important;
+    width:auto;
+    height:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .ba-sheet,
+  .ba-modal{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
 
 `;

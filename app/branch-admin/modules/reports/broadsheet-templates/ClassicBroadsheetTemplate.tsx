@@ -14,7 +14,7 @@
  * This file does not calculate academic results. It renders engine datasets.
  */
 
-import React from "react";
+import React, { useMemo } from "react";
 
 import type {
   AnnualBroadsheet,
@@ -43,6 +43,9 @@ import {
   resolveBroadsheetBranding,
   resolveBroadsheetStudentPhoto,
   resolveBroadsheetTemplateSettings,
+  visibleBroadsheetAssessmentColumns,
+  broadsheetAssessmentColumnLabel,
+  broadsheetAssessmentCellText,
 } from "./broadsheet-template-utils";
 
 import BroadsheetClassicHeader from "../shared/headers/broadsheets/BroadsheetClassicHeader";
@@ -465,6 +468,15 @@ function SubjectMode({
 }) {
   const styles = tableStyles(compact);
 
+  const assessmentColumns = useMemo(
+    () =>
+      visibleBroadsheetAssessmentColumns({
+        dataset,
+        settings,
+      }),
+    [dataset, settings],
+  );
+
   return (
     <>
       {settings.showBroadsheetSummary && (
@@ -501,12 +513,56 @@ function SubjectMode({
               </th>
 
               {settings.showBroadsheetAssessmentBreakdown !== false &&
-                dataset.assessmentColumns.map((column) => (
+                assessmentColumns.map((column) => (
                   <th key={column.assessmentStructureItemId} style={styles.th}>
-                    {column.name}
-                    <div style={{ marginTop: 1, fontSize: "0.86em" }}>
-                      W:{formatNumber(column.weight, 0)}
+                    {settings.broadsheetShowAssessmentGroupHeaders &&
+                      column.groupLabel && (
+                        <div
+                          style={{
+                            marginBottom: 1,
+                            fontSize: "0.76em",
+                            opacity: 0.72,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {column.groupLabel}
+                        </div>
+                      )}
+
+                    <div>
+                      {broadsheetAssessmentColumnLabel(
+                        column,
+                        settings,
+                      )}
                     </div>
+
+                    {(settings.showAssessmentWeights ||
+                      settings.showAssessmentMaximumScores) && (
+                      <div
+                        style={{
+                          marginTop: 1,
+                          fontSize: "0.86em",
+                        }}
+                      >
+                        {settings.showAssessmentWeights
+                          ? `W:${formatNumber(
+                              column.effectiveWeight ??
+                                column.weight,
+                              0,
+                            )}`
+                          : ""}
+                        {settings.showAssessmentWeights &&
+                        settings.showAssessmentMaximumScores
+                          ? " · "
+                          : ""}
+                        {settings.showAssessmentMaximumScores
+                          ? `M:${formatNumber(
+                              column.maxScore,
+                              0,
+                            )}`
+                          : ""}
+                      </div>
+                    )}
                   </th>
                 ))}
 
@@ -551,7 +607,7 @@ function SubjectMode({
                 </td>
 
                 {settings.showBroadsheetAssessmentBreakdown !== false &&
-                  dataset.assessmentColumns.map((column) => {
+                  assessmentColumns.map((column) => {
                     const item = student.breakdown.find(
                       (entry) =>
                         entry.assessmentStructureItemId ===
@@ -562,9 +618,10 @@ function SubjectMode({
                         key={column.assessmentStructureItemId}
                         style={{ ...styles.td, textAlign: "center" }}
                       >
-                        {item
-                          ? `${formatNumber(item.score, 0)}/${formatNumber(item.maxScore, 0)}`
-                          : "-"}
+                        {broadsheetAssessmentCellText({
+                            item,
+                            settings,
+                          })}
                       </td>
                     );
                   })}

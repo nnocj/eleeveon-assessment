@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * app/branch-admin/modules/StudentEnrollment.tsx
+ * app/branch-admin/modules/StudentEnrollments.tsx
  * Eleeveon Student Enrollments V2.
  * Branch-scoped, offline-first, mobile-first, syncUtils powered.
  *
@@ -864,69 +864,181 @@ export default function StudentEnrollments() {
     return "";
   };
 
+  const resolveStudentRecord = async (
+    studentId: string,
+  ): Promise<Student | undefined> => {
+    const normalizedId = cleanId(studentId);
+    if (!normalizedId) return undefined;
+
+    const direct =
+      await db.students.get(normalizedId);
+
+    if (direct) return direct;
+
+    const byCloudId =
+      await db.students
+        .where("cloudId")
+        .equals(normalizedId)
+        .first()
+        .catch(() => undefined);
+
+    if (byCloudId) return byCloudId;
+
+    return db.students
+      .where("localId")
+      .equals(normalizedId)
+      .first()
+      .catch(() => undefined);
+  };
+
   const syncStudentCurrentClass = async (
     studentId: string,
     classId: string,
   ) => {
-    await updateLocal("students", studentId, {
-      currentClassId: classId,
-    } as unknown as Partial<Student>);
+    const student =
+      await resolveStudentRecord(studentId);
+
+    const localStudentId =
+      cleanId(student?.id) ||
+      cleanId(studentId);
+
+    if (!student || !localStudentId) {
+      throw new Error(
+        "The selected student record could not be resolved locally.",
+      );
+    }
+
+    await updateLocal(
+      "students",
+      localStudentId,
+      {
+        currentClassId:
+          cleanId(classId) || null,
+        status:
+          student.status === "graduated"
+            ? "active"
+            : student.status,
+      } as unknown as Partial<Student>,
+    );
   };
 
   const save = async (event?: React.FormEvent) => {
     event?.preventDefault();
-    const error = validate();
-    if (error) {
-      showToast("error", error);
+
+    const validationError = validate();
+
+    if (validationError) {
+      showToast(
+        "error",
+        validationError,
+      );
       return;
     }
-    if (!authenticated || !accountId || !schoolId || !branchId) return;
+
+    if (
+      !authenticated ||
+      !accountId ||
+      !schoolId ||
+      !branchId
+    ) {
+      return;
+    }
 
     try {
       setSaving(true);
+
       const existing = form.id
-        ? rows.find((row: any) => sameId(row.id, form.id))
+        ? rows.find((row: any) =>
+            sameId(
+              row.id,
+              form.id,
+            ),
+          )
         : undefined;
+
+      const studentId =
+        cleanId(form.studentId);
+      const classId =
+        cleanId(form.classId);
+
       const payload: Partial<StudentEnrollment> = {
         accountId,
-        schoolId: schoolId,
-        branchId: branchId,
-        studentId: cleanId(form.studentId) || undefined,
-        classId: cleanId(form.classId) || undefined,
-        academicStructureId: cleanId(form.academicStructureId) || undefined,
-        academicPeriodId: cleanId(form.academicPeriodId) || undefined,
+        schoolId,
+        branchId,
+        studentId:
+          studentId || undefined,
+        classId:
+          classId || undefined,
+        academicStructureId:
+          cleanId(
+            form.academicStructureId,
+          ) || undefined,
+        academicPeriodId:
+          cleanId(
+            form.academicPeriodId,
+          ) || undefined,
         startDate: form.startDate,
-        endDate: form.endDate.trim() || undefined,
+        endDate:
+          form.status === "active"
+            ? undefined
+            : form.endDate.trim() ||
+              existing?.endDate ||
+              undefined,
         status: form.status,
         isDeleted: false,
       } as Partial<StudentEnrollment>;
 
-      if (form.id && existing)
-        await updateLocal("studentEnrollments", String(form.id), payload);
-      else
+      if (form.id && existing) {
+        await updateLocal(
+          "studentEnrollments",
+          String(form.id),
+          payload,
+        );
+      } else {
         await createLocal(
           "studentEnrollments",
           payload as unknown as StudentEnrollment,
         );
+      }
+
+      let currentClassUpdated = false;
 
       if (
         form.updateStudentCurrentClass &&
-        form.studentId &&
-        form.classId &&
+        studentId &&
+        classId &&
         form.status === "active"
       ) {
         await syncStudentCurrentClass(
-          String(form.studentId),
-          String(form.classId),
+          studentId,
+          classId,
         );
+
+        currentClassUpdated = true;
       }
 
       setModalOpen(false);
-      showToast("success", "Student enrollment saved.");
+
+      showToast(
+        "success",
+        currentClassUpdated
+          ? "Enrollment saved and the student's active class was updated."
+          : "Student enrollment saved.",
+      );
+
       await load();
     } catch (error) {
-      console.error("Failed to save student enrollment:", error);
-      showToast("error", "Failed to save student enrollment.");
+      console.error(
+        "Failed to save student enrollment:",
+        error,
+      );
+
+      showToast(
+        "error",
+        error instanceof Error
+          ? error.message
+          : "Failed to save student enrollment.",
+      );
     } finally {
       setSaving(false);
     }
@@ -970,12 +1082,38 @@ export default function StudentEnrollments() {
     await load();
   };
 
-  const syncCurrentClass = async (row: StudentEnrollment) => {
+  const syncCurrentClass = async (
+    row: StudentEnrollment,
+  ) => {
     const item: any = row;
-    await syncStudentCurrentClass(String(item.studentId), String(item.classId));
-    setSelectedItem(null);
-    showToast("success", "Student current class synced.");
-    await load();
+
+    try {
+      await syncStudentCurrentClass(
+        String(item.studentId),
+        String(item.classId),
+      );
+
+      setSelectedItem(null);
+
+      showToast(
+        "success",
+        "Student active class updated.",
+      );
+
+      await load();
+    } catch (error) {
+      console.error(
+        "Failed to update student active class:",
+        error,
+      );
+
+      showToast(
+        "error",
+        error instanceof Error
+          ? error.message
+          : "Failed to update student active class.",
+      );
+    }
   };
 
   if (accountLoading || contextLoading || settingsLoading || loading)
@@ -2216,4 +2354,23 @@ const css = `
 @media (min-width:680px) { .ba-list { grid-template-columns: repeat(2,minmax(0,1fr)); max-width: 1180px; margin-left: auto; margin-right: auto; } .ba-modal-backdrop,.ba-sheet-backdrop { place-items: center; padding: 18px; } }
 @media (min-width:1040px) { .ba-search-card,.ba-filter-chips,.ba-list,.ba-analysis-grid,.ba-table-card { max-width: 1180px; margin-left: auto; margin-right: auto; } .ba-list { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 @media (max-width:520px) { .ba-search-card { gap: 6px; padding: 7px; border-radius: 22px; } .ba-icon-button,.ba-filter-button,.ba-add-inline { width: 40px; height: 40px; } .enrollment-row { padding: 9px; border-radius: 20px; } .ba-avatar { width: 46px; height: 46px; border-radius: 17px; } .ba-sheet { border-radius: 20px; padding: 11px; } .ba-sheet-actions { display: grid; grid-template-columns: minmax(0,1fr); } }
+@media (min-width:980px){
+  .ba-modal-backdrop,
+  .ba-sheet-backdrop{
+    top:var(--eds-shell-top-offset,0px);
+    right:0;
+    bottom:0;
+    left:var(--portal-content-left,0px);
+    width:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+  .ba-modal,
+  .ba-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
+
 `;

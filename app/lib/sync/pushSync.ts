@@ -45,6 +45,7 @@ import {
 } from "./syncUtils";
 
 import { registerSyncDevice } from "./syncDevices";
+import { serializeSyncPayload } from "./prepareSyncData";
 
 import {
   integrityReason,
@@ -108,8 +109,14 @@ type PushAccumulator = {
   errors: string[];
 };
 
+function permanentMediaOwnerId(row: any) {
+  return String(
+    row?.ownerId ?? row?.ownerLocalId ?? "",
+  ).trim();
+}
+
 function hasRealMediaOwner(row: any) {
-  return Boolean(row?.ownerId);
+  return Boolean(permanentMediaOwnerId(row));
 }
 
 function isTemporaryUnattachedMediaAsset(tableName: string, row: any) {
@@ -188,14 +195,32 @@ function cleanPayloadForPush(
   patch: Record<string, any>,
 ) {
   const initiallyStripped = stripLocalOnlyFields({ ...row, ...patch });
-  const sanitized = sanitizeTransportValue(initiallyStripped);
+  const normalized =
+    tableName === "mediaAssets"
+      ? {
+          ...initiallyStripped,
+          ownerId:
+            initiallyStripped.ownerId ??
+            initiallyStripped.ownerLocalId,
+        }
+      : initiallyStripped;
+
+  const serialized = serializeSyncPayload(normalized, {
+    tableName,
+    deviceId: String(patch.deviceId || row.deviceId || getDeviceId()),
+  });
+  const sanitized = sanitizeTransportValue(serialized);
 
   const payload =
     sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)
       ? (sanitized as Record<string, any>)
       : {};
 
-  if (tableName === "mediaAssets") delete payload.ownerTempKey;
+  // Temporary media is skipped before payload creation. Attached media must
+  // use its permanent owner UUID across devices.
+  if (tableName === "mediaAssets" && payload.ownerId) {
+    delete payload.ownerTempKey;
+  }
   delete payload.id;
 
   return payload;

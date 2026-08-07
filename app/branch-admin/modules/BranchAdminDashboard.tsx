@@ -39,6 +39,37 @@ import type { RoleNavSection } from "../../components/role-portals/RolePortalShe
 
 import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+
+import {
+  ActivityFeed,
+  CalendarPreview,
+  DashboardBackground,
+  DashboardHeader,
+  DashboardSection,
+  DashboardWidget,
+  DashboardWidgets,
+  QuickActionGrid,
+  StatisticCard,
+  StatisticGrid,
+  WelcomeHero,
+} from "../../components/dashboard";
+
+import {
+  CommunicationIcon,
+  AssessmentIcon,
+  AttendanceIcon,
+  ReportsIcon,
+  StudentIcon,
+  TeacherIcon,
+  ParentIcon,
+  CalendarIcon,
+} from "../../components/icons";
+
+import {
+  Button,
+  Dialog,
+  EmptyState,
+} from "../../components/ui";
 type AnyRow = Record<string, any>;
 type ViewMode = "cards" | "table" | "analytics";
 type AreaFilter =
@@ -1236,130 +1267,561 @@ export default function BranchAdminDashboard({
     } catch {}
   }
 
-  if (loading || accountLoading || settingsLoading) return <State primary={primary} title="Opening branch dashboard..." text="Preparing your school home, attendance, announcements and activity." />;
-  if (!authenticated || !accountId) return <State primary={primary} title="Redirecting to login..." text="You must sign in before viewing the branch dashboard." />;
+  if (loading || accountLoading || settingsLoading) {
+    return (
+      <DashboardBackground primaryColor={primary}>
+        <section className="eds-dashboard-state">
+          <div className="eds-dashboard-state-spinner" />
+          <h2>Opening branch dashboard...</h2>
+          <p>
+            Preparing your school home, attendance,
+            announcements and activity.
+          </p>
+        </section>
+      </DashboardBackground>
+    );
+  }
+
+  if (!authenticated || !accountId) {
+    return (
+      <DashboardBackground primaryColor={primary}>
+        <section className="eds-dashboard-state">
+          <h2>Redirecting to login...</h2>
+          <p>
+            You must sign in before viewing the branch
+            dashboard.
+          </p>
+        </section>
+      </DashboardBackground>
+    );
+  }
 
   const quickActions = [
-    ["students","＋","Student"],
-    ["studentAttendance","✓","Attendance"],
-    ["assessmentEntry","✎","Assessment"],
-    ["studentReports","▤","Reports"],
-    ["announcements","📣","Announce"],
-  ] as const;
+    {
+      key: "students",
+      label: "Student",
+      icon: <StudentIcon />,
+      onClick: () => openRoute("students"),
+    },
+    {
+      key: "studentAttendance",
+      label: "Attendance",
+      icon: <AttendanceIcon />,
+      onClick: () => openRoute("studentAttendance"),
+    },
+    {
+      key: "assessmentEntries",
+      label: "Assessment",
+      icon: <AssessmentIcon />,
+      onClick: () => openRoute("assessmentEntries"),
+    },
+    {
+      key: "studentReports",
+      label: "Reports",
+      icon: <ReportsIcon />,
+      onClick: () => openRoute("studentReports"),
+    },
+    {
+      key: "announcements",
+      label: "Announce",
+      icon: <CommunicationIcon />,
+      onClick: () => openRoute("announcements"),
+    },
+  ];
 
-  return <main className="bd-page" style={{"--bd-primary":primary} as React.CSSProperties}>
-    <style>{css}</style>
-    <section className="bd-search-card">
-      <span className={`status-dot-mini ${summary.students || summary.classes ? "green" : "gray"}`} title={summary.branchName}/>
-      <label className="bd-search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search students, attendance, reports..." aria-label="Search branch modules"/></label>
-      {query ? <button className="bd-clear" onClick={()=>setQuery("")} aria-label="Clear search">×</button> : null}
-      <button className="bd-refresh" onClick={load} aria-label="Refresh dashboard">↻</button>
-      <button className="bd-more" onClick={()=>setMoreOpen(true)} aria-label="More options">⋯</button>
-    </section>
+  const heroStats = [
+    { label: "Students", value: summary.students },
+    { label: "Teachers", value: summary.teachers },
+    { label: "Classes", value: summary.classes },
+  ];
 
-    {q ? <section className="bd-search-results">
-      <div className="bd-section-head"><div><span>Search results</span><h2>{searchResults.length ? `Matching “${query.trim()}”` : "No matches found"}</h2></div><b>{searchResults.length}</b></div>
-      {searchResults.map(item=><button key={item.key} className="branch-row" onClick={()=>openRoute(item.routeKey)}><span className="branch-avatar">{item.icon}</span><span className="branch-main"><strong>{item.label}</strong><small>{item.note}</small><em>{areaLabel(item.area)}</em></span><span className="branch-side"><Chip tone={item.tone}>{item.value}</Chip><i>›</i></span></button>)}
-      {!searchResults.length ? <Empty title="Nothing matches that search" text="Try a module name such as students, attendance, reports, fees or settings."/> : null}
-    </section> : <>
-      <section
-        className={`bd-hero ${activeHeroSlide ? "has-media" : ""} ${
-          activeHeroSlide?.transition === "slide"
-            ? "slide-transition"
-            : "fade-transition"
-        }`}
-      >
-        {activeHeroSlide ? (
-          <div key={activeHeroSlide.id} className="bd-hero-media">
-            {activeHeroSlide.type === "video" ? (
-              <video
-                src={activeHeroSlide.src}
-                poster={activeHeroSlide.poster}
-                autoPlay
-                muted
-                playsInline
-                preload="metadata"
-                onEnded={advanceHero}
-                onError={advanceHero}
-              />
-            ) : (
-              <img src={activeHeroSlide.src} alt="" />
-            )}
-            <span className="bd-hero-shade" />
-          </div>
-        ) : null}
+  return (
+    <DashboardBackground primaryColor={primary}>
+      <style>{branchDashboardToolbarCss}</style>
 
-        <div className="bd-hero-copy"><span>{greeting}</span><h1>{userName}</h1><p>Welcome to <strong>{summary.schoolName}</strong><small className="bd-branch-name">{summary.branchName}</small></p><blockquote>“{motto}”</blockquote></div>
+      <div className="branch-dashboard-toolbar">
+        <DashboardHeader
+          query={query}
+          onQueryChange={setQuery}
+          onClear={() => setQuery("")}
+          onRefresh={load}
+          onMore={() => setMoreOpen(true)}
+          placeholder="Search students, attendance, reports..."
+          active={Boolean(summary.students || summary.classes)}
+          statusLabel={summary.branchName}
+        />
+      </div>
 
-        {activeHeroSlide?.title ? (
-          <div className="bd-highlight-copy">
-            <b>{activeHeroSlide.title}</b>
-            {activeHeroSlide.subtitle ? (
-              <small>{activeHeroSlide.subtitle}</small>
-            ) : null}
-            {activeHeroSlide.actionLabel ? (
+      {q ? (
+        <section className="eds-dashboard-search-results">
+          <DashboardSection
+            eyebrow="Search results"
+            title={
+              searchResults.length
+                ? `Matching “${query.trim()}”`
+                : "No matches found"
+            }
+            action={<b>{searchResults.length}</b>}
+          >
+            {searchResults.map((item) => (
               <button
+                key={item.key}
                 type="button"
-                onClick={() => openHeroAction(activeHeroSlide)}
+                className="eds-dashboard-search-row"
+                onClick={() => openRoute(item.routeKey)}
               >
-                {activeHeroSlide.actionLabel}
+                <span className="eds-dashboard-search-icon">
+                  {item.icon}
+                </span>
+                <span className="eds-dashboard-search-copy">
+                  <strong>{item.label}</strong>
+                  <small>{item.note}</small>
+                  <em>{areaLabel(item.area)}</em>
+                </span>
+                <b>{item.value}</b>
               </button>
-            ) : null}
-          </div>
-        ) : null}
-
-        <div className="bd-hero-stats"><span><b>{summary.students}</b> Students</span><span><b>{summary.teachers}</b> Teachers</span><span><b>{summary.classes}</b> Classes</span></div>
-
-        {heroSlides.length > 1 ? (
-          <div className="bd-hero-dots" aria-label="Hero slides">
-            {heroSlides.map((slide, index) => (
-              <button
-                key={slide.id}
-                type="button"
-                className={index === heroSlideIndex ? "active" : ""}
-                onClick={() => setHeroSlideIndex(index)}
-                aria-label={`Show hero slide ${index + 1}`}
-              />
             ))}
-          </div>
-        ) : null}
-      </section>
 
-      <section className="bd-quick-actions" aria-label="Quick actions">{quickActions.map(([route,icon,label])=><button key={route} onClick={()=>openRoute(route)}><span>{icon}</span><b>{label}</b></button>)}</section>
+            {!searchResults.length ? (
+              <EmptyState
+                icon="⌕"
+                title="Nothing matches that search"
+                description="Try a module name such as students, attendance, reports, fees or settings."
+                compact
+              />
+            ) : null}
+          </DashboardSection>
+        </section>
+      ) : (
+        <>
+          <WelcomeHero
+            greeting={greeting}
+            name={userName}
+            schoolName={summary.schoolName}
+            branchName={summary.branchName}
+            motto={motto}
+            slide={activeHeroSlide}
+            slides={heroSlides}
+            slideIndex={heroSlideIndex}
+            stats={heroStats}
+            onAdvance={advanceHero}
+            onSlideChange={setHeroSlideIndex}
+            onSlideAction={() => {
+              if (activeHeroSlide) {
+                openHeroAction(activeHeroSlide);
+              }
+            }}
+          />
 
-      <section className="bd-dashboard-grid">
-        <article className="bd-card attendance-card"><div className="bd-section-head"><div><span>Today</span><h2>Attendance</h2></div><button onClick={()=>openRoute("studentAttendance")}>Open</button></div><div className="attendance-main"><strong>{summary.presentToday}</strong><span>students present</span></div><div className="attendance-grid"><div><b>{summary.absentToday}</b><small>Absent</small></div><div><b>{summary.lateToday}</b><small>Late</small></div><div><b>{summary.teacherPresentToday}</b><small>Teachers</small></div><div><b>{summary.todayStudentAttendance}</b><small>Recorded</small></div></div></article>
+          <QuickActionGrid actions={quickActions} />
 
-        <article className="bd-card"><div className="bd-section-head"><div><span>School day</span><h2>Upcoming</h2></div><button onClick={()=>openRoute("calendar")}>Calendar</button></div><div className="bd-stack">{events.length ? events.map((event,index)=><button key={idOf(event)||index} onClick={()=>openRoute("calendar")} className="event-row"><time>{dateLabel(event.startAt||event.startDate||event.date).split(",")[0]}</time><span><b>{text(event.title||event.name,"School event")}</b><small>{text(event.location||event.venue,"School calendar")}</small></span></button>) : <MiniEmpty icon="🗓️" text="No upcoming events yet."/>}</div></article>
+          <DashboardWidgets>
+            <DashboardWidget>
+              <DashboardSection
+                eyebrow="Today"
+                title="Attendance"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => openRoute("studentAttendance")}
+                  >
+                    Open
+                  </button>
+                }
+              >
+                <StatisticGrid>
+                  <StatisticCard
+                    label="Present"
+                    value={summary.presentToday}
+                    icon={<AttendanceIcon />}
+                  />
+                  <StatisticCard
+                    label="Absent"
+                    value={summary.absentToday}
+                  />
+                  <StatisticCard
+                    label="Late"
+                    value={summary.lateToday}
+                  />
+                  <StatisticCard
+                    label="Teachers"
+                    value={summary.teacherPresentToday}
+                    icon={<TeacherIcon />}
+                  />
+                </StatisticGrid>
+              </DashboardSection>
+            </DashboardWidget>
 
-        <article className="bd-card announcements-card"><div className="bd-section-head"><div><span>Notice board</span><h2>Announcements</h2></div><button onClick={()=>openRoute("announcements")}>View all</button></div><div className="bd-stack">{announcements.length ? announcements.map((item,index)=><button key={idOf(item)||index} onClick={()=>openRoute("announcements")} className="notice-row"><span>📣</span><div><b>{text(item.title,"Announcement")}</b><small>{text(item.message||item.body||item.content,"Open to read this school update.").slice(0,100)}</small></div></button>) : <MiniEmpty icon="📣" text="No announcements published."/>}</div></article>
+            <DashboardWidget>
+              <DashboardSection
+                eyebrow="School day"
+                title="Upcoming"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => openRoute("calendar")}
+                  >
+                    Calendar
+                  </button>
+                }
+              >
+                <CalendarPreview
+                  items={events.map((event, index) => ({
+                    id: idOf(event) || String(index),
+                    date: dateLabel(
+                      event.startAt ||
+                      event.startDate ||
+                      event.date,
+                    ).split(",")[0],
+                    title: text(
+                      event.title || event.name,
+                      "School event",
+                    ),
+                    description: text(
+                      event.location || event.venue,
+                      "School calendar",
+                    ),
+                    onClick: () => openRoute("calendar"),
+                  }))}
+                />
+              </DashboardSection>
+            </DashboardWidget>
 
-        <article className="bd-card"><div className="bd-section-head"><div><span>At a glance</span><h2>School community</h2></div></div><div className="community-grid"><Metric label="Students" value={summary.students} icon="🧑‍🎓"/><Metric label="Teachers" value={summary.teachers} icon="👨‍🏫"/><Metric label="Parents" value={summary.parents} icon="👪"/><Metric label="Reports" value={summary.reports} icon="📄"/></div></article>
-      </section>
+            <DashboardWidget>
+              <DashboardSection
+                eyebrow="Notice board"
+                title="Announcements"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => openRoute("announcements")}
+                  >
+                    View all
+                  </button>
+                }
+              >
+                <ActivityFeed
+                  items={announcements.map((item, index) => ({
+                    id: idOf(item) || String(index),
+                    title: text(item.title, "Announcement"),
+                    meta: text(
+                      item.message ||
+                      item.body ||
+                      item.content,
+                      "Open to read this school update.",
+                    ).slice(0, 100),
+                    icon: <CommunicationIcon />,
+                    onClick: () => openRoute("announcements"),
+                  }))}
+                  emptyText="No announcements published."
+                />
+              </DashboardSection>
+            </DashboardWidget>
 
-      <section className="bd-card bd-recent"><div className="bd-section-head"><div><span>Latest changes</span><h2>Recent activity</h2></div><b>{recent.length}</b></div><div className="bd-recent-list">{recent.length ? recent.map((item,index)=><article key={`${item._kind}-${idOf(item)||index}`} className="recent-row"><span>{item._icon}</span><b>{item._title}</b><small>{item._kind} · {dateLabel(item._date)}</small></article>) : <MiniEmpty icon="✨" text="School activity will appear here."/>}</div></section>
-    </>}
+            <DashboardWidget>
+              <DashboardSection
+                eyebrow="Latest changes"
+                title="Recent activity"
+                action={<b>{recent.length}</b>}
+              >
+                <ActivityFeed
+                  items={recent.map((item, index) => ({
+                    id: `${item._kind}-${idOf(item) || index}`,
+                    title: item._title,
+                    meta: `${item._kind} · ${dateLabel(item._date)}`,
+                    icon: item._icon,
+                  }))}
+                  emptyText="School activity will appear here."
+                />
+              </DashboardSection>
+            </DashboardWidget>
+          </DashboardWidgets>
+        </>
+      )}
 
-    {moreOpen ? <div className="bd-sheet-backdrop" role="dialog" aria-modal="true"><section className="bd-sheet"><div className="bd-sheet-head"><div><h2>Branch home</h2><p>Useful dashboard controls and direct destinations.</p></div><button onClick={()=>setMoreOpen(false)}>✕</button></div><div className="bd-menu-list"><button onClick={()=>{setMoreOpen(false);load()}}><span>↻</span><b>Refresh dashboard</b><small>Reload branch data from this device</small></button><button onClick={()=>{setMoreOpen(false);openRoute("branchSettings")}}><span>⚙</span><b>Branch identity</b><small>Update branding, motto and report settings</small></button><button onClick={()=>{setMoreOpen(false);openRoute("calendar")}}><span>🗓</span><b>School calendar</b><small>Manage dates, events and reminders</small></button></div></section></div> : null}
-  </main>;
+      <Dialog
+        open={moreOpen}
+        onClose={() => setMoreOpen(false)}
+        title="Branch home"
+        description="Useful dashboard controls and direct destinations."
+        footer={
+          <Button
+            variant="secondary"
+            fullWidth
+            onClick={() => setMoreOpen(false)}
+          >
+            Close
+          </Button>
+        }
+      >
+        <div className="eds-dashboard-more-list">
+          <Button
+            variant="secondary"
+            fullWidth
+            onClick={() => {
+              setMoreOpen(false);
+              void load();
+            }}
+          >
+            Refresh dashboard
+          </Button>
+          <Button
+            variant="secondary"
+            fullWidth
+            onClick={() => {
+              setMoreOpen(false);
+              openRoute("branchSettings");
+            }}
+          >
+            Branch identity and settings
+          </Button>
+          <Button
+            variant="secondary"
+            fullWidth
+            onClick={() => {
+              setMoreOpen(false);
+              openRoute("calendar");
+            }}
+          >
+            School calendar
+          </Button>
+        </div>
+      </Dialog>
+    </DashboardBackground>
+  );
 }
 
-function Metric({label,value,icon}:{label:string;value:string|number;icon:string}){return <div className="metric"><span>{icon}</span><strong>{value}</strong><small>{label}</small></div>}
-function MiniEmpty({icon,text:body}:{icon:string;text:string}){return <div className="mini-empty"><span>{icon}</span><p>{body}</p></div>}
-function State({primary,title,text:body}:{primary:string;title:string;text:string}){return <main className="bd-page" style={{"--bd-primary":primary} as React.CSSProperties}><style>{css}</style><section className="bd-state"><div className="bd-spinner"/><h2>{title}</h2><p>{body}</p></section></main>}
+const branchDashboardToolbarCss = `
 
-const css = `
-@keyframes spin{to{transform:rotate(360deg)}}
-.bd-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;padding:8px;padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--bd-primary) 10%,transparent),transparent 34rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overflow-x:hidden}.bd-page *{box-sizing:border-box;min-width:0}.bd-page button,.bd-page input{font:inherit}.bd-page button{cursor:pointer;-webkit-tap-highlight-color:transparent}.bd-search-card,.bd-card,.bd-state,.bd-search-results,.branch-row,.bd-sheet{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.1));box-shadow:0 12px 30px rgba(15,23,42,.05)}
-.bd-search-card{position:sticky;top:6px;z-index:20;display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;align-items:center;gap:7px;padding:7px;border-radius:22px;backdrop-filter:blur(16px)}.status-dot-mini{width:9px;height:9px;border-radius:99px}.status-dot-mini.green{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.12)}.status-dot-mini.gray{background:#94a3b8}.bd-search{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:43px;padding:0 12px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.bd-search>span{font-size:18px;color:var(--muted,#64748b);font-weight:1000}.bd-search input{width:100%;border:0;outline:0;background:transparent;color:var(--text,#111827);font-size:14px;font-weight:750}.bd-search input::placeholder{color:var(--muted,#64748b)}.bd-clear,.bd-refresh,.bd-more{width:40px;height:40px;border-radius:99px;border:1px solid var(--border,rgba(0,0,0,.1));background:var(--surface,#fff);color:var(--text,#111827);font-size:18px;font-weight:1000}.bd-refresh{background:var(--bd-primary);border-color:var(--bd-primary);color:#fff}
-.bd-hero{position:relative;min-height:270px;margin-top:10px;border-radius:30px;padding:22px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--bd-primary) 95%,#111827),color-mix(in srgb,var(--bd-primary) 55%,#0f172a));box-shadow:0 22px 60px color-mix(in srgb,var(--bd-primary) 20%,transparent)}.bd-hero:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.18),transparent 26%);pointer-events:none;z-index:1}.bd-hero-media{position:absolute;inset:0;z-index:0}.bd-hero-media img,.bd-hero-media video{width:100%;height:100%;object-fit:cover;display:block}.bd-hero-shade{position:absolute;inset:0;background:linear-gradient(90deg,rgba(7,15,32,.88),rgba(7,15,32,.32))}.bd-hero.fade-transition .bd-hero-media{animation:bdHeroFade .55s ease}.bd-hero.slide-transition .bd-hero-media{animation:bdHeroSlide .55s ease}@keyframes bdHeroFade{from{opacity:.25}to{opacity:1}}@keyframes bdHeroSlide{from{opacity:.5;transform:translateX(3%)}to{opacity:1;transform:none}}.bd-hero-copy,.bd-hero-stats,.bd-highlight-copy,.bd-hero-dots{position:relative;z-index:2}.bd-hero-copy>span{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;opacity:.85}.bd-hero h1{margin:7px 0 4px;font-size:clamp(28px,7vw,48px);line-height:.98;letter-spacing:-.06em}.bd-hero p{margin:0;font-size:14px}.bd-branch-name{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);font-size:11px;font-weight:850}.bd-hero blockquote{margin:18px 0 0;max-width:38rem;font-size:13px;line-height:1.55;font-weight:750;opacity:.9}.bd-hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}.bd-hero-stats span{display:flex;align-items:baseline;gap:5px;padding:8px 11px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:11px;font-weight:850}.bd-hero-stats b{font-size:15px}.bd-highlight-copy{align-self:flex-start;display:grid;gap:3px;margin-top:auto;margin-bottom:10px;max-width:min(520px,90%)}.bd-highlight-copy>b{font-size:15px}.bd-highlight-copy>small{font-size:10px;line-height:1.45;opacity:.88}.bd-highlight-copy>button{width:max-content;margin-top:5px;padding:7px 10px;border:1px solid rgba(255,255,255,.25);border-radius:999px;background:rgba(255,255,255,.14);color:#fff;font-size:10px;font-weight:900;backdrop-filter:blur(8px)}.bd-hero-dots{position:absolute;right:16px;bottom:16px;display:flex;gap:5px}.bd-hero-dots button{width:7px;height:7px;padding:0;border:0;border-radius:99px;background:rgba(255,255,255,.42)}.bd-hero-dots button.active{width:20px;background:#fff}
-.bd-quick-actions{display:grid;grid-template-columns:repeat(5,minmax(74px,1fr));gap:8px;margin-top:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}.bd-quick-actions::-webkit-scrollbar{display:none}.bd-quick-actions button{min-height:76px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:22px;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);display:grid;place-items:center;align-content:center;gap:7px;box-shadow:0 10px 24px rgba(15,23,42,.04)}.bd-quick-actions span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 11%,transparent);color:var(--bd-primary);font-size:17px;font-weight:1000}.bd-quick-actions b{font-size:11px;font-weight:950;white-space:nowrap}
-.bd-dashboard-grid{display:grid;gap:10px;margin-top:10px}.bd-card{padding:14px;border-radius:26px}.bd-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}.bd-section-head span{display:block;color:var(--muted,#64748b);font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.bd-section-head h2{margin:3px 0 0;font-size:17px;font-weight:1000;letter-spacing:-.035em}.bd-section-head>button,.bd-section-head>b{border:0;border-radius:999px;padding:7px 10px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent);color:var(--bd-primary);font-size:10px;font-weight:950}.attendance-card{background:linear-gradient(145deg,color-mix(in srgb,var(--bd-primary) 7%,var(--surface,#fff)),var(--surface,#fff))}.attendance-main strong{display:block;font-size:46px;line-height:1;font-weight:1000;letter-spacing:-.07em}.attendance-main span{color:var(--muted,#64748b);font-size:12px;font-weight:850}.attendance-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:15px}.attendance-grid div{padding:10px 7px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent);text-align:center}.attendance-grid b,.attendance-grid small{display:block}.attendance-grid b{font-size:17px}.attendance-grid small{margin-top:3px;color:var(--muted,#64748b);font-size:9px;font-weight:850}
-.bd-stack{display:grid;gap:7px}.event-row,.notice-row{width:100%;border:0;border-radius:17px;padding:9px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent);color:inherit;text-align:left}.event-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:9px;align-items:center}.event-row time{font-size:10px;font-weight:950;color:var(--bd-primary)}.event-row b,.event-row small,.notice-row b,.notice-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-row b,.notice-row b{font-size:12px;font-weight:1000}.event-row small,.notice-row small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:750}.notice-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;align-items:center}.notice-row>span{width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent)}.community-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.metric{padding:13px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 6%,transparent)}.metric span,.metric strong,.metric small{display:block}.metric span{font-size:18px}.metric strong{margin-top:10px;font-size:24px;line-height:1;font-weight:1000;letter-spacing:-.05em}.metric small{margin-top:4px;color:var(--muted,#64748b);font-size:10px;font-weight:850}
-.bd-recent{margin-top:10px}.bd-recent-list{display:grid;gap:7px}.recent-row{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:9px;align-items:center;padding:9px;border-radius:17px;background:color-mix(in srgb,var(--muted,#64748b) 5%,transparent)}.recent-row span{grid-row:span 2;width:34px;height:34px;display:grid;place-items:center;border-radius:13px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent)}.recent-row b,.recent-row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.recent-row b{font-size:12px}.recent-row small{font-size:10px;color:var(--muted,#64748b);font-weight:750}.mini-empty{min-height:110px;display:grid;place-items:center;align-content:center;text-align:center;color:var(--muted,#64748b)}.mini-empty span{font-size:26px}.mini-empty p{margin:6px 0 0;font-size:11px;font-weight:800}
-.bd-search-results{margin-top:10px;padding:12px;border-radius:26px}.branch-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;margin-top:7px;padding:10px;border-radius:20px;text-align:left;color:inherit}.branch-avatar{width:46px;height:46px;display:grid;place-items:center;border-radius:17px;background:color-mix(in srgb,var(--bd-primary) 11%,transparent);font-size:21px}.branch-main strong,.branch-main small,.branch-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.branch-main strong{font-size:13px;font-weight:1000}.branch-main small{margin-top:3px;color:var(--muted,#64748b);font-size:10px;font-weight:800}.branch-main em{margin-top:3px;color:var(--bd-primary);font-size:9px;font-style:normal;font-weight:900}.branch-side{display:flex;align-items:center;gap:7px}.branch-side i{font-style:normal;color:var(--muted,#64748b)}.bd-chip{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:950}.bd-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.bd-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.bd-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.bd-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.bd-chip.gray{background:rgba(100,116,139,.12);color:#64748b}.bd-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.bd-empty{min-height:220px;display:grid;place-items:center;align-content:center;text-align:center}.bd-empty div{font-size:28px}.bd-empty h3{margin:8px 0 0}.bd-empty p{max-width:30rem;margin:5px 0 0;color:var(--muted,#64748b);font-size:12px}
-.bd-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.5);backdrop-filter:blur(12px)}.bd-sheet{width:min(520px,100%);padding:14px;border-radius:28px}.bd-sheet-head{display:flex;justify-content:space-between;gap:10px}.bd-sheet-head h2{margin:0;font-size:20px}.bd-sheet-head p{margin:4px 0 0;color:var(--muted,#64748b);font-size:11px}.bd-sheet-head button{width:38px;height:38px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:99px;background:var(--surface,#fff);color:inherit}.bd-menu-list{display:grid;gap:8px;margin-top:12px}.bd-menu-list button{display:grid;grid-template-columns:40px minmax(0,1fr);column-gap:10px;align-items:center;width:100%;padding:9px;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:18px;background:var(--surface,#fff);color:inherit;text-align:left}.bd-menu-list button>span{grid-row:span 2;width:40px;height:40px;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--bd-primary) 10%,transparent);color:var(--bd-primary)}.bd-menu-list b,.bd-menu-list small{display:block}.bd-menu-list b{font-size:12px}.bd-menu-list small{color:var(--muted,#64748b);font-size:10px}.bd-state{min-height:min(420px,calc(100dvh - 20px));display:grid;place-items:center;align-content:center;text-align:center;border-radius:28px}.bd-spinner{width:38px;height:38px;border:4px solid color-mix(in srgb,var(--bd-primary) 18%,transparent);border-top-color:var(--bd-primary);border-radius:99px;animation:spin .8s linear infinite}.bd-state h2{margin:10px 0 0}.bd-state p{max-width:32rem;margin:5px 0 0;color:var(--muted,#64748b);font-size:12px}
-@media(min-width:700px){.bd-page{padding:12px}.bd-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-recent-list{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-sheet-backdrop{place-items:center}.bd-hero{min-height:320px;padding:30px}.community-grid{grid-template-columns:repeat(4,1fr)}}
-@media(min-width:1080px){.bd-page{padding:16px}.bd-search-card,.bd-hero,.bd-quick-actions,.bd-dashboard-grid,.bd-recent,.bd-search-results{max-width:1180px;margin-left:auto;margin-right:auto}.bd-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-recent-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:560px){.bd-page{padding:7px}.bd-search-card{grid-template-columns:auto minmax(0,1fr) auto auto}.bd-clear{display:none}.bd-quick-actions{grid-template-columns:repeat(5,82px)}.bd-hero{min-height:290px;padding:18px}.bd-hero-stats{gap:6px}.attendance-grid{grid-template-columns:repeat(2,1fr)}.branch-row{grid-template-columns:auto minmax(0,1fr)}.branch-side{grid-column:1/-1;justify-content:flex-end}}
+/* Theme-safe compact dashboard toolbar -------------------------------- */
+.branch-dashboard-toolbar {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  overflow: visible;
+}
+
+.branch-dashboard-toolbar
+.eds-dashboard-header {
+  position: relative;
+  top: auto;
+  width: min(100%, 380px);
+  max-width: 380px;
+  flex: 0 1 380px;
+  margin: 0;
+
+  background:
+    color-mix(
+      in srgb,
+      var(
+        --eds-header-bg,
+        var(--eds-surface, #ffffff)
+      ) 96%,
+      transparent
+    ) !important;
+
+  color:
+    var(
+      --eds-text,
+      #111827
+    ) !important;
+
+  border-color:
+    var(
+      --eds-border,
+      rgba(15,23,42,.09)
+    ) !important;
+
+  box-shadow:
+    var(
+      --eds-shadow-soft,
+      0 10px 26px rgba(15,23,42,.07)
+    ) !important;
+}
+
+.branch-dashboard-toolbar
+.eds-dashboard-header input {
+  background: transparent !important;
+  color:
+    var(
+      --eds-text-strong,
+      var(--eds-text, #111827)
+    ) !important;
+  caret-color:
+    var(
+      --eds-primary,
+      var(--primary-color, #2563eb)
+    );
+}
+
+.branch-dashboard-toolbar
+.eds-dashboard-header input::placeholder {
+  color:
+    var(
+      --eds-text-muted,
+      #667085
+    ) !important;
+  opacity: .9;
+}
+
+.branch-dashboard-toolbar
+.eds-dashboard-header button {
+  color:
+    var(
+      --eds-text-strong,
+      var(--eds-text, #111827)
+    );
+  border-color:
+    var(
+      --eds-border,
+      rgba(15,23,42,.09)
+    );
+}
+
+.branch-dashboard-toolbar
+.eds-dashboard-header button:hover {
+  background:
+    var(
+      --eds-primary-softer,
+      color-mix(
+        in srgb,
+        var(--primary-color, #2563eb) 7%,
+        transparent
+      )
+    );
+}
+
+/*
+ * Dashboard delegates vertical scrolling to the document/window.
+ * It must not create another page-level scrolling context.
+ */
+.eds-dashboard,
+.eds-dashboard-inner,
+.eds-dashboard-search-results,
+.eds-dashboard-widgets,
+.eds-dashboard-widget {
+  height: auto !important;
+  max-height: none !important;
+  overflow-y: visible !important;
+}
+
+.eds-dashboard {
+  overflow-x: clip !important;
+}
+
+.eds-dashboard-inner {
+  min-height: 0;
+}
+
+@media (min-width: 1100px) {
+  .branch-dashboard-toolbar
+  .eds-dashboard-header {
+    width:
+      clamp(
+        300px,
+        27vw,
+        380px
+      );
+    max-width: 380px;
+    flex-basis:
+      clamp(
+        300px,
+        27vw,
+        380px
+      );
+  }
+}
+
+@media (min-width: 700px) and (max-width: 1099px) {
+  .branch-dashboard-toolbar
+  .eds-dashboard-header {
+    width:
+      clamp(
+        300px,
+        42vw,
+        360px
+      );
+    max-width: 360px;
+    flex-basis:
+      clamp(
+        300px,
+        42vw,
+        360px
+      );
+  }
+}
+
+@media (max-width: 699px) {
+  .branch-dashboard-toolbar {
+    justify-content: stretch;
+  }
+
+  .branch-dashboard-toolbar
+  .eds-dashboard-header {
+    width: 100%;
+    max-width: none;
+    flex-basis: 100%;
+  }
+}
+
+
+
+/* Final single-window-scroll ownership -------------------------------- */
+html {
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+body {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.eds-dashboard,
+.eds-dashboard-inner,
+.eds-dashboard-state,
+.eds-dashboard-search-results,
+.eds-dashboard-widgets,
+.eds-dashboard-widget,
+.eds-dashboard-section,
+.eds-dashboard-background,
+.eds-dashboard-hero,
+.eds-welcome-hero,
+.branch-dashboard-toolbar {
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0;
+  overflow-y: visible !important;
+  overscroll-behavior-y: auto !important;
+  scrollbar-gutter: auto !important;
+}
+
+.eds-dashboard,
+.eds-dashboard-inner,
+.eds-dashboard-background {
+  overflow-x: clip !important;
+}
+
+.eds-dashboard-search-results,
+.eds-dashboard-widgets,
+.eds-dashboard-widget,
+.eds-dashboard-section {
+  overflow-x: visible !important;
+}
+
+/*
+ * Shared dashboard components must not become fixed-height scroll panels.
+ * Only deliberately horizontal structures may retain horizontal scrolling.
+ */
+.eds-dashboard
+[data-dashboard-scroll],
+.eds-dashboard
+.dashboard-scroll-region {
+  max-height: none !important;
+  overflow-y: visible !important;
+}
+
 `;

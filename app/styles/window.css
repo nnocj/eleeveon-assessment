@@ -1,0 +1,458 @@
+/**
+ * app/styles/window.css
+ * --------------------------------------------------------------------------
+ * One-header Window Controls Overlay integration.
+ *
+ * Chromium/Windows owns:
+ * - the title-bar show/hide control;
+ * - minimise;
+ * - maximise/restore;
+ * - close.
+ *
+ * Eleeveon uses only the rectangle reported by titlebar-area-* and never
+ * creates a second application header beneath it.
+ */
+
+:root {
+  --eds-window-height:
+    env(titlebar-area-height, 0px);
+  --eds-window-x:
+    env(titlebar-area-x, 0px);
+  --eds-window-y:
+    env(titlebar-area-y, 0px);
+  --eds-window-width:
+    env(titlebar-area-width, 0px);
+
+  --eds-shell-top-offset:
+    0px;
+
+  --eds-window-chrome-color:
+    var(
+      --surface,
+      var(--eds-surface, #f8fafc)
+    );
+
+  --eds-window-chrome-foreground:
+    var(
+      --text,
+      var(--eds-text, #0f172a)
+    );
+}
+
+html[data-window-mode="dark"] {
+  color-scheme: dark;
+}
+
+html[data-window-mode="light"] {
+  color-scheme: light;
+}
+
+.window-titlebar {
+  display: none;
+}
+
+html[
+  data-window-overlay-visible
+] {
+  --eds-shell-top-offset:
+    var(
+      --window-titlebar-height,
+      var(--eds-window-height)
+    );
+}
+
+@media (
+  display-mode:
+    window-controls-overlay
+) {
+  .window-titlebar {
+    position: fixed;
+
+    top:
+      var(
+        --window-titlebar-y,
+        var(--eds-window-y)
+      );
+
+    left:
+      var(
+        --window-titlebar-x,
+        var(--eds-window-x)
+      );
+
+    width:
+      var(
+        --window-titlebar-width,
+        var(--eds-window-width)
+      );
+
+    height:
+      var(
+        --window-titlebar-height,
+        var(--eds-window-height)
+      );
+
+    z-index: 10000;
+    min-width: 0;
+
+    display: grid;
+    grid-template-columns:
+      minmax(0, 1fr)
+      auto;
+    align-items: center;
+    gap: 4px;
+
+    padding: 0 5px;
+    overflow: hidden;
+
+    /*
+     * Keep this solid. Chromium paints its native caption-button area from
+     * the matching theme-color meta value, so gradients/transparency here
+     * would create a visible seam beside minimise/maximise/close.
+     */
+    background:
+      var(--eds-window-chrome-color);
+
+    color:
+      var(--eds-window-chrome-foreground);
+
+    border-bottom:
+      1px solid
+      var(--eds-divider);
+
+    box-shadow:
+      0 1px 0
+      rgba(255,255,255,.05)
+      inset;
+
+    app-region: drag;
+    -webkit-app-region: drag;
+  }
+
+  .window-titlebar-left,
+  .window-titlebar-actions {
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+
+  .window-titlebar-left {
+    gap: 4px;
+  }
+
+  .window-titlebar-actions {
+    justify-content: flex-end;
+    gap: 3px;
+  }
+
+  .window-drag-region {
+    min-width: 0;
+    height: 100%;
+    flex: 1;
+
+    display: flex;
+    align-items: center;
+
+    app-region: drag;
+    -webkit-app-region: drag;
+  }
+
+  .window-titlebar button,
+  .window-titlebar a,
+  .window-titlebar input,
+  .window-titlebar select,
+  .window-titlebar textarea,
+  .window-titlebar [role="button"] {
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
+  }
+
+  .window-titlebar-control {
+    width: 27px;
+    height: 27px;
+    flex: 0 0 auto;
+
+    display: grid;
+    place-items: center;
+
+    border:
+      1px solid transparent;
+    border-radius: 8px;
+
+    padding: 0;
+    background: transparent;
+    color:
+      var(--eds-window-chrome-foreground);
+
+    cursor: pointer;
+  }
+
+  .window-titlebar-control:hover:not(
+    :disabled
+  ) {
+    border-color:
+      var(--eds-border);
+    background:
+      var(--eds-primary-softer);
+  }
+
+  .window-titlebar-control:disabled {
+    opacity: .5;
+    cursor: default;
+  }
+
+  .window-titlebar-sidebar {
+    font-size: 14px;
+    font-weight: 900;
+  }
+
+  .window-titlebar-copy {
+    min-width: 0;
+    display: grid;
+    grid-template-columns:
+      auto minmax(0, 1fr);
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .window-titlebar-copy strong,
+  .window-titlebar-copy small {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .window-titlebar-copy strong {
+    color:
+      var(--eds-text-strong);
+    font-size: 11px;
+    font-weight: 850;
+    line-height: 1;
+  }
+
+  .window-titlebar-copy small {
+    color:
+      var(--eds-text-muted);
+    font-size: 9px;
+    font-weight: 650;
+    line-height: 1;
+  }
+
+  .window-titlebar-status span {
+    width: 8px;
+    height: 8px;
+    display: block;
+    border-radius: 50%;
+
+    background: #ef4444;
+    box-shadow:
+      0 0 0 4px
+      rgba(239,68,68,.11);
+  }
+
+  .window-titlebar-status.live span {
+    background: #0ea5e9;
+    box-shadow:
+      0 0 0 4px
+      rgba(14,165,233,.12);
+  }
+
+  .window-titlebar-status.ok span {
+    background: #22c55e;
+    box-shadow:
+      0 0 0 4px
+      rgba(34,197,94,.12);
+  }
+
+  .window-titlebar-account {
+    min-width: 0;
+    max-width: 210px;
+    height: 28px;
+
+    display: grid;
+    grid-template-columns:
+      24px minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+
+    border:
+      1px solid transparent;
+    border-radius: 9px;
+
+    padding: 1px 5px;
+
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .window-titlebar-account:hover:not(
+    :disabled
+  ) {
+    border-color:
+      var(--eds-border);
+    background:
+      var(--eds-primary-softer);
+  }
+
+  .window-titlebar-avatar {
+    width: 24px;
+    height: 24px;
+    overflow: hidden;
+
+    display: grid;
+    place-items: center;
+
+    border-radius: 50%;
+
+    background:
+      var(--eds-primary-soft);
+    color:
+      var(--eds-primary);
+
+    font-size: 8px;
+    font-weight: 900;
+  }
+
+  .window-titlebar-avatar img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+
+  .window-titlebar-account-copy {
+    min-width: 0;
+  }
+
+  .window-titlebar-account-copy strong,
+  .window-titlebar-account-copy small {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .window-titlebar-account-copy strong {
+    color:
+      var(--eds-text-strong);
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .window-titlebar-account-copy small {
+    margin-top: 2px;
+    color:
+      var(--eds-text-muted);
+    font-size: 7px;
+    line-height: 1;
+  }
+
+  /*
+   * Remove the portal header completely. The native titlebar is now the
+   * only top row in the installed desktop application.
+   */
+  html[
+    data-window-overlay-visible
+  ]
+  .role-shell
+  .app-header {
+    display: none !important;
+  }
+
+  /*
+   * The shell—not body—is offset. This prevents the global page from being
+   * pushed into a second visible row and fixes the sidebar overlap seen in
+   * the screenshot.
+   */
+  html[
+    data-window-overlay-visible
+  ]
+  body {
+    padding-top: 0 !important;
+  }
+
+  html[
+    data-window-overlay-visible
+  ]
+  .role-shell {
+    padding-top:
+      var(
+        --eds-shell-top-offset
+      ) !important;
+    min-height:
+      100dvh !important;
+  }
+
+  html[
+    data-window-overlay-visible
+  ]
+  .role-shell
+  .app-sidebar,
+
+  html[
+    data-window-overlay-visible
+  ]
+  .role-shell
+  .context-drawer {
+    top:
+      var(
+        --eds-shell-top-offset
+      ) !important;
+
+    bottom: 0 !important;
+    height: auto !important;
+  }
+
+  html[
+    data-window-overlay-visible
+  ]
+  .role-shell
+  .app-overlay {
+    top:
+      var(
+        --eds-shell-top-offset
+      ) !important;
+  }
+}
+
+@media (
+  display-mode:
+    window-controls-overlay
+) and (max-width: 760px) {
+  .window-titlebar-copy small,
+  .window-titlebar-account-copy {
+    display: none;
+  }
+
+  .window-titlebar-copy {
+    grid-template-columns:
+      minmax(0, 1fr);
+  }
+
+  .window-titlebar-account {
+    width: 28px;
+    max-width: 28px;
+    grid-template-columns:
+      24px;
+    padding: 1px;
+  }
+}
+
+
+/* The native titlebar follows the neutral role-header surface. */
+@media (display-mode: window-controls-overlay) {
+  .window-titlebar {
+    background:
+      var(
+        --eds-window-chrome-color,
+        var(--eds-header-bg)
+      ) !important;
+    color: var(--eds-text) !important;
+    border-bottom-color:
+      var(--eds-divider) !important;
+  }
+}

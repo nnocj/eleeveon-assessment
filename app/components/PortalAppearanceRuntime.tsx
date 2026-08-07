@@ -363,6 +363,38 @@ export default function PortalAppearanceRuntime({
     synchronizeAppearance,
   ]);
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    const root = document.documentElement;
+    root.dataset.portalAppearanceReady =
+      ready && !loading ? "true" : "false";
+
+    if (expectedFor?.scope) {
+      root.dataset.appearanceScope = expectedFor.scope;
+    } else {
+      delete root.dataset.appearanceScope;
+    }
+
+    if (expectedFor?.key) {
+      root.dataset.appearanceKey = expectedFor.key;
+    } else {
+      delete root.dataset.appearanceKey;
+    }
+
+    window.dispatchEvent(
+      new CustomEvent("eleeveon:portal-appearance-state", {
+        detail: {
+          ready,
+          loading,
+          scope: expectedFor?.scope || null,
+          key: expectedFor?.key || null,
+          at: Date.now(),
+        },
+      }),
+    );
+  }, [ready, loading, expectedFor?.scope, expectedFor?.key]);
+
   const firstEntryReady = Boolean(
     ready &&
     !loading &&

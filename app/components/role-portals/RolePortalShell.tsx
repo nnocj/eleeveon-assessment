@@ -52,7 +52,14 @@ import { useRealtimeStatus } from "../../hooks/useRealtimeStatus";
 import { useRealtime } from "../../context/realtime-context";
 import { useTheme } from "../../context/theme-context";
 import { useDatabase } from "../../context/database-context";
+import { db } from "../../lib/db/db";
+import { useWindowChrome } from "../../context/window-chrome-context";
 import SyncStatusSheet from "../SyncStatusSheet";
+import EleeveonCenter from "./EleeveonCenter";
+import PortalSidebar from "./shell/PortalSidebar";
+import PortalHeader from "./shell/PortalHeader";
+import PortalContent from "./shell/PortalContent";
+import AccountWorkspaceDrawer from "./shell/AccountWorkspaceDrawer";
 import { useSyncContext } from "../../context/sync-context";
 import {
   WorkspaceTransitionProvider,
@@ -76,6 +83,14 @@ import {
   getPortalPathByRole,
   membershipCanAccess,
 } from "../../lib/auth/roleRedirect";
+
+import {
+  useWorkspaceDisplayNames,
+  workspaceDetailLabel,
+  workspaceIdentityKey,
+  workspaceProfileImage,
+  workspaceScopeLabel,
+} from "../../lib/workspaces/useWorkspaceDisplayNames";
 
 export type RoleNavItem = {
   key: string;
@@ -161,6 +176,7 @@ export type RolePortalShellProps = {
 };
 
 const MEMBERSHIP_BACKUP_KEY = "eleeveon_user_memberships";
+const ELEEVEON_CENTER_KEY = "__eleeveon_center__";
 const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 
 type OpenWorkspaceSession = {
@@ -388,19 +404,28 @@ function roleIcon(role: string) {
   return "👤";
 }
 
-function roleScope(membership: UserMembership) {
-  if (!membership.schoolId && !membership.branchId) return "Account level";
-  if (membership.schoolId && membership.branchId) return `School ${membership.schoolId} · Branch ${membership.branchId}`;
-  if (membership.schoolId) return `School ${membership.schoolId}`;
-  return `Branch ${membership.branchId || "workspace"}`;
+function roleScope(
+  membership: UserMembership,
+  identities: ReturnType<
+    typeof useWorkspaceDisplayNames
+  >,
+) {
+  return workspaceScopeLabel(
+    membership,
+    identities,
+  );
 }
 
-function roleDetail(membership: UserMembership) {
-  const normalized = normalizeMembership(membership) || membership;
-  if (normalized.teacherId) return `Teacher profile ${normalized.teacherId}`;
-  if (normalized.studentId) return `Student profile ${normalized.studentId}`;
-  if (normalized.parentId) return `Parent profile ${normalized.parentId}`;
-  return "Workspace access";
+function roleDetail(
+  membership: UserMembership,
+  identities: ReturnType<
+    typeof useWorkspaceDisplayNames
+  >,
+) {
+  return workspaceDetailLabel(
+    membership,
+    identities,
+  );
 }
 
 function selectedMemberName(args: {
@@ -429,33 +454,29 @@ function selectedMemberName(args: {
 }
 
 function selectedMemberMeta(args: {
-  openedWorkspace?: OpenWorkspaceSession | null;
   selectedMembership?: UserMembership | null;
+  identities: ReturnType<
+    typeof useWorkspaceDisplayNames
+  >;
 }) {
-  const workspace = args.openedWorkspace || {};
-  const membership: any = args.selectedMembership || {};
+  const membership =
+    args.selectedMembership;
 
-  const role = String(workspace.role || membership.role || "member").replaceAll("_", " ");
-  const schoolId = workspace.schoolId ?? membership.schoolId;
-  const branchId = workspace.branchId ?? membership.branchId;
-  const profileId =
-    workspace.teacherId ??
-    workspace.studentId ??
-    workspace.parentId ??
-    membership.teacherId ??
-    membership.studentId ??
-    membership.parentId;
+  if (!membership) {
+    return "Signed-in workspace";
+  }
 
-  const scope =
-    schoolId && branchId
-      ? `School ${schoolId} · Branch ${branchId}`
-      : schoolId
-        ? `School ${schoolId}`
-        : branchId
-          ? `Branch ${branchId}`
-          : "Account";
-
-  return `${role} · ${scope}${profileId ? ` · Profile ${profileId}` : ""}`;
+  return [
+    roleLabel(membership.role),
+    roleScope(
+      membership,
+      args.identities,
+    ),
+    roleDetail(
+      membership,
+      args.identities,
+    ),
+  ].join(" · ");
 }
 
 function pickMembership(args: {
@@ -514,6 +535,10 @@ function RolePortalShellContent({
   const syncPanelContext = useSyncContext();
   const realtimeContext = useRealtime();
   const appearanceContext = usePortalAppearanceReadiness();
+  const {
+    setIdentity: setWindowChromeIdentity,
+    clearIdentity: clearWindowChromeIdentity,
+  } = useWindowChrome();
 
   const {
     initialSyncDone,
@@ -929,18 +954,42 @@ function RolePortalShellContent({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(300);
-  const [contextOpen, setContextOpen] = useState(false);
-  const [roleSwitchOpen, setRoleSwitchOpen] = useState(false);
+  const [accountDrawerOpen, setAccountDrawerOpen] = useState(false);
   const [switchingMembershipId, setSwitchingMembershipId] = useState<string | null>(null);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  const [hubUnreadCount, setHubUnreadCount] = useState(0);
+  const [hubHasAttention, setHubHasAttention] = useState(false);
 
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>(() =>
-    navSections.reduce((acc, section) => {
-      acc[section.title] = section.defaultOpen !== false;
-      return acc;
-    }, {} as Record<string, boolean>)
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>(
+    () =>
+      navSections.reduce(
+        (acc, section) => {
+          /*
+           * Closed is the safe default. A section opens during startup only
+           * when the portal configuration explicitly opts in with
+           * defaultOpen: true.
+           */
+          acc[section.title] =
+            section.defaultOpen === true;
+          return acc;
+        },
+        {} as Record<string, boolean>,
+      ),
   );
+
+  useEffect(() => {
+    setOpenSections((current) =>
+      navSections.reduce(
+        (next, section) => {
+          next[section.title] =
+            current[section.title] ??
+            (section.defaultOpen === true);
+          return next;
+        },
+        {} as Record<string, boolean>,
+      ),
+    );
+  }, [navSections]);
 
   useEffect(() => {
     const update = () => setIsOnline(navigator.onLine);
@@ -954,6 +1003,81 @@ function RolePortalShellContent({
       window.removeEventListener("offline", update);
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadHubIndicator = async () => {
+      if (!accountId) {
+        if (!cancelled) {
+          setHubUnreadCount(0);
+          setHubHasAttention(false);
+        }
+        return;
+      }
+
+      try {
+        const [announcements, receipts, feedback] = await Promise.all([
+          db.platformAnnouncements.toArray(),
+          db.platformAnnouncementReceipts
+            .where("accountId")
+            .equals(accountId)
+            .toArray(),
+          db.platformFeedback
+            .where("accountId")
+            .equals(accountId)
+            .toArray(),
+        ]);
+
+        const readIds = new Set(
+          receipts
+            .filter((receipt: any) => Boolean(receipt.readAt))
+            .map((receipt: any) => String(receipt.announcementId)),
+        );
+
+        const now = Date.now();
+        const role = String(selectedMembership?.role || activeRole || "");
+        const unread = announcements.filter((announcement: any) => {
+          if (announcement.status !== "published") return false;
+          if (announcement.publishAt && new Date(announcement.publishAt).getTime() > now) return false;
+          if (announcement.expiresAt && new Date(announcement.expiresAt).getTime() < now) return false;
+          if (Array.isArray(announcement.targetRoles) && announcement.targetRoles.length && role && !announcement.targetRoles.includes(role)) return false;
+          return !readIds.has(String(announcement.id));
+        }).length;
+
+        const attention = feedback.some((item: any) =>
+          ["responded", "action_required", "waiting_for_user"].includes(
+            String(item.status || "").toLowerCase(),
+          ),
+        );
+
+        if (!cancelled) {
+          setHubUnreadCount(unread);
+          setHubHasAttention(attention);
+        }
+      } catch (error) {
+        console.warn("Could not load Eleeveon Hub indicator:", error);
+      }
+    };
+
+    void loadHubIndicator();
+
+    const refresh = () => void loadHubIndicator();
+    window.addEventListener("eleeveon:hub-refresh", refresh);
+    window.addEventListener("eleeveon:local-data-changed", refresh);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("eleeveon:hub-refresh", refresh);
+      window.removeEventListener("eleeveon:local-data-changed", refresh);
+    };
+  }, [accountId, activeRole, selectedMembership?.role, tab]);
+
+  const workspaceIdentities =
+    useWorkspaceDisplayNames(
+      allMemberships,
+      (user as any) ?? null,
+    );
 
   const visibleMemberName = useMemo(
     () =>
@@ -969,19 +1093,120 @@ function RolePortalShellContent({
   const visibleMemberMeta = useMemo(
     () =>
       selectedMemberMeta({
-        openedWorkspace,
         selectedMembership,
+        identities:
+          workspaceIdentities,
       }),
-    [openedWorkspace, selectedMembership]
+    [
+      selectedMembership,
+      workspaceIdentities,
+    ],
   );
 
+  const visibleMemberImage =
+  useMemo(() => {
+    const workspaceImage =
+      workspaceProfileImage(
+        selectedMembership,
+        workspaceIdentities,
+      );
+
+    const userImage = String(
+      (user as any)?.photo ??
+        (user as any)?.profilePhoto ??
+        (user as any)?.avatar ??
+        (user as any)?.image ??
+        "",
+    ).trim();
+
+    return (
+      workspaceImage ||
+      userImage ||
+      null
+    );
+  }, [
+    selectedMembership,
+    workspaceIdentities,
+    user,
+  ]);
   const ActiveComponent = useMemo(
-    () => routes[tab] ?? routes[homeKey],
+    () =>
+      tab === ELEEVEON_CENTER_KEY
+        ? EleeveonCenter
+        : routes[tab] ?? routes[homeKey],
     [routes, tab, homeKey]
   );
 
-  const activeLabel = labels[tab] ?? portalTitle;
-  const activeGroup = groups[tab] ?? portalSubtitle;
+  const activeLabel =
+    tab === ELEEVEON_CENTER_KEY
+      ? "Eleeveon Hub"
+      : labels[tab] ?? portalTitle;
+
+  const activeGroup =
+    tab === ELEEVEON_CENTER_KEY
+      ? "Messages, notices and support"
+      : groups[tab] ?? portalSubtitle;
+
+  const resolvedMemberRole = roleLabel(
+    selectedMembership?.role ||
+      account?.role ||
+      user?.role ||
+      "Member",
+  );
+
+  const resolvedWorkspaceLabel =
+    activeBranch?.name ||
+    activeSchool?.name ||
+    activeGroup ||
+    "Workspace";
+
+  useEffect(() => {
+    setWindowChromeIdentity({
+      title: activeLabel,
+      workspace: resolvedWorkspaceLabel,
+      memberName: visibleMemberName,
+      memberRole: resolvedMemberRole,
+      memberImage: visibleMemberImage,
+      memberMeta: visibleMemberMeta,
+      online: isOnline,
+      realtimeConnected,
+      initialSyncDone,
+      realtimeStatus: realtimeStatus.status,
+      sidebarHidden,
+      onToggleSidebar: () => {
+        if (sidebarHidden) {
+          setSidebarHidden(false);
+          setSidebarOpen(true);
+          return;
+        }
+
+        setSidebarHidden(true);
+      },
+      onOpenStatus: openStatusSheet,
+      onOpenAccount: () => {
+        setAccountDrawerOpen(true);
+      },
+    });
+
+    return () => {
+      clearWindowChromeIdentity();
+    };
+  }, [
+    activeLabel,
+    clearWindowChromeIdentity,
+    initialSyncDone,
+    isOnline,
+    openStatusSheet,
+    realtimeConnected,
+    realtimeStatus.status,
+    resolvedMemberRole,
+    resolvedWorkspaceLabel,
+    setWindowChromeIdentity,
+    sidebarHidden,
+    visibleMemberImage,
+    visibleMemberMeta,
+    visibleMemberName,
+  ]);
   const hasUsableWorkspace = Boolean(
     selectedMembership &&
       canAccess,
@@ -1104,24 +1329,56 @@ function RolePortalShellContent({
   const navigate = (key: string) => {
     setTab(key);
     setSidebarOpen(false);
-    setMoreOpen(false);
-    setRoleSwitchOpen(false);
+    setAccountDrawerOpen(false);
+
+    const activeGroup =
+      groups[key];
+
+    if (activeGroup) {
+      setOpenSections(
+        navSections.reduce(
+          (next, section) => {
+            next[section.title] =
+              section.title ===
+              activeGroup;
+            return next;
+          },
+          {} as Record<string, boolean>,
+        ),
+      );
+    }
 
     if (typeof window !== "undefined") {
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth",
+      });
     }
   };
 
   const handleLogout = useCallback(async () => {
-    setMoreOpen(false);
-    setContextOpen(false);
-    setRoleSwitchOpen(false);
+    setAccountDrawerOpen(false);
     setSidebarOpen(false);
     await logout();
   }, [logout]);
 
-  const toggleSection = (title: string) => {
-    setOpenSections((prev) => ({ ...prev, [title]: !prev[title] }));
+  const toggleSection = (
+    title: string,
+  ) => {
+    setOpenSections((current) => {
+      const willOpen =
+        !current[title];
+
+      return navSections.reduce(
+        (next, section) => {
+          next[section.title] =
+            willOpen &&
+            section.title === title;
+          return next;
+        },
+        {} as Record<string, boolean>,
+      );
+    });
   };
 
   const switchMembership = async (membership: UserMembership) => {
@@ -1194,9 +1451,7 @@ function RolePortalShellContent({
 
           completeMembershipTransition();
 
-          setMoreOpen(false);
-          setContextOpen(false);
-          setRoleSwitchOpen(false);
+          setAccountDrawerOpen(false);
 
           setStage("dashboard", {
             detail: `Opening the ${roleLabel(opened.role)} workspace with its prepared local data.`,
@@ -1285,7 +1540,13 @@ function RolePortalShellContent({
 
   return (
     <main
-      className="role-shell"
+      className={[
+        "role-shell",
+        sidebarHidden &&
+          "portal-sidebar-hidden",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       data-appearance-scope={
         themeContext.effectiveScope
       }
@@ -1293,9 +1554,15 @@ function RolePortalShellContent({
         themeContext.appliedFor?.key ||
         undefined
       }
+      data-window-chrome="integrated"
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
+          "--portal-header-height": "48px",
+          "--portal-content-left":
+            sidebarHidden
+              ? "0px"
+              : `${sidebarWidth}px`,
           "--primary-color":
             resolvedPrimaryColor,
           "--dashboard-primary":
@@ -1322,339 +1589,160 @@ function RolePortalShellContent({
         </div>
       )}
 
-      {(sidebarOpen || contextOpen || roleSwitchOpen) && (
+      {(sidebarOpen || accountDrawerOpen) ? (
         <button
           aria-label="Close drawer"
           className="app-overlay"
           onClick={() => {
             setSidebarOpen(false);
-            setContextOpen(false);
-            setRoleSwitchOpen(false);
-            setMoreOpen(false);
-                  }}
+            setAccountDrawerOpen(false);
+          }}
         />
-      )}
+      ) : null}
 
-      <aside className={`app-sidebar ${sidebarOpen ? "open" : ""} ${sidebarHidden ? "hidden" : ""}`}>
-        <div className="sidebar-head">
-          <button
-            type="button"
-            className="school-home"
-            onClick={() => navigate(homeKey)}
-            title="Go to portal home"
-          >
-            <span className="avatar">
-              {activeSchool?.name?.[0] || portalTitle[0] || "P"}
-            </span>
+      <PortalSidebar
+        open={sidebarOpen}
+        hidden={sidebarHidden}
+        portalTitle={portalTitle}
+        portalSubtitle={portalSubtitle}
+        activeInstitutionName={
+          activeSchool?.name ||
+          activeBranch?.name ||
+          null
+        }
+        activeBranchName={
+          activeBranch?.name ||
+          null
+        }
+        hubUnreadCount={hubUnreadCount}
+        hubHasAttention={hubHasAttention}
+        hubKey={ELEEVEON_CENTER_KEY}
+        activeTab={tab}
+        homeKey={homeKey}
+        sections={navSections}
+        openSections={openSections}
+        onNavigate={navigate}
+        onOpenHub={() => navigate(ELEEVEON_CENTER_KEY)}
+        onToggleSection={toggleSection}
+        onResizeStart={
+          handleSidebarResizeStart
+        }
+      />
 
-            <span className="sidebar-title">
-              <strong>{portalTitle}</strong>
-              <span>{activeBranch?.name || activeSchool?.name || portalSubtitle}</span>
-            </span>
-          </button>
-        </div>
-
-        <nav className="nav-list">
-          {navSections.map((section) => {
-            const open = openSections[section.title];
-
-            return (
-              <section key={section.title} className="nav-section">
-                <button
-                  type="button"
-                  className="nav-section-title"
-                  onClick={() => toggleSection(section.title)}
-                >
-                  <span>{section.title}</span>
-                  <b>{open ? "−" : "+"}</b>
-                </button>
-
-                {open && (
-                  <div className="nav-items">
-                    {section.items.map((item) => (
-                      <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => navigate(item.key)}
-                        className={`nav-item ${tab === item.key ? "active" : ""}`}
-                      >
-                        <span>{item.icon}</span>
-                        <strong>{item.label}</strong>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </section>
-            );
-          })}
-        </nav>
-
-        <button
-          type="button"
-          className="sidebar-resize-handle"
-          onMouseDown={handleSidebarResizeStart}
-          aria-label="Resize sidebar"
-        />
-      </aside>
-
-      <aside className={`context-drawer ${contextOpen ? "open" : ""}`}>
-        <div className="drawer-head">
-          <div>
-            <p>{lockedContext && !hasMultipleMemberships ? "Locked Context" : "School Context"}</p>
-            <h2>{hasMultipleMemberships ? "Your Workspaces" : lockedContext ? "Your Workspace" : "Switch Workspace"}</h2>
-          </div>
-
-          <button className="icon-btn" onClick={() => setContextOpen(false)} type="button">
-            ✕
-          </button>
-        </div>
-
-        <div className="drawer-card">
-          <label>School</label>
-          <select
-            value={activeSchoolId || effectiveSchoolId || ""}
-            onChange={(e) => setActiveSchoolId?.(e.target.value ? e.target.value : null)}
-            disabled={(lockedContext && !hasMultipleMemberships) || !schools?.length}
-          >
-            <option value="">{schools?.length ? "Select school" : "No school found"}</option>
-
-            {(schools || []).map((school: any) => (
-              <option key={school.id} value={school.id}>
-                {school.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="drawer-card">
-          <label>Branch</label>
-          <select
-            value={activeBranchId || effectiveBranchId || ""}
-            onChange={(e) => setActiveBranchId?.(e.target.value ? e.target.value : null)}
-            disabled={(lockedContext && !hasMultipleMemberships) || !(activeSchoolId || effectiveSchoolId) || !branches?.length}
-          >
-            <option value="">
-              {!(activeSchoolId || effectiveSchoolId)
-                ? "Select school first"
-                : branches?.length
-                  ? "Select branch"
-                  : "No branch under school"}
-            </option>
-
-            {(branches || []).map((branch: any) => (
-              <option key={branch.id} value={branch.id}>
-                {branch.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="drawer-info">
-          <div>
-            <strong>{roleLabel(selectedMembership?.role || account?.role || user?.role || "Member")}</strong>
-            <span>Portal role</span>
-          </div>
-
-          <div>
-            <strong>
-              {!isOnline
-                ? "Offline"
-                : realtimeConnected
-                  ? "Live"
-                  : "Online"}
-            </strong>
-            <span>
-              {!isOnline
-                ? "Local mode"
-                : realtimeConnected
-                  ? "Realtime connected"
-                  : "Polling fallback"}
-            </span>
-          </div>
-        </div>
-
-        {hasMultipleMemberships && (
-          <div className="drawer-card">
-            <label>Role / Workspace</label>
-            <div className="workspace-list compact">
-              {switchableMemberships.map((membership) => {
-                const id = membershipKey(membership);
-                const active = sameMembership(membership, selectedMembership);
-                const switching = switchingMembershipId === id;
-
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    className={active ? "active" : ""}
-                    onClick={() => switchMembership(membership)}
-                    disabled={Boolean(switchingMembershipId)}
-                  >
-                    <span>{roleIcon(membership.role)}</span>
-                    <strong>{roleLabel(membership.role)}</strong>
-                    <small>{roleScope(membership)} · {roleDetail(membership)}</small>
-                    <b>{switching ? "..." : active ? "Current" : "Open"}</b>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+      <AccountWorkspaceDrawer
+        open={accountDrawerOpen}
+        memberName={visibleMemberName}
+        memberRole={roleLabel(
+          selectedMembership?.role ||
+            account?.role ||
+            user?.role ||
+            "Member",
         )}
+        memberImage={visibleMemberImage}
+        selectedMembership={
+          selectedMembership
+        }
+        memberships={
+          switchableMemberships
+        }
+        identities={workspaceIdentities}
+        switchingMembershipId={
+          switchingMembershipId
+        }
+        schoolId={
+          activeSchoolId ||
+          effectiveSchoolId
+        }
+        branchId={
+          activeBranchId ||
+          effectiveBranchId
+        }
+        schools={(schools || []).map(
+          (school: any) => ({
+            id: school.id,
+            name: school.name,
+          }),
+        )}
+        branches={(branches || []).map(
+          (branch: any) => ({
+            id: branch.id,
+            name: branch.name,
+          }),
+        )}
+        lockedContext={lockedContext}
+        online={isOnline}
+        realtimeConnected={
+          realtimeConnected
+        }
+        membershipKey={membershipKey}
+        sameMembership={sameMembership}
+        roleLabel={roleLabel}
+        roleIcon={roleIcon}
+        onClose={() =>
+          setAccountDrawerOpen(false)
+        }
+        onSwitchMembership={
+          switchMembership
+        }
+        onSchoolChange={(id) =>
+          setActiveSchoolId?.(id)
+        }
+        onBranchChange={(id) =>
+          setActiveBranchId?.(id)
+        }
+        onOpenStatus={() => {
+          openStatusSheet();
+          setAccountDrawerOpen(false);
+        }}
+        onSelectRole={() =>
+          router.push("/select-role")
+        }
+        onLogout={handleLogout}
+      />
 
-        <button className="drawer-action" type="button" onClick={() => router.push("/select-role")}>
-          Select Role
-        </button>
+      <section
+        className={`app-main ${
+          sidebarHidden ? "full" : ""
+        }`}
+      >
+        <PortalHeader
+          activeLabel={activeLabel}
+          workspaceLabel={resolvedWorkspaceLabel}
+          memberName={visibleMemberName}
+          memberRole={resolvedMemberRole}
+          memberImage={visibleMemberImage}
+          memberMeta={visibleMemberMeta}
+          online={isOnline}
+          realtimeConnected={
+            realtimeConnected
+          }
+          initialSyncDone={
+            initialSyncDone
+          }
+          realtimeStatus={
+            realtimeStatus.status
+          }
+          sidebarHidden={sidebarHidden}
+          onToggleSidebar={() =>
+            sidebarHidden
+              ? (
+                  setSidebarHidden(false),
+                  setSidebarOpen(true)
+                )
+              : setSidebarHidden(true)
+          }
+          onOpenStatus={openStatusSheet}
+          onOpenAccount={() =>
+            setAccountDrawerOpen(true)
+          }
+        />
 
-        <button className="drawer-danger" type="button" onClick={handleLogout}>
-          Logout
-        </button>
-      </aside>
-
-      <aside className={`context-drawer role-switch-drawer ${roleSwitchOpen ? "open" : ""}`}>
-        <div className="drawer-head">
-          <div>
-            <p>Switch Access</p>
-            <h2>Role / Workspace</h2>
-          </div>
-
-          <button className="icon-btn" onClick={() => setRoleSwitchOpen(false)} type="button">
-            ✕
-          </button>
-        </div>
-
-        <div className="workspace-list">
-          {switchableMemberships.map((membership) => {
-            const id = membershipKey(membership);
-            const active = sameMembership(membership, selectedMembership);
-            const switching = switchingMembershipId === id;
-
-            return (
-              <button
-                key={id}
-                type="button"
-                className={active ? "active" : ""}
-                onClick={() => switchMembership(membership)}
-                disabled={Boolean(switchingMembershipId)}
-              >
-                <span>{roleIcon(membership.role)}</span>
-                <strong>{roleLabel(membership.role)}</strong>
-                <small>{roleScope(membership)} · {roleDetail(membership)}</small>
-                <b>{switching ? "..." : active ? "Current" : "Open"}</b>
-              </button>
-            );
-          })}
-        </div>
-      </aside>
-
-      <section className={`app-main ${sidebarHidden ? "full" : ""}`}>
-        <header className="app-header">
-          <button
-            className="icon-btn primary"
-            onClick={() =>
-              sidebarHidden
-                ? (setSidebarHidden(false), setSidebarOpen(true))
-                : setSidebarHidden(true)
-            }
-            type="button"
-            aria-label="Toggle sidebar"
-          >
-            ☰
-          </button>
-
-          <div className="header-title">
-            <strong>{activeLabel}</strong>
-            <span>
-              {activeGroup} · {activeBranch?.name || activeSchool?.name || "Workspace"}
-            </span>
-          </div>
-
-          <div className="member-pill" title={visibleMemberMeta}>
-            <b>{visibleMemberName}</b>
-            <span>{visibleMemberMeta}</span>
-          </div>
-
-          <div className="sync-dot-wrap">
-            <button
-              type="button"
-              className={`sync-dot-btn ${
-                !isOnline
-                  ? "warn"
-                  : realtimeConnected
-                    ? "live"
-                    : initialSyncDone
-                      ? "ok"
-                      : "warn"
-              }`}
-              onClick={() => {
-                openStatusSheet();
-                setMoreOpen(false);
-              }}
-              aria-label="Open system status, sync details and data actions"
-              title={
-                !isOnline
-                  ? "Offline — using local data"
-                  : realtimeConnected
-                    ? "Live updates connected"
-                    : initialSyncDone
-                      ? `Synced — realtime ${realtimeStatus.status}`
-                      : "Sync needs attention"
-              }
-            >
-              <span />
-            </button>
-
-          </div>
-
-          <div className="more-wrap">
-            <button
-              className="icon-btn"
-              onClick={() => setMoreOpen((prev) => !prev)}
-              aria-label="More actions"
-              type="button"
-            >
-              ⋮
-            </button>
-
-            {moreOpen && (
-              <div className="more-menu">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setContextOpen(true);
-                    setMoreOpen(false);
-                  }}
-                >
-                  Workspace context
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRoleSwitchOpen(true);
-                    setMoreOpen(false);
-                    setContextOpen(false);
-                  }}
-                >
-                  Switch role / workspace
-                </button>
-
-                <button type="button" onClick={() => router.push("/select-role")}>
-                  Select Role
-                </button>
-
-                <button type="button" onClick={handleLogout} className="danger">
-                  Logout
-                </button>
-              </div>
-            )}
-          </div>
-        </header>
-
-        <section className="app-content">
-          <div className="app-content-inner">
-            <ActiveComponent navigate={navigate} context={portalRuntimeContext} />
-          </div>
-        </section>
+        <PortalContent>
+          <ActiveComponent
+            navigate={navigate}
+            context={portalRuntimeContext}
+          />
+        </PortalContent>
       </section>
     </main>
   );
@@ -1721,13 +1809,25 @@ const css = `
    * the source variables, otherwise Branch Settings and Local Settings produce
    * different visual results.
    */
-  --shell-sidebar-bg: var(--surface, #ffffff);
-  --shell-header-bg: color-mix(
-    in srgb,
-    var(--surface, #ffffff) 92%,
-    transparent
-  );
-  --shell-menu-bg: var(--surface, #ffffff);
+  --shell-sidebar-bg:
+    var(
+      --eds-sidebar-bg,
+      var(--surface, #ffffff)
+    );
+  --shell-header-bg:
+    color-mix(
+      in srgb,
+      var(
+        --eds-header-bg,
+        var(--surface, #ffffff)
+      ) 94%,
+      transparent
+    );
+  --shell-menu-bg:
+    var(
+      --eds-drawer-bg,
+      var(--surface, #ffffff)
+    );
   --shell-section-bg: color-mix(
     in srgb,
     var(--bg, #f7f8fb) 76%,
@@ -1755,8 +1855,16 @@ html,
 body {
   max-width: 100%;
   overflow-x: hidden;
-  background: var(--bg, #f7f8fb);
-  color: var(--text, #111111);
+  background:
+    var(
+      --eds-shell-bg,
+      var(--bg, #f7f8fb)
+    );
+  color:
+    var(
+      --eds-text,
+      var(--text, #111111)
+    );
   font-family: var(--font-family, system-ui);
   font-size: var(--font-size, 16px);
 }
@@ -1767,12 +1875,27 @@ body {
 
 .role-shell,
 .center-page {
-  min-height: 100dvh;
+  min-height:
+    calc(
+      100dvh -
+      var(
+        --eds-shell-top-offset,
+        0px
+      )
+    );
   width: 100%;
   max-width: 100vw;
   overflow-x: hidden;
-  background: var(--bg, #f7f8fb);
-  color: var(--text, #111111);
+  background:
+    var(
+      --eds-shell-bg,
+      var(--bg, #f7f8fb)
+    );
+  color:
+    var(
+      --eds-text,
+      var(--text, #111111)
+    );
   font-family: var(--font-family, system-ui);
   font-size: var(--font-size, 16px);
 }
@@ -1828,14 +1951,25 @@ body {
 .app-sidebar,
 .context-drawer {
   position: fixed;
-  top: 0;
+  top:
+    var(
+      --eds-shell-top-offset,
+      0px
+    );
   bottom: 0;
   z-index: 50;
-  height: 100dvh;
+  height:
+    calc(
+      100dvh -
+      var(
+        --eds-shell-top-offset,
+        0px
+      )
+    );
   max-width: 100vw;
   background: var(--shell-sidebar-bg, var(--surface, #ffffff));
   color: var(--text, #111111);
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
   overscroll-behavior: contain;
   box-shadow: var(--shell-shadow, 0 24px 70px rgba(15,23,42,.22));
@@ -1847,6 +1981,8 @@ body {
   width: min(88vw, 330px);
   transform: translateX(-105%);
   padding: 12px;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-sidebar.open {
@@ -1858,6 +1994,9 @@ body {
   width: min(90vw, 370px);
   transform: translateX(105%);
   padding: 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
 .context-drawer.open {
@@ -1905,8 +2044,16 @@ body {
   width: 38px;
   height: 38px;
   border-radius: 15px;
-  background: var(--dashboard-primary, var(--primary-color, #2563eb));
-  color: #fff;
+  background:
+    var(
+      --eds-sidebar-active,
+      var(--shell-active-bg)
+    );
+  color:
+    var(
+      --eds-sidebar-active-text,
+      var(--dashboard-primary, #2563eb)
+    );
   display: grid;
   place-items: center;
   font-weight: 950;
@@ -1961,19 +2108,31 @@ body {
 }
 
 .icon-btn.primary {
-  background: var(--dashboard-primary, var(--primary-color, #2563eb));
-  color: #fff;
+  background:
+    var(
+      --eds-sidebar-active,
+      var(--shell-active-bg)
+    );
+  color:
+    var(
+      --eds-sidebar-active-text,
+      var(--dashboard-primary, #2563eb)
+    );
   border-color: transparent;
 }
 
 .nav-list {
+  min-height: 0;
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-bottom: 24px;
+  padding-bottom: 12px;
   max-width: 100%;
+  overflow-y: auto;
   overflow-x: hidden;
 }
+
 
 .nav-section {
   border-radius: 20px;
@@ -2036,8 +2195,16 @@ body {
 }
 
 .nav-item.active {
-  background: var(--dashboard-primary, var(--primary-color, #2563eb));
-  color: #fff;
+  background:
+    var(
+      --eds-sidebar-active,
+      var(--shell-active-bg)
+    );
+  color:
+    var(
+      --eds-sidebar-active-text,
+      var(--dashboard-primary, #2563eb)
+    );
 }
 
 .nav-item.active strong,
@@ -2073,6 +2240,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
+  overflow-y: visible;
   transition: margin-left .22s ease, width .22s ease;
 }
 
@@ -2090,87 +2258,138 @@ body {
 }
 
 
-.member-pill {
-  flex: 0 1 auto;
+.member-access {
   min-width: 0;
-  max-width: min(34vw, 330px);
+  max-width: min(430px, 48vw);
   display: grid;
-  gap: 1px;
-  align-content: center;
-  min-height: 36px;
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--dashboard-primary, var(--primary-color, #2563eb)) 8%, var(--surface, #ffffff));
-  border: 1px solid color-mix(in srgb, var(--dashboard-primary, var(--primary-color, #2563eb)) 18%, var(--border, rgba(0,0,0,.10)));
-  color: var(--text, #111111);
-  overflow: hidden;
+  grid-template-columns:
+    minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 6px;
 }
 
-.member-pill b,
-.member-pill span {
-  display: block;
+.member-pill {
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns:
+    34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 14px;
+  padding: 4px 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.member-pill b {
+.member-pill:hover {
+  background:
+    var(
+      --shell-hover-bg,
+      #f1f5f9
+    );
+}
+
+.member-avatar {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background:
+    color-mix(
+      in srgb,
+      var(
+        --dashboard-primary,
+        var(--primary-color, #2563eb)
+      ) 16%,
+      var(--surface, #ffffff)
+    );
+  color:
+    var(
+      --dashboard-primary,
+      var(--primary-color, #2563eb)
+    );
+  font-size: 11px;
+  font-weight: 1000;
+}
+
+.member-avatar img,
+.workspace-avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.member-copy {
+  min-width: 0;
+  display: block;
+}
+
+.member-copy b,
+.member-copy > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-copy b {
+  color: var(--text, #111111);
   font-size: 12px;
   font-weight: 950;
-  line-height: 1.05;
-  color: var(--text, #111111);
 }
 
-.member-pill span {
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 1.05;
+.member-copy > span {
+  margin-top: 2px;
   color: var(--muted, #64748b);
+  font-size: 10px;
+  font-weight: 750;
 }
 
-.more-wrap {
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.more-menu {
-  position: absolute;
-  top: 42px;
-  right: 0;
-  width: min(230px, calc(100vw - 18px));
-  border-radius: 18px;
-  padding: 8px;
-  background: var(--shell-menu-bg, var(--surface, #ffffff));
-  border: 1px solid var(--border, rgba(0,0,0,.10));
-  box-shadow: var(--shell-shadow, 0 24px 60px rgba(15,23,42,.18));
+.member-center-action {
+  width: 38px;
+  height: 38px;
   display: grid;
-  gap: 4px;
-  z-index: 60;
-  overflow: hidden;
-}
-
-.more-menu button {
-  min-height: 40px;
-  border: 0;
-  border-radius: 13px;
+  place-items: center;
+  border: 1px solid
+    var(
+      --border,
+      rgba(0,0,0,.08)
+    );
+  border-radius: 12px;
   background: transparent;
-  text-align: left;
-  padding: 0 12px;
-  font-weight: 850;
+  color:
+    var(
+      --dashboard-primary,
+      var(--primary-color, #2563eb)
+    );
+  font-size: 13px;
+  font-weight: 1000;
   cursor: pointer;
-  color: var(--text, #111111);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.more-menu button:hover {
-  background: var(--shell-hover-bg, var(--shell-hover-bg, #f1f5f9));
-}
-
-.more-menu .danger {
-  color: #dc2626;
+.member-center-action:hover,
+.member-center-action.active {
+  border-color:
+    var(
+      --dashboard-primary,
+      var(--primary-color, #2563eb)
+    );
+  background:
+    color-mix(
+      in srgb,
+      var(
+        --dashboard-primary,
+        var(--primary-color, #2563eb)
+      ) 9%,
+      transparent
+    );
 }
 
 .sync-dot-wrap {
@@ -2241,6 +2460,7 @@ body {
   padding: 8px;
   padding-bottom: max(28px, env(safe-area-inset-bottom));
   overflow-x: hidden;
+  overflow-y: visible;
 }
 
 .app-content-inner {
@@ -2248,6 +2468,7 @@ body {
   max-width: 100%;
   min-width: 0;
   overflow-x: hidden;
+  overflow-y: visible;
 }
 
 .app-content *,
@@ -2384,8 +2605,16 @@ body {
 }
 
 .drawer-action {
-  background: var(--dashboard-primary, var(--primary-color, #2563eb));
-  color: #fff;
+  background:
+    var(
+      --eds-sidebar-active,
+      var(--shell-active-bg)
+    );
+  color:
+    var(
+      --eds-sidebar-active-text,
+      var(--dashboard-primary, #2563eb)
+    );
 }
 
 .drawer-danger {
@@ -2429,7 +2658,7 @@ body {
   cursor: not-allowed;
 }
 
-.workspace-list button > span {
+.workspace-list button > .workspace-avatar {
   grid-row: span 2;
   width: 42px;
   height: 42px;
@@ -2480,43 +2709,131 @@ body {
 }
 
 @media (min-width: 980px) {
+  /*
+   * Desktop is a true split workspace.
+   *
+   * The sidebar owns the first grid column and the active page owns the second.
+   * Because these are separate layout tracks, page content can never render
+   * behind the sidebar. Hiding the sidebar removes that column and gives the
+   * page the complete viewport width.
+   */
+  .role-shell {
+    display: grid;
+    grid-template-columns:
+      minmax(240px, var(--sidebar-width, 300px))
+      minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+    width: 100%;
+    max-width: 100vw;
+    min-height:
+      calc(
+        100dvh -
+        var(--eds-shell-top-offset, 0px)
+      );
+    overflow: hidden;
+    transition: grid-template-columns .22s ease;
+  }
+
+  .role-shell.portal-sidebar-hidden {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
   .app-overlay {
     display: none;
   }
 
   .app-sidebar {
+    position: sticky;
+    grid-column: 1;
+    grid-row: 1;
+    top: var(--eds-shell-top-offset, 0px);
+    left: auto;
+    bottom: auto;
+    z-index: 35;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height:
+      calc(
+        100dvh -
+        var(--eds-shell-top-offset, 0px)
+      );
     transform: none;
-    width: var(--sidebar-width, 300px);
-    min-width: 240px;
-    max-width: 380px;
     box-shadow: none;
     border-right: 1px solid var(--border, rgba(0,0,0,.08));
+    overflow: hidden;
   }
 
-  .app-sidebar.hidden {
-    transform: translateX(-110%);
-    pointer-events: none;
-  }
-
+  .app-sidebar.hidden,
   .app-sidebar.hidden.open {
+    width: 0;
+    min-width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-right: 0;
     transform: none;
-    pointer-events: auto;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overflow: hidden;
   }
 
-  .app-main {
-    margin-left: var(--sidebar-width, 300px);
-    width: calc(100% - var(--sidebar-width, 300px));
-    max-width: calc(100% - var(--sidebar-width, 300px));
-  }
-
+  .app-main,
   .app-main.full {
+    position: relative;
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
     margin-left: 0;
+    overflow-x: hidden;
+  }
+
+  .app-header,
+  .app-content,
+  .app-content-inner {
+    min-width: 0;
     width: 100%;
     max-width: 100%;
   }
 
   .app-content {
     padding: 12px;
+  }
+
+  /*
+   * Large module children may contain grids, cards or tables with wide
+   * intrinsic sizes. They must shrink inside the page column rather than
+   * expanding the shell beyond the viewport.
+   */
+  .app-content-inner > *,
+  .app-content main,
+  .app-content section,
+  .app-content article,
+  .app-content form,
+  .app-content div {
+    min-width: 0;
+  }
+
+  .app-content table {
+    width: max-content;
+    min-width: 100%;
+  }
+
+  .app-content :is(
+    .table-wrap,
+    .table-wrapper,
+    .data-table-wrap,
+    .responsive-table,
+    [class*="table-container"],
+    [class*="table-wrapper"]
+  ) {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
   }
 
   .sidebar-resize-handle {
@@ -2534,7 +2851,11 @@ body {
   }
 
   .sidebar-resize-handle:hover {
-    background: color-mix(in srgb, var(--dashboard-primary, #2563eb) 18%, transparent);
+    background: color-mix(
+      in srgb,
+      var(--dashboard-primary, #2563eb) 18%,
+      transparent
+    );
   }
 }
 
@@ -2564,18 +2885,32 @@ body {
     font-size: 10px;
   }
 
+  .member-access {
+    max-width: min(240px, 54vw);
+    grid-template-columns:
+      minmax(0, 1fr) 36px;
+  }
+
   .member-pill {
-    max-width: 34vw;
-    min-height: 34px;
-    padding: 4px 8px;
+    min-height: 38px;
+    grid-template-columns:
+      30px minmax(0, 1fr);
+    gap: 7px;
+    padding: 3px 5px;
   }
 
-  .member-pill b {
-    font-size: 11px;
+  .member-avatar {
+    width: 30px;
+    height: 30px;
   }
 
-  .member-pill span {
+  .member-copy > span {
     display: none;
+  }
+
+  .member-center-action {
+    width: 36px;
+    height: 36px;
   }
 
   .app-sidebar {
@@ -2603,4 +2938,1145 @@ body {
     min-height: 43px;
   }
 }
+
+/* Refactored shell controls */
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+}
+
+.nav-list {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 2px 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.nav-section {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.nav-section-title {
+  min-height: 36px;
+  border-radius: 11px;
+  padding: 7px 9px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22px;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.nav-section-title:hover {
+  background: color-mix(in srgb, var(--muted, #64748b) 7%, transparent);
+  color: var(--text, #111111);
+}
+
+.nav-items {
+  gap: 2px;
+  padding: 2px 0 5px;
+}
+
+.nav-item {
+  min-height: 40px;
+  border-radius: 11px;
+  padding: 7px 9px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.nav-item.active {
+  background:
+    var(
+      --eds-sidebar-active,
+      var(--shell-active-bg)
+    );
+  color:
+    var(
+      --eds-sidebar-active-text,
+      var(--dashboard-primary, #2563eb)
+    );
+}
+
+.header-status {
+  flex: 0 0 auto;
+}
+
+.header-account-button {
+  min-width: 0;
+  max-width: min(230px, 32vw);
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 13px;
+  padding: 4px 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.header-account-button:hover {
+  background: var(--shell-hover-bg, #f1f5f9);
+}
+
+.header-account-avatar,
+.account-drawer-avatar {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--dashboard-primary, var(--primary-color, #2563eb)) 16%, var(--surface, #ffffff));
+  color: var(--dashboard-primary, var(--primary-color, #2563eb));
+  font-weight: 1000;
+}
+
+.header-account-avatar {
+  width: 32px;
+  height: 32px;
+  font-size: 10px;
+}
+
+.header-account-avatar img,
+.account-drawer-avatar img,
+.workspace-avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.header-account-copy {
+  min-width: 0;
+}
+
+.header-account-copy strong,
+.header-account-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-account-copy strong {
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.header-account-copy small {
+  margin-top: 1px;
+  color: var(--muted, #64748b);
+  font-size: 9px;
+}
+
+.account-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.account-drawer-head {
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border, rgba(0,0,0,.08));
+}
+
+.account-drawer-identity {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.account-drawer-avatar {
+  width: 44px;
+  height: 44px;
+  font-size: 12px;
+}
+
+.account-drawer-identity strong,
+.account-drawer-identity small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-drawer-identity strong {
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.account-drawer-identity small {
+  margin-top: 3px;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.account-current-workspace {
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--shell-section-bg, #f7f8fb);
+}
+
+.account-current-workspace > span,
+.account-drawer-section > header span {
+  color: var(--muted, #64748b);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.account-current-workspace strong,
+.account-current-workspace small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-current-workspace strong {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.account-current-workspace small {
+  color: var(--muted, #64748b);
+  font-size: 10px;
+}
+
+.account-primary-link {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--dashboard-primary, var(--primary-color, #2563eb)) 20%, var(--border, rgba(0,0,0,.08)));
+  border-radius: 16px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--dashboard-primary, var(--primary-color, #2563eb)) 7%, var(--surface, #ffffff));
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-link-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background:
+    var(
+      --eds-sidebar-active,
+      var(--shell-active-bg)
+    );
+  color:
+    var(
+      --eds-sidebar-active-text,
+      var(--dashboard-primary, #2563eb)
+    );
+  font-weight: 1000;
+}
+
+.account-primary-link strong,
+.account-primary-link small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-primary-link small {
+  margin-top: 2px;
+  color: var(--muted, #64748b);
+  font-size: 10px;
+}
+
+.account-drawer-section {
+  display: grid;
+  gap: 8px;
+}
+
+.account-drawer-section > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.account-context-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.account-context-field select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--border, rgba(0,0,0,.1));
+  border-radius: 13px;
+  padding: 0 10px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #111111);
+}
+
+.account-quick-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.account-quick-actions button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 1px 8px;
+  align-items: center;
+  border: 1px solid var(--border, rgba(0,0,0,.08));
+  border-radius: 14px;
+  padding: 10px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-quick-actions button > span {
+  grid-row: span 2;
+}
+
+.account-quick-actions strong,
+.account-quick-actions small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-quick-actions small {
+  color: var(--muted, #64748b);
+  font-size: 9px;
+}
+
+.account-logout {
+  width: 100%;
+  min-height: 42px;
+  margin-top: auto;
+  border: 0;
+  border-radius: 14px;
+  background: rgba(239,68,68,.1);
+  color: #dc2626;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .header-title span {
+    display: none;
+  }
+
+  .header-account-button {
+    width: 38px;
+    max-width: 38px;
+    grid-template-columns: 30px;
+    padding: 4px;
+  }
+
+  .header-account-copy {
+    display: none;
+  }
+
+  .header-account-avatar {
+    width: 30px;
+    height: 30px;
+  }
+
+  .account-quick-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+
+/* Phase 6 — role portal shell design language */
+.role-shell {
+  background:
+    var(--eds-gradient-page-glow),
+    var(--eds-bg);
+}
+
+.shell-sidebar {
+  isolation: isolate;
+  background:
+    var(--eds-gradient-sidebar),
+    var(--eds-surface);
+  border-right:
+    1px solid
+    var(--eds-divider);
+  box-shadow:
+    var(--eds-inset-highlight);
+}
+
+.shell-sidebar-inner,
+.shell-drawer-inner {
+  position: relative;
+  z-index: 2;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-sidebar-texture,
+.shell-drawer-texture {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.shell-sidebar-head {
+  background:
+    color-mix(
+      in srgb,
+      var(--eds-surface) 82%,
+      transparent
+    );
+  backdrop-filter: blur(16px);
+  border-bottom:
+    1px solid
+    var(--eds-divider);
+}
+
+.shell-sidebar-logo {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns:
+    38px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.shell-sidebar-logo-copy {
+  min-width: 0;
+}
+
+.shell-sidebar-logo-copy strong,
+.shell-sidebar-logo-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-sidebar-logo-copy strong {
+  color: var(--eds-text-strong);
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: -.02em;
+}
+
+.shell-sidebar-logo-copy small {
+  margin-top: 2px;
+  color: var(--eds-text-muted);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.shell-workspace-card {
+  display: grid;
+  grid-template-columns:
+    34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  margin: 8px 2px 10px;
+  padding: 9px;
+  border:
+    1px solid
+    color-mix(
+      in srgb,
+      var(--eds-primary) 17%,
+      var(--eds-border)
+    );
+  border-radius:
+    var(--eds-radius-card);
+  background:
+    var(--eds-gradient-brand-soft),
+    var(--eds-surface);
+  box-shadow:
+    var(--eds-shadow-soft);
+}
+
+.shell-workspace-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius:
+    var(--eds-radius-control);
+  background:
+    var(--eds-primary-soft);
+}
+
+.shell-workspace-copy {
+  min-width: 0;
+}
+
+.shell-workspace-copy small,
+.shell-workspace-copy strong,
+.shell-workspace-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-workspace-copy small {
+  color: var(--eds-text-muted);
+  font-size: 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.shell-workspace-copy strong {
+  margin-top: 2px;
+  color: var(--eds-text-strong);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.shell-workspace-copy span {
+  margin-top: 1px;
+  color: var(--eds-text-muted);
+  font-size: 9px;
+}
+
+.shell-nav-list {
+  gap: 5px;
+}
+
+.shell-nav-group {
+  position: relative;
+}
+
+.shell-nav-group-title {
+  width: 100%;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius:
+    var(--eds-radius-sm);
+  padding: 5px 8px;
+  background: transparent;
+  color: var(--eds-text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.shell-nav-group-title:hover {
+  background:
+    var(--eds-primary-softer);
+  color:
+    var(--eds-text-strong);
+}
+
+.shell-nav-group-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+
+.shell-nav-items {
+  display: grid;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.shell-nav-item {
+  position: relative;
+  width: 100%;
+  min-height: 39px;
+  display: grid;
+  grid-template-columns:
+    28px minmax(0, 1fr) 3px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius:
+    var(--eds-radius-control);
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--eds-text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    var(--eds-transition-color),
+    var(--eds-transition-transform);
+}
+
+.shell-nav-item:hover {
+  background:
+    var(--eds-primary-softer);
+  transform: translateX(1px);
+}
+
+.shell-nav-item.active {
+  border-color:
+    color-mix(
+      in srgb,
+      var(--eds-primary) 22%,
+      var(--eds-border)
+    );
+  background:
+    linear-gradient(
+      90deg,
+      var(--eds-primary-soft),
+      var(--eds-primary-softer)
+    );
+  color: var(--eds-primary);
+  box-shadow:
+    var(--eds-shadow-soft);
+}
+
+.shell-nav-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: inherit;
+}
+
+.shell-nav-item.active
+.shell-nav-icon {
+  background:
+    color-mix(
+      in srgb,
+      var(--eds-primary) 12%,
+      transparent
+    );
+}
+
+.shell-nav-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.shell-nav-active-marker {
+  width: 3px;
+  height: 18px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.shell-nav-item.active
+.shell-nav-active-marker {
+  background:
+    var(--eds-primary);
+}
+
+.shell-sidebar-footer {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top:
+    1px solid
+    var(--eds-divider);
+}
+
+.shell-sidebar-profile {
+  width: 100%;
+  display: grid;
+  grid-template-columns:
+    auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius:
+    var(--eds-radius-card);
+  padding: 7px;
+  background:
+    var(--eds-primary-softer);
+  color: inherit;
+  text-align: left;
+}
+
+.shell-sidebar-profile-copy {
+  min-width: 0;
+}
+
+.shell-sidebar-profile-copy strong,
+.shell-sidebar-profile-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-sidebar-profile-copy strong {
+  font-size: 10px;
+}
+
+.shell-sidebar-profile-copy small {
+  color: var(--eds-text-muted);
+  font-size: 8px;
+}
+
+.app-header {
+  background:
+    color-mix(
+      in srgb,
+      var(--eds-glass-medium-bg) 94%,
+      transparent
+    );
+  border-bottom:
+    1px solid
+    var(--eds-divider);
+  box-shadow:
+    0 8px 24px
+    rgba(15, 23, 42, .035);
+}
+
+.app-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      color-mix(
+        in srgb,
+        var(--eds-primary) 20%,
+        transparent
+      ),
+      transparent
+    );
+  pointer-events: none;
+}
+
+.shell-portal-content {
+  position: relative;
+  padding: 0;
+}
+
+.shell-content-background {
+  min-height: 100%;
+  padding: 8px;
+}
+
+.shell-account-drawer {
+  isolation: isolate;
+  background:
+    var(--eds-gradient-sidebar),
+    var(--eds-surface);
+  border-left:
+    1px solid
+    var(--eds-divider);
+}
+
+.shell-account-drawer
+.account-drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background:
+    color-mix(
+      in srgb,
+      var(--eds-surface) 84%,
+      transparent
+    );
+  backdrop-filter:
+    blur(16px);
+}
+
+.shell-current-workspace {
+  position: relative;
+  overflow: hidden;
+  background:
+    var(--eds-gradient-brand-soft),
+    var(--eds-surface);
+  border:
+    1px solid
+    color-mix(
+      in srgb,
+      var(--eds-primary) 20%,
+      var(--eds-border)
+    );
+  box-shadow:
+    var(--eds-shadow-soft);
+}
+
+.shell-current-workspace
+.eds-status-indicator {
+  margin-top: 6px;
+}
+
+.shell-context-selector
+.account-context-field > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.workspace-list button {
+  box-shadow:
+    var(--eds-shadow-soft);
+}
+
+.workspace-list button.active {
+  box-shadow:
+    0 10px 28px
+    color-mix(
+      in srgb,
+      var(--eds-primary) 9%,
+      transparent
+    );
+}
+
+.background-refresh-indicator {
+  background:
+    var(--eds-glass-strong-bg);
+  backdrop-filter:
+    var(--eds-glass-strong-filter);
+  border-color:
+    var(--eds-border);
+  box-shadow:
+    var(--eds-shadow-raised);
+}
+
+@media (min-width: 980px) {
+  .shell-content-background {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 760px) {
+  .shell-content-background {
+    padding: 6px;
+  }
+
+  .shell-workspace-card {
+    margin-bottom: 7px;
+  }
+}
+
+
+
+/* -----------------------------------------------------------------------
+ * Portal header theme and single-page-scroll correction
+ * -----------------------------------------------------------------------
+ * These rules deliberately sit at the end of the shell stylesheet so they
+ * win over legacy header declarations still present during migration.
+ */
+
+.app-header {
+  isolation: isolate;
+  background:
+    color-mix(
+      in srgb,
+      var(
+        --eds-header-bg,
+        var(--surface, #ffffff)
+      ) 96%,
+      transparent
+    ) !important;
+  color:
+    var(
+      --eds-text,
+      var(--text, #111827)
+    ) !important;
+  border-bottom:
+    1px solid
+    var(
+      --eds-divider,
+      var(--border, rgba(15,23,42,.09))
+    ) !important;
+}
+
+.app-header .header-title strong {
+  color:
+    var(
+      --eds-text-strong,
+      var(--text, #111827)
+    ) !important;
+}
+
+.app-header .header-title span {
+  color:
+    var(
+      --eds-text-muted,
+      var(--muted, #667085)
+    ) !important;
+}
+
+.app-header .header-account-button {
+  color:
+    var(
+      --eds-text,
+      var(--text, #111827)
+    ) !important;
+}
+
+.app-header .header-account-button:hover {
+  background:
+    var(
+      --eds-primary-softer,
+      var(--shell-hover-bg)
+    ) !important;
+}
+
+.app-header .header-account-copy strong {
+  color:
+    var(
+      --eds-text-strong,
+      var(--text, #111827)
+    ) !important;
+}
+
+.app-header .header-account-copy small {
+  color:
+    var(
+      --eds-text-muted,
+      var(--muted, #667085)
+    ) !important;
+}
+
+.app-header .header-account-avatar {
+  background:
+    var(
+      --eds-primary-soft,
+      color-mix(
+        in srgb,
+        var(--primary-color, #2563eb) 15%,
+        transparent
+      )
+    ) !important;
+  color:
+    var(
+      --eds-primary,
+      var(--primary-color, #2563eb)
+    ) !important;
+  border:
+    1px solid
+    color-mix(
+      in srgb,
+      var(
+        --eds-primary,
+        var(--primary-color, #2563eb)
+      ) 20%,
+      var(
+        --eds-border,
+        transparent
+      )
+    );
+}
+
+.app-header .icon-btn {
+  background:
+    var(
+      --eds-surface,
+      var(--surface, #ffffff)
+    ) !important;
+  color:
+    var(
+      --eds-text-strong,
+      var(--text, #111827)
+    ) !important;
+  border-color:
+    var(
+      --eds-border,
+      var(--border, rgba(15,23,42,.09))
+    ) !important;
+}
+
+.app-header .icon-btn.primary {
+  background:
+    var(
+      --eds-primary,
+      var(--primary-color, #2563eb)
+    ) !important;
+  color:
+    var(
+      --eds-primary-text,
+      #ffffff
+    ) !important;
+  border-color: transparent !important;
+}
+
+/*
+ * Normal pages use the document/window as their one vertical scrollbar.
+ * Fixed drawers remain independently scrollable only while open.
+ */
+html {
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+body {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.role-shell,
+.app-main,
+.app-content,
+.app-content-inner,
+.shell-portal-content,
+.shell-content-background {
+  overflow-y: visible !important;
+}
+
+.role-shell,
+.app-main {
+  height: auto !important;
+  max-height: none !important;
+}
+
+.app-content,
+.app-content-inner,
+.shell-portal-content {
+  min-height: 0;
+}
+
+.app-sidebar {
+  overflow: hidden !important;
+}
+
+.app-sidebar .nav-list {
+  min-height: 0;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.context-drawer {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+
+
+/* Portal-contained overlay contract ----------------------------------- */
+/*
+ * Feature pages can opt into this class for dialogs that must stay inside
+ * the active portal content column instead of covering the fixed sidebar or
+ * integrated portal header.
+ */
+.portal-contained-modal {
+  --portal-modal-gap:
+    clamp(8px, 1.4vw, 16px);
+
+  position: fixed !important;
+  top:
+    calc(
+      var(
+        --portal-header-height,
+        48px
+      )
+      +
+      var(--portal-modal-gap)
+    ) !important;
+  right:
+    var(--portal-modal-gap) !important;
+  bottom:
+    var(--portal-modal-gap) !important;
+  left:
+    calc(
+      var(
+        --portal-content-left,
+        0px
+      )
+      +
+      var(--portal-modal-gap)
+    ) !important;
+
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  contain: layout paint;
+}
+
+/*
+ * Mobile sidebars are overlays rather than permanent columns, so content
+ * dialogs use the complete page width.
+ */
+@media (max-width: 979px) {
+  .portal-contained-modal {
+    left:
+      var(--portal-modal-gap) !important;
+  }
+}
+
+/*
+ * Window Controls Overlay adds its own top inset to body. The portal header
+ * remains the local upper boundary, so no second titlebar offset is added.
+ */
+@media (display-mode: window-controls-overlay) {
+  .portal-contained-modal {
+    top:
+      calc(
+        var(
+          --portal-header-height,
+          48px
+        )
+        +
+        var(--portal-modal-gap)
+      ) !important;
+  }
+}
+
 `;

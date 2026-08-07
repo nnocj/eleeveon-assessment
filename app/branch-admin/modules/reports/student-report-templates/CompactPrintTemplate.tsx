@@ -53,6 +53,12 @@ import {
   reportTemplateEmptyMessage,
 } from "../shared/ReportTemplateUtils";
 
+import {
+  assessmentCellText,
+  assessmentColumnLabel,
+  collectAssessmentColumns,
+} from "./student-report-template-utils";
+
 type Props = StudentReportTemplateBaseProps & {
   dataset?: StudentReportCardDataset;
 };
@@ -197,25 +203,18 @@ export default function CompactPrintTemplate({
   const header = dataset?.header;
   const student = dataset?.student;
 
-  const assessmentColumns = useMemo<ReportAssessmentColumn[]>(() => {
-    const map = new Map<string, ReportAssessmentColumn>();
-
-    report?.subjectResults?.forEach((subject) => {
-      subject.breakdown?.forEach((item) => {
-        if (!map.has(item.assessmentStructureItemId)) {
-          map.set(item.assessmentStructureItemId, {
-            assessmentStructureItemId: item.assessmentStructureItemId,
-            name: item.name,
-            maxScore: item.maxScore,
-            weight: item.weight,
-            order: item.order,
-          });
-        }
-      });
-    });
-
-    return Array.from(map.values()).sort((a, b) => a.order - b.order);
-  }, [report]);
+  const assessmentColumns =
+    useMemo<ReportAssessmentColumn[]>(
+      () =>
+        collectAssessmentColumns(
+          report?.subjectResults,
+          resolvedSettings,
+        ),
+      [
+        report?.subjectResults,
+        resolvedSettings,
+      ],
+    );
 
   if (!dataset || !report || !header || !normalized) {
     return (
@@ -670,13 +669,13 @@ export default function CompactPrintTemplate({
                   Subject
                 </th>
 
-                {assessmentColumns.map((column) => (
+                {resolvedSettings.showAssessmentBreakdown && assessmentColumns.map((column) => (
                   <th
                     data-report-color-block="true"
                     key={column.assessmentStructureItemId}
                     style={th}
                   >
-                    {column.name}
+                    {assessmentColumnLabel(column, resolvedSettings)}
                     <div style={{ fontSize: 6.7, marginTop: 1, opacity: 0.95 }}>
                       W:{formatNumber(column.weight, 0)}
                     </div>
@@ -733,7 +732,7 @@ export default function CompactPrintTemplate({
                       )}
                   </td>
 
-                  {assessmentColumns.map((column) => {
+                  {resolvedSettings.showAssessmentBreakdown && assessmentColumns.map((column) => {
                     const item = subject.breakdown.find(
                       (row) =>
                         row.assessmentStructureItemId ===
@@ -745,9 +744,11 @@ export default function CompactPrintTemplate({
                         key={column.assessmentStructureItemId}
                         style={{ ...td, textAlign: "center" }}
                       >
-                        {item
-                          ? `${formatNumber(item.score, 0)}/${formatNumber(item.maxScore, 0)}`
-                          : "-"}
+                        {assessmentCellText(
+                          item,
+                          resolvedSettings,
+                          formatNumber,
+                        )}
                       </td>
                     );
                   })}

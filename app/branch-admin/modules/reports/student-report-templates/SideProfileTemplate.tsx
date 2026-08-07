@@ -58,6 +58,12 @@ import {
   reportTemplateEmptyMessage,
 } from "../shared/ReportTemplateUtils";
 
+import {
+  assessmentCellText,
+  assessmentColumnLabel,
+  collectAssessmentColumns,
+} from "./student-report-template-utils";
+
 // ======================================================
 // TYPES
 // ======================================================
@@ -220,25 +226,18 @@ export default function SideProfileTemplate({
   const header = dataset?.header;
   const student = dataset?.student;
 
-  const assessmentColumns = useMemo<ReportAssessmentColumn[]>(() => {
-    const map = new Map<string, ReportAssessmentColumn>();
-
-    report?.subjectResults?.forEach((subject) => {
-      subject.breakdown?.forEach((item) => {
-        if (!map.has(item.assessmentStructureItemId)) {
-          map.set(item.assessmentStructureItemId, {
-            assessmentStructureItemId: item.assessmentStructureItemId,
-            name: item.name,
-            maxScore: item.maxScore,
-            weight: item.weight,
-            order: item.order,
-          });
-        }
-      });
-    });
-
-    return Array.from(map.values()).sort((a, b) => a.order - b.order);
-  }, [report]);
+  const assessmentColumns =
+    useMemo<ReportAssessmentColumn[]>(
+      () =>
+        collectAssessmentColumns(
+          report?.subjectResults,
+          resolvedSettings,
+        ),
+      [
+        report?.subjectResults,
+        resolvedSettings,
+      ],
+    );
 
   if (!dataset || !report || !header || !normalized) {
     return (
@@ -764,13 +763,13 @@ export default function SideProfileTemplate({
                   >
                     Subject
                   </th>
-                  {assessmentColumns.map((column) => (
+                  {resolvedSettings.showAssessmentBreakdown && assessmentColumns.map((column) => (
                     <th
                       data-report-color-block="true"
                       key={column.assessmentStructureItemId}
                       style={tableStyles.th}
                     >
-                      {column.name}
+                      {assessmentColumnLabel(column, resolvedSettings)}
                       <div
                         style={{ fontSize: 7.2, marginTop: 2, opacity: 0.88 }}
                       >
@@ -831,7 +830,7 @@ export default function SideProfileTemplate({
                         )}
                     </td>
 
-                    {assessmentColumns.map((column) => {
+                    {resolvedSettings.showAssessmentBreakdown && assessmentColumns.map((column) => {
                       const item = subject.breakdown.find(
                         (row) =>
                           row.assessmentStructureItemId ===
@@ -843,9 +842,11 @@ export default function SideProfileTemplate({
                           key={column.assessmentStructureItemId}
                           style={{ ...tableStyles.td, textAlign: "center" }}
                         >
-                          {item
-                            ? `${formatNumber(item.score, 0)}/${formatNumber(item.maxScore, 0)}`
-                            : "-"}
+                          {assessmentCellText(
+                          item,
+                          resolvedSettings,
+                          formatNumber,
+                        )}
                         </td>
                       );
                     })}

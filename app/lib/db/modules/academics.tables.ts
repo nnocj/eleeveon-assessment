@@ -54,7 +54,7 @@ export const ACADEMIC_STORES: Record<string, string> = {
     "schoolId,branchId,curriculumId,subjectId,pathwayId,organizationId,type,orderIndex,active,updatedAt,[curriculumId+subjectId+pathwayId]",
   ),
   classSubjects: branchScopedIndexes(
-    "schoolId,branchId,classId,subjectId,curriculumSubjectId,academicStructureId,academicPeriodId,teacherId,active,locked,updatedAt,[classId+subjectId]",
+    "schoolId,branchId,classId,subjectId,curriculumSubjectId,academicStructureId,academicPeriodId,teacherId,orderIndex,active,locked,updatedAt,[classId+subjectId]",
   ),
   subjectPrerequisites: branchScopedIndexes(
     "schoolId,branchId,curriculumSubjectId,prerequisiteSubjectId,type,groupCode,active,updatedAt",

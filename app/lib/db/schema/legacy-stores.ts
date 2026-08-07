@@ -64,11 +64,11 @@ export const LEGACY_DB_STORES: Record<string, string> = {
       studentEnrollments:
         "id,accountId,schoolId,branchId,studentId,classId,academicPeriodId,status,updatedAt",
 
-      gradingSystems:
-        "id,accountId, schoolId, branchId,organizationId,name,type,active,updatedAt",
+      gradingStructures:
+        "id,accountId,schoolId,branchId,organizationId,name,type,active,updatedAt",
 
       gradeRules:
-        "id,accountId, schoolId, branchId,gradingSystemId,minScore,maxScore,grade,order,updatedAt",
+       "id,accountId,schoolId,branchId,gradingStructureId,minScore,maxScore,grade,order,updatedAt",
 
       assessmentStructures:
         "id,accountId, schoolId, branchId,organizationId,academicStructureId,name,active,updatedAt",
@@ -77,7 +77,7 @@ export const LEGACY_DB_STORES: Record<string, string> = {
         "id,accountId, schoolId, branchId,assessmentStructureId,order,active,updatedAt",
 
       assessmentApplicabilities:
-        "id,accountId, schoolId, branchId,classSubjectId,assessmentStructureId,gradingSystemId,active,locked",
+       "id,accountId,schoolId,branchId,classSubjectId,assessmentStructureId,gradingStructureId,active,locked",
 
       assessmentComponents:
         "id,accountId, schoolId, branchId,classId,subjectId,academicPeriodId,assessmentStructureId,active",

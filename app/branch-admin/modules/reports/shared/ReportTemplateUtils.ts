@@ -60,6 +60,13 @@ import {
   normalizeStudentReportTemplateDefinition,
   normalizeTemplateKey,
 } from "./ReportTemplateTypes";
+import {
+  resolveAssessmentReportSettings,
+  resolveBroadsheetAssessmentReportSettings,
+  type AssessmentReportProjection,
+  type AssessmentReportProjectionSettings,
+} from "../../../../lib/assessments";
+
 
 // ======================================================
 // TEMPLATE GROUPS
@@ -869,6 +876,18 @@ export function normalizeStudentReportTemplateData(args: {
     branding: resolveBranding(dataset.header),
     studentInfo: resolveStudentInfo(dataset),
     subjectResults,
+    assessmentProjections: subjectResults
+      .map((subject) => subject.assessmentProjection)
+      .filter(
+        (
+          projection,
+        ): projection is AssessmentReportProjection =>
+          Boolean(projection),
+      ),
+    assessmentReportSettings:
+      resolveAssessmentReportSettings(
+        settings as any,
+      ),
     attendance: report.attendance,
     summary: resolveSummary(report),
     currentAcademicPeriod: resolveCurrentAcademicPeriodEnd(dataset),
@@ -876,6 +895,34 @@ export function normalizeStudentReportTemplateData(args: {
     signatures: resolveSignatures(dataset),
     settings,
   };
+}
+
+export function resolveStudentAssessmentReportSettings(
+  settings?:
+    | ReportCardTemplateSettingsLike
+    | Partial<StudentReportTemplateSettings>
+    | null,
+): AssessmentReportProjectionSettings {
+  return resolveAssessmentReportSettings(
+    settings as any,
+  );
+}
+
+export function resolveSubjectBroadsheetAssessmentReportSettings(
+  settings?:
+    | ReportCardTemplateSettingsLike
+    | Partial<StudentReportTemplateSettings>
+    | null,
+): AssessmentReportProjectionSettings {
+  return resolveBroadsheetAssessmentReportSettings(
+    settings as any,
+  );
+}
+
+export function getSubjectAssessmentProjection(
+  subject?: StudentSubjectResult | null,
+): AssessmentReportProjection | undefined {
+  return subject?.assessmentProjection;
 }
 
 // ======================================================

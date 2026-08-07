@@ -59,6 +59,12 @@ import {
   reportTemplateEmptyMessage,
 } from "../shared/ReportTemplateUtils";
 
+import {
+  assessmentCellText,
+  assessmentColumnLabel,
+  collectAssessmentColumns,
+} from "./student-report-template-utils";
+
 // ======================================================
 // TYPES
 // ======================================================
@@ -221,25 +227,18 @@ export default function BorderedTraditionalTemplate({
   const header = dataset?.header;
   const student = dataset?.student;
 
-  const assessmentColumns = useMemo<ReportAssessmentColumn[]>(() => {
-    const map = new Map<string, ReportAssessmentColumn>();
-
-    report?.subjectResults?.forEach((subject) => {
-      subject.breakdown?.forEach((item) => {
-        if (!map.has(item.assessmentStructureItemId)) {
-          map.set(item.assessmentStructureItemId, {
-            assessmentStructureItemId: item.assessmentStructureItemId,
-            name: item.name,
-            maxScore: item.maxScore,
-            weight: item.weight,
-            order: item.order,
-          });
-        }
-      });
-    });
-
-    return Array.from(map.values()).sort((a, b) => a.order - b.order);
-  }, [report]);
+  const assessmentColumns =
+    useMemo<ReportAssessmentColumn[]>(
+      () =>
+        collectAssessmentColumns(
+          report?.subjectResults,
+          resolvedSettings,
+        ),
+      [
+        report?.subjectResults,
+        resolvedSettings,
+      ],
+    );
 
   if (!dataset || !report || !header || !normalized) {
     return (
@@ -726,16 +725,41 @@ export default function BorderedTraditionalTemplate({
                 >
                   Subject
                 </th>
-                {assessmentColumns.map((column) => (
+                {resolvedSettings.showAssessmentBreakdown && assessmentColumns.map((column) => (
                   <th
                     data-report-color-block="true"
                     key={column.assessmentStructureItemId}
                     style={tableStyles.th}
                   >
-                    {column.name}
-                    <div style={{ fontSize: 7.5, marginTop: 2, opacity: 0.88 }}>
-                      W:{formatNumber(column.weight, 0)}
-                    </div>
+                    {assessmentColumnLabel(column, resolvedSettings)} 
+                    {(resolvedSettings.showAssessmentWeights ||
+                      resolvedSettings.showAssessmentMaximumScores) && (
+                      <div
+                        style={{
+                          fontSize: 7.5,
+                          marginTop: 2,
+                          opacity: 0.88,
+                        }}
+                      >
+                        {resolvedSettings.showAssessmentWeights
+                          ? `W:${formatNumber(
+                              column.effectiveWeight ??
+                                column.weight,
+                              0,
+                            )}`
+                          : ""}
+                        {resolvedSettings.showAssessmentWeights &&
+                        resolvedSettings.showAssessmentMaximumScores
+                          ? " · "
+                          : ""}
+                        {resolvedSettings.showAssessmentMaximumScores
+                          ? `M:${formatNumber(
+                              column.maxScore,
+                              0,
+                            )}`
+                          : ""}
+                      </div>
+                    )}
                   </th>
                 ))}
                 <th data-report-color-block="true" style={tableStyles.th}>
@@ -791,7 +815,7 @@ export default function BorderedTraditionalTemplate({
                       )}
                   </td>
 
-                  {assessmentColumns.map((column) => {
+                  {resolvedSettings.showAssessmentBreakdown && assessmentColumns.map((column) => {
                     const item = subject.breakdown.find(
                       (row) =>
                         row.assessmentStructureItemId ===
@@ -803,9 +827,11 @@ export default function BorderedTraditionalTemplate({
                         key={column.assessmentStructureItemId}
                         style={{ ...tableStyles.td, textAlign: "center" }}
                       >
-                        {item
-                          ? `${formatNumber(item.score, 0)}/${formatNumber(item.maxScore, 0)}`
-                          : "-"}
+                        {assessmentCellText(
+                          item,
+                          resolvedSettings,
+                          formatNumber,
+                        )}
                       </td>
                     );
                   })}

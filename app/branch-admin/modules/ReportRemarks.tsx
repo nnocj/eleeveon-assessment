@@ -13,10 +13,18 @@
  * - Branch admins can access all active classes in the selected branch.
  *
  * Source rules:
- * - Workspace-session aligned: eleeveon_open_workspace first.
- * - Falls back to ActiveMembershipProvider, ActiveBranchContext, settings and storage.
+ * - Uses the shared Branch Admin role-portal workspace resolver.
+ * - Account, school and branch scope come from useBranchWorkspaceScope().
+ * - Uses branch-table-aware revision tracking for local/offline refreshes.
  * - Uses listActiveLocal/createLocal/updateLocal from syncUtils.
  * - Does not write directly with db.add/db.update.
+ *
+ * Remarks Basis:
+ * - Average bands follow the active grading structure and grade rules.
+ * - Total bands scale those grading bands to the selected class subject load.
+ * - Position bands adapt to the actual selected class size.
+ * - Attendance bands adapt to configured school attendance expectations.
+ * - Changing basis immediately regenerates minimum/maximum ranges.
  *
  * UI:
  * - Matches compact golden standard from StudentReports.tsx.
@@ -26,12 +34,10 @@
  * - Compact student rows with inline remark editor.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
 import { useActiveBranch } from "../../context/active-branch-context";
-import { useActiveMembership } from "../../context/active-membership-context";
 
 import type {
   AcademicPeriod,
@@ -48,8 +54,20 @@ import {
   listActiveLocal,
 } from "../../lib/sync/syncUtils";
 
-import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
+import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
+import {
+  buildClassReports,
+} from "./reports/engine/report-engine";
+
+import type {
+  ComputedStudentReport,
+  ReportEngineDataset,
+  ReportFiltersState,
+} from "./reports/engine/report-types";
+
+
 type ViewMode = "single" | "group" | "analytics";
 type RemarkFilter =
   | "all"
@@ -66,16 +84,6 @@ type TenantRow = {
   isDeleted?: boolean;
 };
 
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  teacherId?: string | null;
-  openedAt?: number;
-};
-
 type RemarkDraft = {
   reportCardId?: string;
   classTeacherRemark: string;
@@ -83,42 +91,198 @@ type RemarkDraft = {
   published: boolean;
 };
 
+
+type RemarkBasisMetric =
+  | "average"
+  | "total"
+  | "position"
+  | "attendance";
+
+type RemarkBasisTarget =
+  | "headTeacherRemark"
+  | "classTeacherRemark";
+
+type RemarkBasisRule = {
+  id: string;
+  label: string;
+  minimum: number;
+  maximum: number;
+  remark: string;
+};
+
+type RemarkBasisSource = {
+  title: string;
+  detail: string;
+};
+
+
+
+function defaultRemarkForBand(
+  label: string,
+  metric: RemarkBasisMetric,
+) {
+  const normalized =
+    cleanText(label).toLowerCase();
+
+  if (metric === "position") {
+    if (
+      normalized.includes("first") ||
+      normalized.includes("1st") ||
+      normalized.includes("top")
+    ) {
+      return "Outstanding class position. Maintain this excellent standard.";
+    }
+
+    if (
+      normalized.includes("upper") ||
+      normalized.includes("strong")
+    ) {
+      return "A strong class position. Continue working consistently.";
+    }
+
+    if (
+      normalized.includes("middle") ||
+      normalized.includes("average")
+    ) {
+      return "A fair class position. More focused effort can produce stronger results.";
+    }
+
+    return "The class position can improve with greater effort and consistency.";
+  }
+
+  if (metric === "attendance") {
+    if (
+      normalized.includes("excellent") ||
+      normalized.includes("outstanding")
+    ) {
+      return "Excellent attendance. Keep maintaining this level of punctuality and commitment.";
+    }
+
+    if (
+      normalized.includes("good") ||
+      normalized.includes("very good")
+    ) {
+      return "Good attendance. Continue to attend school regularly and punctually.";
+    }
+
+    if (
+      normalized.includes("satisfactory") ||
+      normalized.includes("fair")
+    ) {
+      return "Attendance is satisfactory but should become more consistent.";
+    }
+
+    return "Attendance needs improvement. Regular and punctual attendance is strongly encouraged.";
+  }
+
+  if (
+    normalized.includes("excellent") ||
+    normalized.includes("outstanding") ||
+    normalized === "a" ||
+    normalized.startsWith("a1")
+  ) {
+    return "Excellent performance. Keep up the outstanding work.";
+  }
+
+  if (
+    normalized.includes("very good") ||
+    normalized.includes("credit") ||
+    normalized.startsWith("b")
+  ) {
+    return "Very good performance. Continue working hard.";
+  }
+
+  if (
+    normalized.includes("good") ||
+    normalized.includes("satisfactory") ||
+    normalized.startsWith("c")
+  ) {
+    return "Good performance. Greater consistency will produce even better results.";
+  }
+
+  if (
+    normalized.includes("pass") ||
+    normalized.includes("fair") ||
+    normalized.startsWith("d")
+  ) {
+    return "A fair performance. More focused effort is encouraged.";
+  }
+
+  return "Performance needs improvement. Work harder and seek support where necessary.";
+}
+
+function normalizeGeneratedRules(
+  rules: RemarkBasisRule[],
+) {
+  return rules
+    .filter(
+      (rule) =>
+        Number.isFinite(rule.minimum) &&
+        Number.isFinite(rule.maximum) &&
+        rule.maximum >= rule.minimum,
+    )
+    .sort(
+      (left, right) =>
+        right.minimum -
+          left.minimum ||
+        right.maximum -
+          left.maximum,
+    );
+}
+
+const DEFAULT_REMARK_BASIS_RULES:
+  RemarkBasisRule[] = [
+  {
+    id: "excellent",
+    label: "Excellent",
+    minimum: 80,
+    maximum: 100,
+    remark:
+      "Excellent performance. Keep up the outstanding work.",
+  },
+  {
+    id: "very-good",
+    label: "Very good",
+    minimum: 70,
+    maximum: 79.99,
+    remark:
+      "Very good performance. Continue working hard.",
+  },
+  {
+    id: "good",
+    label: "Good",
+    minimum: 60,
+    maximum: 69.99,
+    remark:
+      "Good performance. Greater consistency will produce even better results.",
+  },
+  {
+    id: "satisfactory",
+    label: "Satisfactory",
+    minimum: 50,
+    maximum: 59.99,
+    remark:
+      "Satisfactory performance. More focused effort is encouraged.",
+  },
+  {
+    id: "needs-improvement",
+    label: "Needs improvement",
+    minimum: 0,
+    maximum: 49.99,
+    remark:
+      "Performance needs improvement. Work harder and seek support where necessary.",
+  },
+];
+
 type DraftMap = Record<string, RemarkDraft>;
 
 type StudentRemarkRow = {
   student: Student;
   enrollment: StudentEnrollment;
   reportCard?: ReportCard;
+  computedReport?: ComputedStudentReport;
   draft: RemarkDraft;
 };
-
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
-
-function safeStorageRead(key: string) {
-  if (typeof window === "undefined") return null;
-  try {
-    return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
 
 function idOf(value: unknown): string {
   if (value === undefined || value === null) return "";
@@ -160,6 +324,90 @@ function countWords(text: string) {
   return cleanText(text) ? cleanText(text).split(/\s+/).length : 0;
 }
 
+
+function normalizeBasisNumber(
+  value: unknown,
+  fallback = 0,
+) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? parsed
+    : fallback;
+}
+
+function basisValueForRow(
+  row: StudentRemarkRow,
+  metric: RemarkBasisMetric,
+): number | undefined {
+  const computed =
+    row.computedReport;
+
+  if (metric === "position") {
+    const value =
+      computed?.overallPosition;
+
+    return Number.isFinite(
+      Number(value),
+    )
+      ? Number(value)
+      : undefined;
+  }
+
+  if (metric === "attendance") {
+    const value =
+      computed?.attendance
+        ?.attendancePercent;
+
+    return Number.isFinite(
+      Number(value),
+    )
+      ? Number(value)
+      : undefined;
+  }
+
+  const engineValue =
+    metric === "total"
+      ? computed?.total
+      : computed?.average;
+
+  if (
+    Number.isFinite(
+      Number(engineValue),
+    )
+  ) {
+    return Number(engineValue);
+  }
+
+  /*
+   * Saved report-card totals and averages are retained only as a compatibility
+   * fallback. The report engine is authoritative because report-card rows can
+   * exist before their numeric summaries have been regenerated.
+   */
+  const savedValue =
+    metric === "total"
+      ? row.reportCard?.total
+      : row.reportCard?.average;
+
+  return Number.isFinite(
+    Number(savedValue),
+  )
+    ? Number(savedValue)
+    : undefined;
+}
+
+function matchingBasisRule(
+  value: number | undefined,
+  rules: RemarkBasisRule[],
+) {
+  if (value === undefined) return undefined;
+
+  return rules.find(
+    (rule) =>
+      value >= rule.minimum &&
+      value <= rule.maximum,
+  );
+}
+
 function reportCardKey(
   studentId: string,
   classId: string,
@@ -183,89 +431,39 @@ function labelOf<T extends { id?: string; name?: string; fullName?: string }>(
 }
 
 export default function ReportRemarks() {
-  const dataRevision = useDataRevision();
+  const dataRevision = useBranchTableRevision([
+    "students",
+    "classes",
+    "academicStructures",
+    "academicPeriods",
+    "studentEnrollments",
+    "reportCards",
+    "subjects",
+    "classSubjects",
+    "assessmentApplicabilities",
+    "assessmentStructures",
+    "assessmentStructureItems",
+    "assessmentEntries",
+    "gradingStructures",
+    "gradeRules",
+    "attendance",
+    "studentAttendanceSummaries",
+    "computedResults",
+    "reportCardItems",
+  ]);
 
-  const {
-    accountId,
-    authenticated,
-    loading: accountLoading,
-  } = useAccount() as any;
   const { settings, loading: settingsLoading } = useSettings() as any;
-  const { activeMembership } = useActiveMembership() as any;
+  const { activeSchool, activeBranch } = useActiveBranch() as any;
 
+  const workspace = useBranchWorkspaceScope();
   const {
-    activeSchool,
-    activeSchoolId,
-    activeBranch,
-    activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch() as any;
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const selectedAccountId = useMemo(
-    () =>
-      cleanText(accountId) ||
-      cleanText(openWorkspace?.membership?.accountId) ||
-      cleanText(activeMembership?.accountId) ||
-      cleanText(settings?.accountId),
-    [
-      accountId,
-      activeMembership?.accountId,
-      openWorkspace?.membership?.accountId,
-      settings?.accountId,
-    ],
-  );
-
-  const schoolId = useMemo(
-    () =>
-      idOf(openWorkspace?.schoolId) ||
-      idOf(openWorkspace?.membership?.schoolId) ||
-      idOf(openWorkspace?.membership?.school?.id) ||
-      idOf(activeMembership?.schoolId) ||
-      idOf(activeMembership?.school?.id) ||
-      idOf(activeSchoolId) ||
-      idOf(activeSchool?.id) ||
-      idOf(settings?.schoolId) ||
-      idOf(safeStorageRead("activeSchoolId")),
-    [
-      activeMembership?.school?.id,
-      activeMembership?.schoolId,
-      activeSchool?.id,
-      activeSchoolId,
-      openWorkspace?.membership?.school?.id,
-      openWorkspace?.membership?.schoolId,
-      openWorkspace?.schoolId,
-      settings?.schoolId,
-    ],
-  );
-
-  const branchId = useMemo(
-    () =>
-      idOf(openWorkspace?.branchId) ||
-      idOf(openWorkspace?.membership?.branchId) ||
-      idOf(openWorkspace?.membership?.schoolBranchId) ||
-      idOf(openWorkspace?.membership?.branch?.id) ||
-      idOf(activeMembership?.branchId) ||
-      idOf(activeMembership?.schoolBranchId) ||
-      idOf(activeMembership?.branch?.id) ||
-      idOf(activeBranchId) ||
-      idOf(activeBranch?.id) ||
-      idOf(settings?.branchId) ||
-      idOf(safeStorageRead("activeBranchId")),
-    [
-      activeBranch?.id,
-      activeBranchId,
-      activeMembership?.branch?.id,
-      activeMembership?.branchId,
-      activeMembership?.schoolBranchId,
-      openWorkspace?.branchId,
-      openWorkspace?.membership?.branch?.id,
-      openWorkspace?.membership?.branchId,
-      openWorkspace?.membership?.schoolBranchId,
-      settings?.branchId,
-    ],
-  );
+    accountId: selectedAccountId,
+    schoolId,
+    branchId,
+    authenticated,
+    restoring: accountLoading,
+    branchLoading: contextLoading,
+  } = workspace;
 
   const primary =
     cleanText(settings?.primaryColor) || "var(--primary-color, #2563eb)";
@@ -281,6 +479,41 @@ export default function ReportRemarks() {
   const [academicPeriods, setAcademicPeriods] = useState<AcademicPeriod[]>([]);
   const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
   const [reportCards, setReportCards] = useState<ReportCard[]>([]);
+  const [subjects, setSubjects] =
+    useState<any[]>([]);
+  const [classSubjects, setClassSubjects] =
+    useState<any[]>([]);
+  const [
+    assessmentApplicabilities,
+    setAssessmentApplicabilities,
+  ] = useState<any[]>([]);
+  const [
+    assessmentStructures,
+    setAssessmentStructures,
+  ] = useState<any[]>([]);
+  const [
+    assessmentStructureItems,
+    setAssessmentStructureItems,
+  ] = useState<any[]>([]);
+  const [
+    assessmentEntries,
+    setAssessmentEntries,
+  ] = useState<any[]>([]);
+  const [gradingStructures, setGradingStructures] =
+    useState<any[]>([]);
+  const [gradeRules, setGradeRules] =
+    useState<any[]>([]);
+  const [attendance, setAttendance] =
+    useState<any[]>([]);
+  const [
+    studentAttendanceSummaries,
+    setStudentAttendanceSummaries,
+  ] = useState<any[]>([]);
+  const [computedResults, setComputedResults] =
+    useState<any[]>([]);
+  const [reportCardItems, setReportCardItems] =
+    useState<any[]>([]);
+
 
   const [academicStructureId, setAcademicStructureId] = useState<
     string | undefined
@@ -302,6 +535,152 @@ export default function ReportRemarks() {
   const [bulkHeadRemark, setBulkHeadRemark] = useState("");
   const [bulkOverwrite, setBulkOverwrite] = useState(false);
 
+  const [basisOpen, setBasisOpen] =
+    useState(false);
+  const [basisMetric, setBasisMetric] =
+    useState<RemarkBasisMetric>(
+      "average",
+    );
+  const [basisTarget, setBasisTarget] =
+    useState<RemarkBasisTarget>(
+      "headTeacherRemark",
+    );
+  const [basisOverwrite, setBasisOverwrite] =
+    useState(false);
+  const [basisRules, setBasisRules] =
+    useState<RemarkBasisRule[]>(
+      DEFAULT_REMARK_BASIS_RULES,
+    );
+
+  const [
+    basisSource,
+    setBasisSource,
+  ] = useState<RemarkBasisSource>({
+    title: "Default percentage bands",
+    detail:
+      "Select a class and basis to derive bands from the reporting system.",
+  });
+
+  const lastDerivedBasisSignatureRef =
+    useRef("");
+
+
+  const remarksBasisStorageKey =
+    useMemo(
+      () =>
+        [
+          "eleeveon_report_remarks_basis_v1",
+          selectedAccountId || "account",
+          schoolId || "school",
+          branchId || "branch",
+        ].join(":"),
+      [
+        branchId,
+        schoolId,
+        selectedAccountId,
+      ],
+    );
+
+  useEffect(() => {
+    try {
+      const raw =
+        window.localStorage.getItem(
+          remarksBasisStorageKey,
+        );
+
+      if (!raw) {
+        setBasisMetric("average");
+        setBasisTarget(
+          "headTeacherRemark",
+        );
+        setBasisOverwrite(false);
+        setBasisRules(
+          DEFAULT_REMARK_BASIS_RULES,
+        );
+        return;
+      }
+
+      const stored = JSON.parse(
+        raw,
+      ) as {
+        metric?: RemarkBasisMetric;
+        target?: RemarkBasisTarget;
+        overwrite?: boolean;
+        rules?: RemarkBasisRule[];
+      };
+
+      setBasisMetric(
+        stored.metric === "total" ||
+          stored.metric === "position" ||
+          stored.metric === "attendance"
+          ? stored.metric
+          : "average",
+      );
+      setBasisTarget(
+        stored.target ===
+          "classTeacherRemark"
+          ? "classTeacherRemark"
+          : "headTeacherRemark",
+      );
+      setBasisOverwrite(
+        !!stored.overwrite,
+      );
+      setBasisRules(
+        Array.isArray(stored.rules) &&
+          stored.rules.length
+          ? stored.rules.map(
+              (rule, index) => ({
+                id:
+                  cleanText(rule.id) ||
+                  `rule-${index + 1}`,
+                label:
+                  cleanText(rule.label) ||
+                  `Band ${index + 1}`,
+                minimum:
+                  normalizeBasisNumber(
+                    rule.minimum,
+                  ),
+                maximum:
+                  normalizeBasisNumber(
+                    rule.maximum,
+                    100,
+                  ),
+                remark:
+                  cleanText(rule.remark),
+              }),
+            )
+          : DEFAULT_REMARK_BASIS_RULES,
+      );
+    } catch {
+      setBasisRules(
+        DEFAULT_REMARK_BASIS_RULES,
+      );
+    }
+  }, [remarksBasisStorageKey]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        remarksBasisStorageKey,
+        JSON.stringify({
+          metric: basisMetric,
+          target: basisTarget,
+          overwrite: basisOverwrite,
+          rules: basisRules,
+        }),
+      );
+    } catch {
+      // Storage restrictions must not block remark entry.
+    }
+  }, [
+    basisMetric,
+    basisOverwrite,
+    basisRules,
+    basisTarget,
+    remarksBasisStorageKey,
+  ]);
+
+
   const sameTenant = (row: TenantRow) =>
     accountMatches(row.accountId, selectedAccountId) &&
     sameId(row.schoolId, schoolId) &&
@@ -315,6 +694,18 @@ export default function ReportRemarks() {
     setAcademicPeriods([]);
     setEnrollments([]);
     setReportCards([]);
+    setSubjects([]);
+    setClassSubjects([]);
+    setAssessmentApplicabilities([]);
+    setAssessmentStructures([]);
+    setAssessmentStructureItems([]);
+    setAssessmentEntries([]);
+    setGradingStructures([]);
+    setGradeRules([]);
+    setAttendance([]);
+    setStudentAttendanceSummaries([]);
+    setComputedResults([]);
+    setReportCardItems([]);
   };
 
   const load = async () => {
@@ -327,21 +718,64 @@ export default function ReportRemarks() {
     try {
       setLoading(true);
 
-      const loadResult = await Promise.all([
-        activeRows<Student>("students"),
-        activeRows<Class>("classes"),
-        activeRows<AcademicStructure>("academicStructures"),
-        activeRows<AcademicPeriod>("academicPeriods"),
-        activeRows<StudentEnrollment>("studentEnrollments"),
-        activeRows<ReportCard>("reportCards"),
-      ]);
+      const loadResult =
+        await Promise.all([
+          activeRows<Student>("students"),
+          activeRows<Class>("classes"),
+          activeRows<AcademicStructure>(
+            "academicStructures",
+          ),
+          activeRows<AcademicPeriod>(
+            "academicPeriods",
+          ),
+          activeRows<StudentEnrollment>(
+            "studentEnrollments",
+          ),
+          activeRows<ReportCard>(
+            "reportCards",
+          ),
+          activeRows<any>("subjects"),
+          activeRows<any>("classSubjects"),
+          activeRows<any>(
+            "assessmentApplicabilities",
+          ),
+          activeRows<any>(
+            "assessmentStructures",
+          ),
+          activeRows<any>(
+            "assessmentStructureItems",
+          ),
+          activeRows<any>(
+            "assessmentEntries",
+          ),
+          activeRows<any>(
+            "gradingStructures",
+          ),
+          activeRows<any>("gradeRules"),
+          activeRows<any>("attendance"),
+          activeRows<any>(
+            "studentAttendanceSummaries",
+          ),
+          activeRows<any>(
+            "computedResults",
+          ),
+          activeRows<any>(
+            "reportCardItems",
+          ),
+        ]);
 
-      const studentRows = loadResult[0] as Student[];
-      const classRows = loadResult[1] as Class[];
-      const structureRows = loadResult[2] as AcademicStructure[];
-      const periodRows = loadResult[3] as AcademicPeriod[];
-      const enrollmentRows = loadResult[4] as StudentEnrollment[];
-      const reportRows = loadResult[5] as ReportCard[];
+      const studentRows =
+        loadResult[0] as Student[];
+      const classRows =
+        loadResult[1] as Class[];
+      const structureRows =
+        loadResult[2] as AcademicStructure[];
+      const periodRows =
+        loadResult[3] as AcademicPeriod[];
+      const enrollmentRows =
+        loadResult[4] as StudentEnrollment[];
+      const reportRows =
+        loadResult[5] as ReportCard[];
 
       setStudents(
         studentRows
@@ -373,6 +807,79 @@ export default function ReportRemarks() {
 
       setEnrollments(enrollmentRows.filter((row: any) => sameTenant(row)));
       setReportCards(reportRows.filter((row: any) => sameTenant(row)));
+      setSubjects(
+        (loadResult[6] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setClassSubjects(
+        (loadResult[7] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setAssessmentApplicabilities(
+        (loadResult[8] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setAssessmentStructures(
+        (loadResult[9] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setAssessmentStructureItems(
+        (loadResult[10] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setAssessmentEntries(
+        (loadResult[11] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setGradingStructures(
+        (loadResult[12] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setGradeRules(
+        (loadResult[13] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setAttendance(
+        (loadResult[14] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setStudentAttendanceSummaries(
+        (loadResult[15] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setComputedResults(
+        (loadResult[16] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+      setReportCardItems(
+        (loadResult[17] as any[])
+          .filter((row) =>
+            sameTenant(row),
+          ),
+      );
+
     } catch (error) {
       console.error("Failed to load report remarks:", error);
       clearData();
@@ -484,6 +991,789 @@ export default function ReportRemarks() {
     return map;
   }, [reportCards]);
 
+
+  const reportEngineDataset =
+    useMemo<ReportEngineDataset>(
+      () => ({
+        schools:
+          activeSchool
+            ? [activeSchool as any]
+            : [],
+        branches:
+          activeBranch
+            ? [activeBranch as any]
+            : [],
+        schoolBranchSettings:
+          settings
+            ? [settings as any]
+            : [],
+
+        academicStructures,
+        academicPeriods,
+
+        students,
+        teachers: [],
+        parents: [],
+        studentParents: [],
+        classes,
+        subjects,
+        classSubjects,
+        studentEnrollments:
+          enrollments,
+        classTeachers: [],
+
+        assessmentApplicabilities,
+        assessmentStructures,
+        assessmentStructureItems,
+        assessmentEntries,
+        gradingStructures,
+        gradeRules,
+
+        attendance,
+        studentAttendanceSummaries,
+
+        computedResults,
+        reportCards,
+        reportCardItems,
+      }),
+      [
+        activeBranch,
+        activeSchool,
+        academicPeriods,
+        academicStructures,
+        assessmentApplicabilities,
+        assessmentEntries,
+        assessmentStructureItems,
+        assessmentStructures,
+        attendance,
+        classSubjects,
+        classes,
+        computedResults,
+        enrollments,
+        gradeRules,
+        gradingStructures,
+        reportCardItems,
+        reportCards,
+        settings,
+        studentAttendanceSummaries,
+        students,
+        subjects,
+      ],
+    );
+
+  const computedClassReports =
+    useMemo(() => {
+      if (
+        !branchId ||
+        !academicStructureId ||
+        !academicPeriodId ||
+        !classId
+      ) {
+        return [] as ComputedStudentReport[];
+      }
+
+      const filters:
+        ReportFiltersState = {
+        branchId,
+        academicStructureId,
+        academicPeriodId,
+        classId,
+        sortMode: "position",
+      };
+
+      try {
+        return buildClassReports(
+          reportEngineDataset,
+          filters,
+        );
+      } catch (error) {
+        console.error(
+          "Failed to compute report remark basis values:",
+          error,
+        );
+
+        return [] as ComputedStudentReport[];
+      }
+    }, [
+      academicPeriodId,
+      academicStructureId,
+      branchId,
+      classId,
+      reportEngineDataset,
+    ]);
+
+  const computedReportMap =
+    useMemo(
+      () =>
+        new Map(
+          computedClassReports.map(
+            (report) => [
+              report.studentId,
+              report,
+            ],
+          ),
+        ),
+      [computedClassReports],
+    );
+
+
+  const intelligentBasis =
+    useMemo<{
+      rules: RemarkBasisRule[];
+      source: RemarkBasisSource;
+      signature: string;
+    }>(() => {
+      const reports =
+        computedClassReports;
+
+      const subjectCounts =
+        reports
+          .map(
+            (report) =>
+              report.subjectResults
+                .length,
+          )
+          .filter(
+            (count) =>
+              count > 0,
+          );
+
+      const subjectCount =
+        subjectCounts.length
+          ? Math.max(
+              ...subjectCounts,
+            )
+          : classSubjects.filter(
+              (row: any) =>
+                sameId(
+                  row.classId,
+                  classId,
+                ) &&
+                row.active !== false &&
+                row.isDeleted !== true,
+            ).length;
+
+      const gradingStructureFrequency =
+        new Map<string, number>();
+
+      reports.forEach((report) => {
+        report.subjectResults.forEach(
+          (subject) => {
+            const gradingStructureId =
+              idOf(
+                subject.gradingStructureId,
+              );
+
+            if (!gradingStructureId) {
+              return;
+            }
+
+            gradingStructureFrequency.set(
+              gradingStructureId,
+              (gradingStructureFrequency.get(
+                gradingStructureId,
+              ) || 0) + 1,
+            );
+          },
+        );
+      });
+
+      const dominantGradingStructureId =
+        [
+          ...gradingStructureFrequency
+            .entries(),
+        ].sort(
+          (left, right) =>
+            right[1] - left[1],
+        )[0]?.[0] ||
+        idOf(
+          gradingStructures.find(
+            (system: any) =>
+              system.default === true &&
+              system.active !== false,
+          )?.id,
+        ) ||
+        idOf(
+          gradingStructures.find(
+            (system: any) =>
+              system.active !== false,
+          )?.id,
+        );
+
+      const activeGradingStructure =
+        gradingStructures.find(
+          (system: any) =>
+            sameId(
+              system.id,
+              dominantGradingStructureId,
+            ),
+        );
+
+      const configuredGradeRules =
+        gradeRules
+          .filter(
+            (rule: any) =>
+              sameId(
+                rule.gradingStructureId,
+                dominantGradingStructureId,
+              ) &&
+              rule.active !== false &&
+              rule.isDeleted !== true,
+          )
+          .sort(
+            (left: any, right: any) =>
+              Number(right.minScore || 0) -
+              Number(left.minScore || 0),
+          );
+
+      if (
+        basisMetric === "average"
+      ) {
+        const rules =
+          configuredGradeRules.length
+            ? configuredGradeRules.map(
+                (rule: any, index) => {
+                  const label =
+                    cleanText(
+                      rule.grade,
+                    ) ||
+                    cleanText(
+                      rule.remark,
+                    ) ||
+                    `Band ${index + 1}`;
+
+                  return {
+                    id:
+                      idOf(rule.id) ||
+                      `average-${index}`,
+                    label,
+                    minimum:
+                      normalizeBasisNumber(
+                        rule.minScore,
+                      ),
+                    maximum:
+                      normalizeBasisNumber(
+                        rule.maxScore,
+                        100,
+                      ),
+                    remark:
+                      cleanText(
+                        rule.remark,
+                      ) ||
+                      defaultRemarkForBand(
+                        label,
+                        "average",
+                      ),
+                  };
+                },
+              )
+            : DEFAULT_REMARK_BASIS_RULES;
+
+        return {
+          rules:
+            normalizeGeneratedRules(
+              rules,
+            ),
+          source: {
+            title:
+              cleanText(
+                activeGradingStructure?.name,
+              ) ||
+              "Default percentage grading",
+            detail:
+              configuredGradeRules.length
+                ? `${configuredGradeRules.length} grade bands from the active class grading configuration.`
+                : "No active grading rules were found, so standard percentage bands are being used.",
+          },
+          signature: [
+            "average",
+            dominantGradingStructureId,
+            configuredGradeRules
+              .map(
+                (rule: any) =>
+                  [
+                    rule.id,
+                    rule.minScore,
+                    rule.maxScore,
+                    rule.grade,
+                    rule.remark,
+                  ].join(":"),
+              )
+              .join("|"),
+          ].join("::"),
+        };
+      }
+
+      if (
+        basisMetric === "total"
+      ) {
+        const observedSubjectCount =
+          Math.max(
+            1,
+            subjectCount,
+          );
+
+        const observedMaximumTotal =
+          reports
+            .map((report) => Number(report.total))
+            .filter((value) => Number.isFinite(value) && value >= 0)
+            .reduce((maximum, value) => Math.max(maximum, value), 0);
+
+        /*
+         * A normal Eleeveon report subject contributes up to 100 to the raw
+         * class total. The selected class subject load is therefore the stable
+         * configured maximum, while observed totals verify that the report
+         * engine is producing values in that range.
+         */
+        const configuredMaximumTotal =
+          observedSubjectCount * 100;
+
+        const maximumTotal =
+          Math.max(
+            configuredMaximumTotal,
+            observedMaximumTotal,
+            100,
+          );
+
+        const multiplier =
+          maximumTotal / 100;
+
+        const percentageRules =
+          configuredGradeRules.length
+            ? configuredGradeRules
+            : DEFAULT_REMARK_BASIS_RULES.map(
+                (rule) => ({
+                  id: rule.id,
+                  minScore:
+                    rule.minimum,
+                  maxScore:
+                    rule.maximum,
+                  grade: rule.label,
+                  remark:
+                    rule.remark,
+                }),
+              );
+
+        const rules =
+          percentageRules.map(
+            (rule: any, index) => {
+              const label =
+                cleanText(
+                  rule.grade,
+                ) ||
+                cleanText(
+                  rule.label,
+                ) ||
+                `Band ${index + 1}`;
+
+              return {
+                id: `total-${
+                  idOf(rule.id) ||
+                  index
+                }`,
+                label,
+                minimum:
+                  Number(
+                    (
+                      normalizeBasisNumber(
+                        rule.minScore ??
+                          rule.minimum,
+                      ) *
+                      multiplier
+                    ).toFixed(2),
+                  ),
+                maximum:
+                  Number(
+                    (
+                      normalizeBasisNumber(
+                        rule.maxScore ??
+                          rule.maximum,
+                        100,
+                      ) *
+                      multiplier
+                    ).toFixed(2),
+                  ),
+                remark:
+                  cleanText(
+                    rule.remark,
+                  ) ||
+                  defaultRemarkForBand(
+                    label,
+                    "total",
+                  ),
+              };
+            },
+          );
+
+        return {
+          rules:
+            normalizeGeneratedRules(
+              rules,
+            ),
+          source: {
+            title:
+              cleanText(
+                activeGradingStructure?.name,
+              ) ||
+              "Percentage grading scaled to total",
+            detail:
+              `${observedSubjectCount} active subject${
+                observedSubjectCount === 1
+                  ? ""
+                  : "s"
+              } give a configured maximum total of ${configuredMaximumTotal}. ${
+                observedMaximumTotal
+                  ? `Current report data reaches ${Number(observedMaximumTotal.toFixed(2))}.`
+                  : "No computed total is available yet, so the configured class subject load is used."
+              }`,
+          },
+          signature: [
+            "total",
+            dominantGradingStructureId,
+            observedSubjectCount,
+            maximumTotal,
+            percentageRules
+              .map(
+                (rule: any) =>
+                  [
+                    rule.id,
+                    rule.minScore ??
+                      rule.minimum,
+                    rule.maxScore ??
+                      rule.maximum,
+                    rule.grade ??
+                      rule.label,
+                  ].join(":"),
+              )
+              .join("|"),
+          ].join("::"),
+        };
+      }
+
+      if (
+        basisMetric === "position"
+      ) {
+        const enrolledClassSize =
+          enrollments.filter(
+            (row) =>
+              row.status !==
+                "withdrawn" &&
+              sameId(
+                row.academicStructureId,
+                academicStructureId,
+              ) &&
+              sameId(
+                row.academicPeriodId,
+                academicPeriodId,
+              ) &&
+              sameId(
+                row.classId,
+                classId,
+              ),
+          ).length;
+
+        const classSize =
+          Math.max(
+            reports.length,
+            enrolledClassSize,
+          );
+
+        if (!classSize) {
+          return {
+            rules: [
+              {
+                id: "position-first",
+                label: "1st position",
+                minimum: 1,
+                maximum: 1,
+                remark:
+                  defaultRemarkForBand(
+                    "1st position",
+                    "position",
+                  ),
+              },
+            ],
+            source: {
+              title:
+                "Class position bands",
+              detail:
+                "Select a class with computed reports to derive position ranges.",
+            },
+            signature:
+              "position::0",
+          };
+        }
+
+        const bands: RemarkBasisRule[] =
+          [];
+
+        const addBand = (
+          id: string,
+          label: string,
+          minimum: number,
+          maximum: number,
+          remarkLabel = label,
+        ) => {
+          if (
+            minimum > classSize ||
+            maximum < minimum
+          ) {
+            return;
+          }
+
+          bands.push({
+            id,
+            label,
+            minimum,
+            maximum:
+              Math.min(
+                maximum,
+                classSize,
+              ),
+            remark:
+              defaultRemarkForBand(
+                remarkLabel,
+                "position",
+              ),
+          });
+        };
+
+        addBand(
+          "position-first",
+          "1st position",
+          1,
+          1,
+          "first",
+        );
+
+        addBand(
+          "position-top-three",
+          classSize >= 3
+            ? "2nd–3rd position"
+            : "2nd position",
+          2,
+          Math.min(3, classSize),
+          "top",
+        );
+
+        const upperEnd =
+          Math.max(
+            4,
+            Math.ceil(
+              classSize * 0.25,
+            ),
+          );
+
+        addBand(
+          "position-upper",
+          "Upper quarter",
+          4,
+          upperEnd,
+          "upper",
+        );
+
+        const middleEnd =
+          Math.max(
+            upperEnd + 1,
+            Math.ceil(
+              classSize * 0.6,
+            ),
+          );
+
+        addBand(
+          "position-middle",
+          "Middle group",
+          upperEnd + 1,
+          middleEnd,
+          "middle",
+        );
+
+        addBand(
+          "position-lower",
+          "Needs stronger position",
+          middleEnd + 1,
+          classSize,
+          "lower",
+        );
+
+        return {
+          rules: bands,
+          source: {
+            title:
+              "Actual class position distribution",
+            detail:
+              `${classSize} student${
+                classSize === 1
+                  ? ""
+                  : "s"
+              } with positions assigned by the report engine from computed averages.`,
+          },
+          signature:
+            `position::${classSize}`,
+        };
+      }
+
+      const configuredAttendanceTarget =
+        [
+          settings?.minimumAttendancePercentage,
+          settings?.requiredAttendancePercentage,
+          settings?.attendanceTargetPercentage,
+          settings?.attendancePassPercentage,
+        ]
+          .map((value) =>
+            Number(value),
+          )
+          .find((value) =>
+            Number.isFinite(value),
+          );
+
+      const target =
+        Math.min(
+          100,
+          Math.max(
+            1,
+            configuredAttendanceTarget ??
+              75,
+          ),
+        );
+
+      const excellentMin =
+        Math.max(
+          target,
+          90,
+        );
+      const goodMin =
+        Math.max(
+          target,
+          Math.min(
+            excellentMin - 1,
+            80,
+          ),
+        );
+      const satisfactoryMin =
+        Math.min(
+          goodMin - 1,
+          target,
+        );
+
+      const attendanceRules:
+        RemarkBasisRule[] = [
+        {
+          id:
+            "attendance-excellent",
+          label:
+            "Excellent attendance",
+          minimum:
+            excellentMin,
+          maximum: 100,
+          remark:
+            defaultRemarkForBand(
+              "excellent",
+              "attendance",
+            ),
+        },
+        {
+          id:
+            "attendance-good",
+          label: "Good attendance",
+          minimum:
+            goodMin,
+          maximum:
+            excellentMin - 0.01,
+          remark:
+            defaultRemarkForBand(
+              "good",
+              "attendance",
+            ),
+        },
+        {
+          id:
+            "attendance-satisfactory",
+          label:
+            "Satisfactory attendance",
+          minimum:
+            satisfactoryMin,
+          maximum:
+            goodMin - 0.01,
+          remark:
+            defaultRemarkForBand(
+              "satisfactory",
+              "attendance",
+            ),
+        },
+        {
+          id:
+            "attendance-poor",
+          label:
+            "Attendance needs improvement",
+          minimum: 0,
+          maximum:
+            satisfactoryMin - 0.01,
+          remark:
+            defaultRemarkForBand(
+              "needs improvement",
+              "attendance",
+            ),
+        },
+      ];
+
+      return {
+        rules:
+          normalizeGeneratedRules(
+            attendanceRules,
+          ),
+        source: {
+          title:
+            configuredAttendanceTarget !==
+            undefined
+              ? "School attendance configuration"
+              : "Report attendance percentage",
+          detail:
+            configuredAttendanceTarget !==
+            undefined
+              ? `The school attendance expectation is ${target}%. Bands were generated around this configured threshold.`
+              : "No school attendance threshold was found, so the report engine’s percentage is grouped around a 75% minimum expectation.",
+        },
+        signature: [
+          "attendance",
+          target,
+        ].join("::"),
+      };
+    }, [
+      basisMetric,
+      classId,
+      classSubjects,
+      computedClassReports,
+      gradeRules,
+      gradingStructures,
+      settings,
+      academicPeriodId,
+      academicStructureId,
+      enrollments,
+    ]);
+
+  useEffect(() => {
+    if (!intelligentBasis.signature) return;
+
+    const signatureChanged =
+      lastDerivedBasisSignatureRef.current !== intelligentBasis.signature;
+
+    if (!signatureChanged && basisRules.length > 0) return;
+
+    lastDerivedBasisSignatureRef.current =
+      intelligentBasis.signature;
+
+    setBasisRules(
+      intelligentBasis.rules,
+    );
+    setBasisSource(
+      intelligentBasis.source,
+    );
+  }, [
+    intelligentBasis,
+    basisRules.length,
+  ]);
+
   const studentRows = useMemo<StudentRemarkRow[]>(() => {
     if (!academicStructureId || !academicPeriodId || !classId) return [];
 
@@ -507,7 +1797,12 @@ export default function ReportRemarks() {
           enrollment.academicPeriodId,
         );
 
-        const reportCard = reportCardMap.get(key);
+        const reportCard =
+          reportCardMap.get(key);
+        const computedReport =
+          computedReportMap.get(
+            student.id,
+          );
         const draft = drafts[student.id] || {
           reportCardId: reportCard?.id,
           classTeacherRemark: reportCard?.classTeacherRemark || "",
@@ -515,7 +1810,13 @@ export default function ReportRemarks() {
           published: !!reportCard?.published,
         };
 
-        return { student, enrollment, reportCard, draft };
+        return {
+          student,
+          enrollment,
+          reportCard,
+          computedReport,
+          draft,
+        };
       })
       .filter(Boolean) as StudentRemarkRow[];
   }, [
@@ -523,6 +1824,7 @@ export default function ReportRemarks() {
     academicStructureId,
     classId,
     drafts,
+    computedReportMap,
     enrollments,
     reportCardMap,
     studentMap,
@@ -640,7 +1942,7 @@ export default function ReportRemarks() {
   const selectedPeriodName = labelOf(academicPeriods, academicPeriodId);
   const selectedClassName = labelOf(classes, classId);
   const selectedStudentName = labelOf(students, studentId);
-  const contextName = `${activeSchool?.name || "Selected School"} · ${activeBranch?.name || "Assigned Branch"}`;
+  const contextName = `${activeSchool?.name || "Selected School"} · ${activeBranch?.name || "Selected Branch"}`;
 
   const updateDraft = (studentIdValue: string, patch: Partial<RemarkDraft>) => {
     setDrafts((prev) => ({
@@ -650,6 +1952,170 @@ export default function ReportRemarks() {
         ...patch,
       },
     }));
+  };
+
+
+  const changeBasisMetric = (
+    metric: RemarkBasisMetric,
+  ) => {
+    lastDerivedBasisSignatureRef.current = "";
+    setBasisMetric(metric);
+
+    /*
+     * Do not carry min/max bands from the previous metric into the next one.
+     * The intelligentBasis effect below will immediately replace these with
+     * ranges derived from the active grading system/class/report configuration.
+     */
+    setBasisRules([]);
+    setBasisSource({
+      title: "Updating remarks basis…",
+      detail:
+        "Recalculating minimum and maximum bands from the selected class and reporting system.",
+    });
+  };
+
+
+  const updateBasisRule = (
+    id: string,
+    patch: Partial<RemarkBasisRule>,
+  ) => {
+    setBasisRules((current) =>
+      current.map((rule) =>
+        rule.id === id
+          ? {
+              ...rule,
+              ...patch,
+            }
+          : rule,
+      ),
+    );
+  };
+
+  const addBasisRule = () => {
+    setBasisRules((current) => [
+      ...current,
+      {
+        id: `custom-${Date.now()}`,
+        label: `Band ${current.length + 1}`,
+        minimum: 0,
+        maximum: 100,
+        remark: "",
+      },
+    ]);
+  };
+
+  const removeBasisRule = (
+    id: string,
+  ) => {
+    setBasisRules((current) =>
+      current.length <= 1
+        ? current
+        : current.filter(
+            (rule) =>
+              rule.id !== id,
+          ),
+    );
+  };
+
+  const applyRemarksBasis = (
+    scope:
+      | "selected"
+      | "shown",
+  ) => {
+    const candidates =
+      scope === "selected"
+        ? selectedRow
+          ? [selectedRow]
+          : []
+        : visibleRows;
+
+    if (!candidates.length) {
+      return alert(
+        scope === "selected"
+          ? "Select a student first."
+          : "No students match the current filters.",
+      );
+    }
+
+    const next: DraftMap = {
+      ...drafts,
+    };
+
+    let applied = 0;
+    let skippedNoScore = 0;
+    let skippedNoBand = 0;
+    let skippedExisting = 0;
+
+    candidates.forEach((row) => {
+      const sid =
+        row.student.id || "";
+
+      if (!sid) return;
+
+      const value =
+        basisValueForRow(
+          row,
+          basisMetric,
+        );
+
+      if (value === undefined) {
+        skippedNoScore += 1;
+        return;
+      }
+
+      const rule =
+        matchingBasisRule(
+          value,
+          basisRules,
+        );
+
+      if (!rule?.remark.trim()) {
+        skippedNoBand += 1;
+        return;
+      }
+
+      const current =
+        next[sid] ||
+        row.draft ||
+        defaultDraft();
+
+      if (
+        !basisOverwrite &&
+        cleanText(
+          current[basisTarget],
+        )
+      ) {
+        skippedExisting += 1;
+        return;
+      }
+
+      next[sid] = {
+        ...current,
+        [basisTarget]:
+          rule.remark.trim(),
+      };
+
+      applied += 1;
+    });
+
+    setDrafts(next);
+
+    alert(
+      [
+        `${applied} remark${applied === 1 ? "" : "s"} applied.`,
+        skippedNoScore
+          ? `${skippedNoScore} without a computed ${basisMetric} value.`
+          : "",
+        skippedNoBand
+          ? `${skippedNoBand} without a matching completed band.`
+          : "",
+        skippedExisting
+          ? `${skippedExisting} kept because overwrite is off.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    );
   };
 
   const applyBulkRemarks = () => {
@@ -1012,6 +2478,18 @@ export default function ReportRemarks() {
           updateDraft={updateDraft}
           canEditHeadRemark
           canPublish
+          basisMetric={basisMetric}
+          basisValue={basisValueForRow(
+            selectedRow,
+            basisMetric,
+          )}
+          basisRule={matchingBasisRule(
+            basisValueForRow(
+              selectedRow,
+              basisMetric,
+            ),
+            basisRules,
+          )}
         />
       )}
 
@@ -1041,6 +2519,29 @@ export default function ReportRemarks() {
                   {row.draft.classTeacherRemark
                     ? "Class remark entered"
                     : "Class remark missing"}
+                  {" · "}
+                  {(() => {
+                    const value =
+                      basisValueForRow(
+                        row,
+                        basisMetric,
+                      );
+                    const rule =
+                      matchingBasisRule(
+                        value,
+                        basisRules,
+                      );
+
+                    return value === undefined
+                      ? `No ${basisMetric}`
+                      : `${basisMetric === "average"
+                          ? "Avg"
+                          : basisMetric === "total"
+                            ? "Total"
+                            : basisMetric === "position"
+                              ? "Position"
+                              : "Attendance"} ${basisMetric === "position" ? Math.round(value) : value.toFixed(1)}${basisMetric === "attendance" ? "%" : ""}${rule ? ` · ${rule.label}` : ""}`;
+                  })()}
                 </em>
               </span>
               <span className="ba-student-side">
@@ -1085,6 +2586,45 @@ export default function ReportRemarks() {
         />
       )}
 
+      {basisOpen && (
+        <RemarksBasisSheet
+          metric={basisMetric}
+          setMetric={changeBasisMetric}
+          target={basisTarget}
+          setTarget={setBasisTarget}
+          overwrite={basisOverwrite}
+          setOverwrite={setBasisOverwrite}
+          rules={basisRules}
+          source={basisSource}
+          updateRule={updateBasisRule}
+          addRule={addBasisRule}
+          removeRule={removeBasisRule}
+          selectedRow={selectedRow}
+          shownCount={visibleRows.length}
+          applySelected={() =>
+            applyRemarksBasis(
+              "selected",
+            )
+          }
+          applyShown={() =>
+            applyRemarksBasis("shown")
+          }
+          resetRules={() => {
+            lastDerivedBasisSignatureRef.current =
+              "";
+            setBasisRules(
+              intelligentBasis.rules,
+            );
+            setBasisSource(
+              intelligentBasis.source,
+            );
+          }}
+          onClose={() =>
+            setBasisOpen(false)
+          }
+        />
+      )}
+
       {moreOpen && (
         <MoreSheet
           onRefresh={async () => {
@@ -1102,6 +2642,13 @@ export default function ReportRemarks() {
           onAnalytics={() => {
             setViewMode("analytics");
             setMoreOpen(false);
+          }}
+          onRemarksBasis={() => {
+            setMoreOpen(false);
+            window.requestAnimationFrame(() => {
+              lastDerivedBasisSignatureRef.current = "";
+              setBasisOpen(true);
+            });
           }}
           onClose={() => setMoreOpen(false)}
         />
@@ -1146,6 +2693,9 @@ function RemarkEditor({
   updateDraft,
   canEditHeadRemark,
   canPublish,
+  basisMetric,
+  basisValue,
+  basisRule,
 }: {
   row: StudentRemarkRow;
   className?: string;
@@ -1153,6 +2703,9 @@ function RemarkEditor({
   updateDraft: (studentIdValue: string, patch: Partial<RemarkDraft>) => void;
   canEditHeadRemark: boolean;
   canPublish: boolean;
+  basisMetric: RemarkBasisMetric;
+  basisValue?: number;
+  basisRule?: RemarkBasisRule;
 }) {
   const sid = row.student.id || "";
   const complete =
@@ -1173,6 +2726,32 @@ function RemarkEditor({
           {complete ? "Complete" : "Needs remarks"}
         </Chip>
       </div>
+
+      <section className="ba-basis-preview">
+        <span>
+          <b>Remarks basis</b>
+          <small>
+            {basisMetric === "average"
+              ? "Average score"
+              : basisMetric === "total"
+                ? "Total score"
+                : basisMetric === "position"
+                  ? "Overall position"
+                  : "Attendance percentage"}
+          </small>
+        </span>
+
+        <strong>
+          {basisValue === undefined
+            ? "No score"
+            : basisValue.toFixed(1)}
+        </strong>
+
+        <em>
+          {basisRule?.label ||
+            "No matching band"}
+        </em>
+      </section>
 
       <div
         className={canEditHeadRemark ? "ba-remark-grid two" : "ba-remark-grid"}
@@ -1396,17 +2975,335 @@ function FilterSheet(props: {
   );
 }
 
+
+function RemarksBasisSheet({
+  metric,
+  setMetric,
+  target,
+  setTarget,
+  overwrite,
+  setOverwrite,
+  rules,
+  source,
+  updateRule,
+  addRule,
+  removeRule,
+  selectedRow,
+  shownCount,
+  applySelected,
+  applyShown,
+  resetRules,
+  onClose,
+}: {
+  metric: RemarkBasisMetric;
+  setMetric: (
+    metric: RemarkBasisMetric,
+  ) => void;
+  target: RemarkBasisTarget;
+  setTarget: (
+    target: RemarkBasisTarget,
+  ) => void;
+  overwrite: boolean;
+  setOverwrite: (
+    overwrite: boolean,
+  ) => void;
+  rules: RemarkBasisRule[];
+  source: RemarkBasisSource;
+  updateRule: (
+    id: string,
+    patch: Partial<RemarkBasisRule>,
+  ) => void;
+  addRule: () => void;
+  removeRule: (
+    id: string,
+  ) => void;
+  selectedRow?: StudentRemarkRow;
+  shownCount: number;
+  applySelected: () => void;
+  applyShown: () => void;
+  resetRules: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="ba-sheet-backdrop ba-basis-backdrop portal-contained-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Remarks basis"
+    >
+      <section className="ba-sheet ba-basis-sheet">
+        <div className="ba-sheet-head">
+          <div>
+            <h2>Remarks basis</h2>
+            <p>
+              Generate consistent remarks from report-card scores. Review the generated text before saving.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close remarks basis"
+          >
+            ✕
+          </button>
+        </div>
+
+        <section className="ba-basis-source">
+          <span aria-hidden="true">
+            ∑
+          </span>
+
+          <div>
+            <strong>
+              {source.title}
+            </strong>
+            <small>
+              {source.detail}
+            </small>
+          </div>
+        </section>
+
+        <div className="ba-basis-controls">
+          <label>
+            <span>Base remarks on</span>
+            <select
+              value={metric}
+              onChange={(event) =>
+                setMetric(
+                  event.target
+                    .value as RemarkBasisMetric,
+                )
+              }
+            >
+              <option value="average">
+                Average score
+              </option>
+              <option value="total">
+                Total score
+              </option>
+              <option value="position">
+                Overall class position
+              </option>
+              <option value="attendance">
+                Attendance percentage
+              </option>
+            </select>
+            <small className="ba-basis-field-note">
+              Bands update automatically from the selected class, grading structure and report calculations.
+            </small>
+          </label>
+
+          <label>
+            <span>Write generated text to</span>
+            <select
+              value={target}
+              onChange={(event) =>
+                setTarget(
+                  event.target
+                    .value as RemarkBasisTarget,
+                )
+              }
+            >
+              <option value="headTeacherRemark">
+                Head teacher remark
+              </option>
+              <option value="classTeacherRemark">
+                Class teacher remark
+              </option>
+            </select>
+          </label>
+
+          <label className="ba-basis-overwrite">
+            <input
+              type="checkbox"
+              checked={overwrite}
+              onChange={(event) =>
+                setOverwrite(
+                  event.target.checked,
+                )
+              }
+            />
+            <span>
+              <b>Overwrite existing remarks</b>
+              <small>
+                Leave off to preserve remarks already entered manually.
+              </small>
+            </span>
+          </label>
+        </div>
+
+        <div className="ba-basis-rule-list">
+          {rules.map(
+            (rule, index) => (
+              <article
+                key={rule.id}
+                className="ba-basis-rule"
+              >
+                <div className="ba-basis-rule-head">
+                  <strong>
+                    Band {index + 1}
+                  </strong>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      removeRule(rule.id)
+                    }
+                    disabled={
+                      rules.length <= 1
+                    }
+                    aria-label={`Remove ${rule.label}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="ba-basis-rule-grid">
+                  <label>
+                    <span>Label</span>
+                    <input
+                      value={rule.label}
+                      onChange={(event) =>
+                        updateRule(
+                          rule.id,
+                          {
+                            label:
+                              event.target
+                                .value,
+                          },
+                        )
+                      }
+                    />
+                  </label>
+
+                  <label>
+                    <span>Minimum</span>
+                    <input
+                      type="number"
+                      value={rule.minimum}
+                      onChange={(event) =>
+                        updateRule(
+                          rule.id,
+                          {
+                            minimum:
+                              normalizeBasisNumber(
+                                event.target
+                                  .value,
+                              ),
+                          },
+                        )
+                      }
+                    />
+                  </label>
+
+                  <label>
+                    <span>Maximum</span>
+                    <input
+                      type="number"
+                      value={rule.maximum}
+                      onChange={(event) =>
+                        updateRule(
+                          rule.id,
+                          {
+                            maximum:
+                              normalizeBasisNumber(
+                                event.target
+                                  .value,
+                                100,
+                              ),
+                          },
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+
+                <label className="ba-basis-remark">
+                  <span>Remark</span>
+                  <textarea
+                    value={rule.remark}
+                    onChange={(event) =>
+                      updateRule(
+                        rule.id,
+                        {
+                          remark:
+                            event.target
+                              .value,
+                        },
+                      )
+                    }
+                    placeholder="Remark generated for students in this score band..."
+                  />
+                </label>
+              </article>
+            ),
+          )}
+        </div>
+
+        <div className="ba-basis-secondary-actions">
+          <button
+            type="button"
+            onClick={addRule}
+          >
+            + Add band
+          </button>
+
+          <button
+            type="button"
+            onClick={resetRules}
+          >
+            Recalculate system bands
+          </button>
+        </div>
+
+        <div className="ba-basis-apply">
+          <button
+            type="button"
+            onClick={applySelected}
+            disabled={!selectedRow}
+          >
+            Apply to selected
+            <small>
+              {selectedRow?.student
+                .fullName ||
+                "No student selected"}
+            </small>
+          </button>
+
+          <button
+            type="button"
+            className="primary"
+            onClick={applyShown}
+            disabled={!shownCount}
+          >
+            Apply to shown
+            <small>
+              {shownCount} student
+              {shownCount === 1
+                ? ""
+                : "s"}
+            </small>
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function MoreSheet({
   onRefresh,
   onSingle,
   onGroup,
   onAnalytics,
+  onRemarksBasis,
   onClose,
 }: {
   onRefresh: () => void | Promise<void>;
   onSingle: () => void;
   onGroup: () => void;
   onAnalytics: () => void;
+  onRemarksBasis: () => void;
   onClose: () => void;
 }) {
   return (
@@ -1442,6 +3339,11 @@ function MoreSheet({
             <span>📊</span>
             <b>Analytics</b>
             <small>View completion and publishing status</small>
+          </button>
+          <button type="button" onClick={onRemarksBasis}>
+            <span>⚖</span>
+            <b>Remarks basis</b>
+            <small>Generate individual or group remarks from score bands</small>
           </button>
         </div>
       </section>
@@ -1936,4 +3838,494 @@ const css = `
   .ba-icon-button, .ba-filter-button, .ba-add-inline { width: 40px; height: 40px; }
   .ba-summary-line { display: grid; }
 }
+
+
+.ba-basis-preview {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr)
+    auto
+    auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border:
+    1px solid
+    color-mix(
+      in srgb,
+      var(--ba-primary) 18%,
+      var(--border, rgba(0,0,0,.10))
+    );
+  border-radius: 16px;
+  background:
+    color-mix(
+      in srgb,
+      var(--ba-primary) 6%,
+      var(--card-bg, var(--surface,#fff))
+    );
+}
+
+.ba-basis-preview span {
+  min-width: 0;
+}
+
+.ba-basis-preview b,
+.ba-basis-preview small {
+  display: block;
+}
+
+.ba-basis-preview b {
+  color: var(--text,#111827);
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.ba-basis-preview small {
+  margin-top: 2px;
+  color: var(--muted,#64748b);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.ba-basis-preview strong {
+  color: var(--ba-primary);
+  font-size: 16px;
+  font-weight: 1000;
+}
+
+.ba-basis-preview em {
+  max-width: 150px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background:
+    color-mix(
+      in srgb,
+      var(--ba-primary) 11%,
+      transparent
+    );
+  color: var(--ba-primary);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.ba-basis-sheet {
+  width: min(760px, 100%);
+}
+
+.ba-basis-controls {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ba-basis-controls > label:not(.ba-basis-overwrite),
+.ba-basis-rule label {
+  display: grid;
+  gap: 5px;
+}
+
+.ba-basis-controls label > span,
+.ba-basis-rule label > span {
+  color: var(--muted,#64748b);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ba-basis-overwrite {
+  grid-column: 1 / -1;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns:
+    20px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border:
+    1px solid
+    var(--border, rgba(0,0,0,.10));
+  border-radius: 15px;
+  background:
+    var(--card-bg, var(--surface,#fff));
+}
+
+.ba-basis-overwrite input {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+}
+
+.ba-basis-overwrite b,
+.ba-basis-overwrite small {
+  display: block;
+}
+
+.ba-basis-overwrite b {
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.ba-basis-overwrite small {
+  margin-top: 2px;
+  color: var(--muted,#64748b);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.ba-basis-rule-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ba-basis-rule {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border:
+    1px solid
+    var(--border, rgba(0,0,0,.10));
+  border-radius: 18px;
+  background:
+    var(--card-bg, var(--surface,#fff));
+}
+
+.ba-basis-rule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ba-basis-rule-head strong {
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.ba-basis-rule-head button {
+  width: 28px;
+  height: 28px;
+  border:
+    1px solid
+    var(--border, rgba(0,0,0,.10));
+  border-radius: 9px;
+  background:
+    var(--surface, #fff);
+  color: var(--muted,#64748b);
+  cursor: pointer;
+}
+
+.ba-basis-rule-head button:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+.ba-basis-rule-grid {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1.4fr)
+    minmax(90px, .6fr)
+    minmax(90px, .6fr);
+  gap: 7px;
+}
+
+.ba-basis-rule-grid input {
+  min-height: 38px;
+  border-radius: 12px;
+}
+
+.ba-basis-remark textarea {
+  min-height: 74px;
+  border-radius: 13px;
+}
+
+.ba-basis-secondary-actions,
+.ba-basis-apply {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.ba-basis-secondary-actions button,
+.ba-basis-apply button {
+  min-height: 40px;
+  border:
+    1px solid
+    var(--border, rgba(0,0,0,.10));
+  border-radius: 13px;
+  padding: 7px 11px;
+  background:
+    var(--card-bg, var(--surface,#fff));
+  color: var(--text,#111827);
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.ba-basis-apply {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+}
+
+.ba-basis-apply button {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.ba-basis-apply button.primary {
+  border-color: var(--ba-primary);
+  background: var(--ba-primary);
+  color: #fff;
+}
+
+.ba-basis-apply button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.ba-basis-apply small {
+  color: inherit;
+  opacity: .78;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+@media (max-width: 620px) {
+  .ba-basis-controls,
+  .ba-basis-rule-grid,
+  .ba-basis-apply {
+    grid-template-columns: 1fr;
+  }
+
+  .ba-basis-preview {
+    grid-template-columns:
+      minmax(0, 1fr)
+      auto;
+  }
+
+  .ba-basis-preview em {
+    grid-column: 1 / -1;
+    max-width: 100%;
+    justify-self: start;
+  }
+}
+
+
+
+.ba-basis-source {
+  display: grid;
+  grid-template-columns:
+    34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border:
+    1px solid
+    color-mix(
+      in srgb,
+      var(--ba-primary) 22%,
+      var(--border, rgba(0,0,0,.10))
+    );
+  border-radius: 16px;
+  background:
+    color-mix(
+      in srgb,
+      var(--ba-primary) 7%,
+      var(--card-bg, var(--surface,#fff))
+    );
+}
+
+.ba-basis-source > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background:
+    color-mix(
+      in srgb,
+      var(--ba-primary) 15%,
+      transparent
+    );
+  color: var(--ba-primary);
+  font-size: 16px;
+  font-weight: 1000;
+}
+
+.ba-basis-source div {
+  min-width: 0;
+}
+
+.ba-basis-source strong,
+.ba-basis-source small {
+  display: block;
+}
+
+.ba-basis-source strong {
+  color: var(--text,#111827);
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.ba-basis-source small {
+  margin-top: 3px;
+  color: var(--muted,#64748b);
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.ba-basis-field-note {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted,#64748b);
+  font-size: 8px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+
+
+/* Bounded, centred Remarks Basis dialog ------------------------------- */
+.ba-basis-backdrop {
+  position: fixed;
+  inset:
+    max(8px, env(safe-area-inset-top))
+    max(8px, env(safe-area-inset-right))
+    max(8px, env(safe-area-inset-bottom))
+    max(8px, env(safe-area-inset-left));
+  z-index: 12000;
+  display: grid;
+  place-items: center;
+  padding: clamp(8px, 2vw, 18px);
+  overflow: hidden;
+  background: rgba(15, 23, 42, .54);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.ba-basis-backdrop .ba-basis-sheet {
+  position: relative;
+  inset: auto;
+  width: min(680px, 100%);
+  max-width: 680px;
+  min-width: 0;
+  height: auto;
+  max-height: min(760px, calc(100dvh - 32px));
+  margin: 0;
+  border-radius: clamp(18px, 2vw, 24px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  box-shadow: 0 28px 90px rgba(15, 23, 42, .30);
+}
+
+.ba-basis-backdrop .ba-sheet {
+  bottom: auto;
+  left: auto;
+  right: auto;
+  transform: none;
+}
+
+.ba-basis-backdrop .ba-sheet-head {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  margin: -1px -1px 8px;
+  padding: 10px 10px 9px;
+  border-bottom: 1px solid var(--border, rgba(0,0,0,.10));
+  background: color-mix(in srgb, var(--card-bg, var(--surface,#fff)) 96%, transparent);
+  backdrop-filter: blur(12px) saturate(1.05);
+  -webkit-backdrop-filter: blur(12px) saturate(1.05);
+}
+
+@media (max-width: 720px) {
+  .ba-basis-backdrop {
+    inset:
+      max(6px, env(safe-area-inset-top))
+      max(6px, env(safe-area-inset-right))
+      max(6px, env(safe-area-inset-bottom))
+      max(6px, env(safe-area-inset-left));
+    padding: 6px;
+  }
+
+  .ba-basis-backdrop .ba-basis-sheet {
+    width: 100%;
+    max-width: 100%;
+    max-height: calc(100dvh - 20px);
+    border-radius: 18px;
+  }
+}
+
+
+
+
+
+/* Role-portal-contained sheets --------------------------------------- */
+@media (min-width:980px){
+  .ba-sheet-backdrop,
+  .ba-basis-backdrop,
+  .ba-basis-backdrop.portal-contained-modal{
+    position:fixed;
+    top:var(--eds-shell-top-offset,0px) !important;
+    right:0 !important;
+    bottom:0 !important;
+    left:var(--portal-content-left,0px) !important;
+    inset:auto 0 0 var(--portal-content-left,0px) !important;
+    width:auto;
+    height:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .ba-sheet,
+  .ba-basis-sheet,
+  .ba-basis-backdrop .ba-basis-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+
+  .ba-basis-backdrop,
+  .ba-basis-backdrop.portal-contained-modal{
+    display:grid;
+    place-items:center;
+    padding:18px;
+  }
+
+  .ba-basis-backdrop .ba-basis-sheet{
+    width:min(680px,100%);
+    max-height:calc(100dvh - var(--eds-shell-top-offset,0px) - 36px);
+    overflow-y:auto;
+    overflow-x:hidden;
+  }
+}
+
+@media (max-width:979px){
+  .ba-basis-backdrop,
+  .ba-basis-backdrop.portal-contained-modal{
+    position:fixed;
+    inset:0 !important;
+    display:grid;
+    place-items:end center;
+    padding:10px;
+  }
+
+  .ba-basis-backdrop .ba-basis-sheet{
+    width:min(680px,100%);
+    max-width:100%;
+    max-height:min(88dvh,760px);
+  }
+}
+
 `;

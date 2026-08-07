@@ -44,7 +44,10 @@ import {
   getStudentReportTemplateDefinition,
 } from "../student-report-templates";
 
-import { reportTemplateEmptyMessage } from "../shared/ReportTemplateUtils";
+import {
+  reportTemplateEmptyMessage,
+  resolveStudentAssessmentReportSettings,
+} from "../shared/ReportTemplateUtils";
 
 // ======================================================
 // PROPS
@@ -213,9 +216,15 @@ export default function StudentReportCard({
       resolvedSettings.templateCode || normalizedTemplate.code || templateCode,
     );
 
+    const assessmentReportSettings =
+      resolveStudentAssessmentReportSettings(
+        resolvedSettings,
+      );
+
     return {
       template: normalizedTemplate,
       settings: resolvedSettings,
+      assessmentReportSettings,
       TemplateComponent,
     };
   }, [dataset, template, templateSettings, templateAssignment, settings]);
@@ -231,9 +240,20 @@ export default function StudentReportCard({
 
   const TemplateComponent = resolved.TemplateComponent;
 
+  const assessmentAwareDataset = {
+    ...dataset,
+    assessmentReportSettings:
+      resolved.assessmentReportSettings,
+    header: {
+      ...dataset.header,
+      assessmentReportSettings:
+        resolved.assessmentReportSettings,
+    },
+  };
+
   return (
     <TemplateComponent
-      dataset={dataset}
+      dataset={assessmentAwareDataset}
       template={resolved.template}
       settings={resolved.settings}
       compact={compact}

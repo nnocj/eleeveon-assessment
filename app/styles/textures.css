@@ -1,0 +1,201 @@
+/**
+ * app/styles/textures.css
+ * --------------------------------------------------------------------------
+ * Theme-aware CSS texture utilities.
+ */
+
+.eds-texture {
+  position: relative;
+  isolation: isolate;
+}
+
+.eds-texture::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity:
+    calc(
+      var(--eds-texture-layer-opacity, 0.08)
+      *
+      var(--eds-texture-intensity, 1)
+    );
+  mix-blend-mode:
+    var(
+      --eds-texture-blend,
+      normal
+    );
+}
+
+.eds-texture-grain::after {
+  --eds-texture-layer-opacity: 0.045;
+  --eds-texture-blend: multiply;
+  background-image:
+    var(--eds-texture-grain);
+  background-size:
+    var(
+      --eds-texture-grain-size,
+      140px 140px
+    );
+}
+
+html[data-appearance-mode="dark"]
+  .eds-texture-grain::after,
+[data-theme="dark"]
+  .eds-texture-grain::after {
+  --eds-texture-blend: screen;
+  --eds-texture-layer-opacity: 0.06;
+}
+
+.eds-texture-dots::after {
+  --eds-texture-layer-opacity:
+    var(
+      --eds-texture-dots-opacity,
+      0.09
+    );
+  background-image:
+    var(--eds-texture-dots);
+  background-size:
+    var(
+      --eds-texture-dots-size,
+      10px 10px
+    );
+}
+
+.eds-texture-grid::after {
+  --eds-texture-layer-opacity:
+    var(
+      --eds-texture-grid-opacity,
+      0.055
+    );
+  background-image:
+    var(--eds-texture-grid);
+  background-size:
+    var(
+      --eds-texture-grid-size,
+      24px 24px
+    );
+}
+
+.eds-texture-network::after {
+  --eds-texture-layer-opacity:
+    var(
+      --eds-texture-network-opacity,
+      0.07
+    );
+  background-image:
+    var(--eds-texture-network);
+  background-size:
+    var(
+      --eds-texture-network-size,
+      96px 96px
+    );
+}
+
+.eds-texture-paper::after {
+  --eds-texture-layer-opacity: 0.04;
+  --eds-texture-blend: soft-light;
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent 96%,
+      color-mix(
+        in srgb,
+        var(--eds-text) 12%,
+        transparent
+      ) 100%
+    ),
+    linear-gradient(
+      transparent 96%,
+      color-mix(
+        in srgb,
+        var(--eds-text) 12%,
+        transparent
+      ) 100%
+    );
+  background-size: 6px 6px;
+}
+
+.eds-page-texture {
+  position: relative;
+}
+
+.eds-page-texture::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    var(--eds-texture-dots);
+  background-size:
+    var(
+      --eds-texture-dots-size,
+      10px 10px
+    );
+  opacity:
+    calc(
+      var(
+        --eds-texture-dots-opacity,
+        0.09
+      )
+      *
+      var(--eds-texture-intensity, 1)
+    );
+}
+
+.eds-brand-field {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.eds-brand-field::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle at 18% 14%,
+      color-mix(
+        in srgb,
+        var(--eds-primary) 24%,
+        transparent
+      ),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 82% 12%,
+      color-mix(
+        in srgb,
+        var(--eds-primary) 12%,
+        transparent
+      ),
+      transparent 28%
+    );
+}
+
+.eds-brand-field::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    var(--eds-texture-network);
+  background-size:
+    var(
+      --eds-texture-network-size,
+      96px 96px
+    );
+  opacity:
+    calc(
+      0.05
+      *
+      var(--eds-texture-intensity, 1)
+    );
+}

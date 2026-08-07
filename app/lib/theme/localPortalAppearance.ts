@@ -563,18 +563,47 @@ export function applyResolvedDisplayMode(
       "#2f6fed",
     );
 
-  // These are the exact factors used by the working LocalSettings page.
-  const darkBg =
-    darkenLocalThemeColor(
-      primary,
-      0.25,
-    );
+  const darkBg = "#0b1220";
+  const darkerBg = "#111a2b";
 
-  const darkerBg =
-    darkenLocalThemeColor(
-      primary,
-      0.15,
-    );
+  const dark =
+    resolvedMode === "dark";
+
+  const palette = dark
+    ? {
+        bg: "#0b1220",
+        surface: "#111a2b",
+        raised: "#162136",
+        sunken: "#0c1524",
+        text: "#e9eef7",
+        textStrong: "#f8fafc",
+        muted: "#a7b0c0",
+        border:
+          "rgba(255,255,255,0.11)",
+        divider:
+          "rgba(255,255,255,0.085)",
+        input: "#0f1929",
+        shell: "#0f1828",
+        header: "#111a2b",
+        drawer: "#111a2b",
+      }
+    : {
+        bg: "#f4f7fb",
+        surface: "#ffffff",
+        raised: "#ffffff",
+        sunken: "#f1f5f9",
+        text: "#263244",
+        textStrong: "#111827",
+        muted: "#667085",
+        border:
+          "rgba(15,23,42,0.09)",
+        divider:
+          "rgba(15,23,42,0.075)",
+        input: "#ffffff",
+        shell: "#fbfcfe",
+        header: "#f8fafc",
+        drawer: "#ffffff",
+      };
 
   root.setAttribute(
     "data-theme",
@@ -583,173 +612,150 @@ export function applyResolvedDisplayMode(
 
   root.dataset.theme =
     resolvedMode;
-
+  root.dataset.appearanceMode =
+    resolvedMode;
   root.dataset.eleeveonResolvedMode =
     resolvedMode;
 
   root.classList.toggle(
     "dark",
-    resolvedMode === "dark",
+    dark,
   );
-
   root.classList.toggle(
     "light",
-    resolvedMode === "light",
+    !dark,
   );
-
-  // Keep compatibility with newer shared theme selectors too.
   root.classList.toggle(
     "theme-dark",
-    resolvedMode === "dark",
+    dark,
   );
-
   root.classList.toggle(
     "theme-light",
-    resolvedMode === "light",
+    !dark,
   );
 
   root.style.colorScheme =
     resolvedMode;
 
-  updateMetaThemeColor(
-    resolvedMode === "dark"
-      ? darkBg
-      : primary,
-  );
+  const variables:
+    Record<string, string> = {
+    "--eds-bg": palette.bg,
+    "--eds-bg-raised":
+      dark ? "#0f1828" : "#f8fafc",
+    "--eds-surface":
+      palette.surface,
+    "--eds-surface-raised":
+      palette.raised,
+    "--eds-surface-sunken":
+      palette.sunken,
+    "--eds-card":
+      palette.surface,
+    "--eds-card-strong":
+      dark ? "#17243a" : "#fbfcfe",
+    "--eds-input":
+      palette.input,
+    "--eds-text":
+      palette.text,
+    "--eds-text-strong":
+      palette.textStrong,
+    "--eds-text-muted":
+      palette.muted,
+    "--eds-border":
+      palette.border,
+    "--eds-divider":
+      palette.divider,
 
-  if (
-    resolvedMode === "dark"
+    "--eds-shell-bg":
+      palette.bg,
+    "--eds-sidebar-bg":
+      palette.shell,
+    "--eds-header-bg":
+      palette.header,
+    "--eds-drawer-bg":
+      palette.drawer,
+    "--eds-window-bg":
+      palette.header,
+
+    "--bg": palette.bg,
+    "--surface":
+      palette.surface,
+    "--card":
+      palette.surface,
+    "--card-bg":
+      palette.surface,
+    "--text":
+      palette.text,
+    "--muted":
+      palette.muted,
+    "--border":
+      palette.border,
+    "--input-bg":
+      palette.input,
+    "--input-text":
+      palette.text,
+    "--input-border":
+      palette.border,
+
+    "--shell-sidebar-bg":
+      palette.shell,
+    "--shell-header-bg":
+      palette.header,
+    "--shell-menu-bg":
+      palette.drawer,
+    "--shell-section-bg":
+      palette.sunken,
+    "--shell-hover-bg":
+      `color-mix(in srgb, ${primary} 7%, ${palette.surface})`,
+    "--shell-active-bg":
+      `color-mix(in srgb, ${primary} 12%, ${palette.surface})`,
+    "--shell-soft-border":
+      palette.divider,
+
+    "--eds-window-chrome-color":
+      palette.header,
+    "--window-chrome-fallback":
+      palette.header,
+  };
+
+  for (
+    const [name, value] of
+    Object.entries(variables)
   ) {
-    // Exact working LocalSettings values.
     root.style.setProperty(
-      "--bg",
-      darkBg,
-    );
-
-    root.style.setProperty(
-      "--surface",
-      darkerBg,
-    );
-
-    root.style.setProperty(
-      "--text",
-      "#ffffff",
-    );
-
-    root.style.setProperty(
-      "--border",
-      "rgba(255,255,255,0.14)",
-    );
-
-    root.style.setProperty(
-      "--card-bg",
-      darkerBg,
-    );
-
-    root.style.setProperty(
-      "--card",
-      darkerBg,
-    );
-
-    root.style.setProperty(
-      "--muted",
-      "rgba(255,255,255,0.74)",
-    );
-
-    root.style.setProperty(
-      "--input-bg",
-      darkerBg,
-    );
-
-    root.style.setProperty(
-      "--input-text",
-      "#ffffff",
-    );
-
-    root.style.setProperty(
-      "--input-border",
-      "rgba(255,255,255,0.14)",
-    );
-
-    root.style.setProperty(
-      "--shell-section-bg",
-      "rgba(255,255,255,0.06)",
-    );
-
-    root.style.setProperty(
-      "--shell-shadow",
-      "0 24px 70px rgba(0,0,0,0.28)",
-    );
-  } else {
-    // Exact working LocalSettings values.
-    root.style.setProperty(
-      "--bg",
-      "#f7f8fb",
-    );
-
-    root.style.setProperty(
-      "--surface",
-      "#ffffff",
-    );
-
-    root.style.setProperty(
-      "--text",
-      "#111111",
-    );
-
-    root.style.setProperty(
-      "--border",
-      "rgba(0,0,0,0.10)",
-    );
-
-    root.style.setProperty(
-      "--card-bg",
-      "#ffffff",
-    );
-
-    root.style.setProperty(
-      "--card",
-      "#ffffff",
-    );
-
-    root.style.setProperty(
-      "--muted",
-      "#64748b",
-    );
-
-    root.style.setProperty(
-      "--input-bg",
-      "#ffffff",
-    );
-
-    root.style.setProperty(
-      "--input-text",
-      "#111111",
-    );
-
-    root.style.setProperty(
-      "--input-border",
-      "rgba(0,0,0,0.10)",
-    );
-
-    root.style.setProperty(
-      "--shell-section-bg",
-      "rgba(255,255,255,0.88)",
-    );
-
-    root.style.setProperty(
-      "--shell-shadow",
-      "0 24px 70px rgba(15,23,42,0.10)",
+      name,
+      value,
     );
   }
+
+  updateMetaThemeColor(
+    palette.header,
+  );
 
   if (document.body) {
     document.body.style.background =
-      "var(--bg)";
-
+      palette.bg;
     document.body.style.color =
-      "var(--text)";
+      palette.text;
   }
+
+  window.dispatchEvent(
+    new CustomEvent(
+      "eleeveon:surface-theme-applied",
+      {
+        detail: {
+          mode: resolvedMode,
+          primary,
+          surface:
+            palette.surface,
+          header:
+            palette.header,
+          sidebar:
+            palette.shell,
+          at: Date.now(),
+        },
+      },
+    ),
+  );
 
   return {
     primary,
@@ -922,11 +928,72 @@ export function announceLocalSettingsChange(
     ),
   );
 
+  /*
+   * Do not dispatch "eleeveon:theme-refresh" here.
+   *
+   * That event belongs to protected shared branding and can immediately
+   * repaint the branch default over a just-selected local Light/Dark choice.
+   * Local changes have their own exact event and refresh contracts.
+   */
   window.dispatchEvent(
-    new Event(
-      "eleeveon:theme-refresh",
+    new CustomEvent(
+      "eleeveon:local-appearance-refresh",
+      {
+        detail: {
+          storageKey,
+          settings: normalized,
+          resolvedMode:
+            resolveLocalAppearance(
+              normalized.appearanceMode,
+              options?.sharedDefaultMode,
+            ),
+          at: Date.now(),
+        },
+      },
     ),
   );
+
+  window.dispatchEvent(
+    new Event(
+      "eleeveon:window-theme-refresh",
+    ),
+  );
+}
+
+/**
+ * Explicit local-settings transaction.
+ *
+ * This is intentionally not used by route mount/navigation. Call it only from
+ * a user action such as selecting an appearance, density, text size or motion.
+ */
+export function saveApplyAndAnnounceLocalPortalSettings(
+  storageKey: string,
+  settings: LocalPortalSettings,
+  options?:
+    ApplyLocalPortalAppearanceOptions,
+): LocalPortalSettings {
+  const normalized =
+    normalizeLocalPortalSettings(
+      settings,
+    );
+
+  saveLocalPortalSettings(
+    storageKey,
+    normalized,
+  );
+
+  applyLocalPortalSettings(
+    normalized,
+    options,
+  );
+
+  announceLocalSettingsChange(
+    storageKey,
+    normalized,
+    options,
+  );
+
+  return normalized;
 }
 
 export function clearAppliedLocalAppearance() {

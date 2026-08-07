@@ -1,0 +1,158 @@
+/**
+ * app/styles/typography.css
+ * --------------------------------------------------------------------------
+ * Eleeveon typography utility classes.
+ */
+
+.eds-type-display-large {
+  margin: 0;
+  font-family: var(--eds-font-display);
+  font-size:
+    clamp(
+      2.25rem,
+      5vw,
+      3rem
+    );
+  font-weight: 900;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+  color: var(--eds-text-strong);
+}
+
+.eds-type-display {
+  margin: 0;
+  font-family: var(--eds-font-display);
+  font-size:
+    clamp(
+      1.75rem,
+      4vw,
+      2.25rem
+    );
+  font-weight: 900;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+  color: var(--eds-text-strong);
+}
+
+.eds-type-page-title {
+  margin: 0;
+  font-family: var(--eds-font-display);
+  font-size: var(--eds-font-2xl);
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--eds-text-strong);
+}
+
+.eds-type-section-title {
+  margin: 0;
+  font-size: var(--eds-font-lg);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--eds-text-strong);
+}
+
+.eds-type-card-title {
+  margin: 0;
+  font-size: var(--eds-font-base);
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--eds-text-strong);
+}
+
+.eds-type-body {
+  margin: 0;
+  font-size: var(--eds-font-base);
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--eds-text);
+}
+
+.eds-type-body-strong {
+  margin: 0;
+  font-size: var(--eds-font-base);
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--eds-text-strong);
+}
+
+.eds-type-label {
+  margin: 0;
+  font-size: var(--eds-font-sm);
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--eds-text);
+}
+
+.eds-type-overline {
+  margin: 0;
+  font-size: var(--eds-font-xs);
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--eds-text-muted);
+}
+
+.eds-type-caption {
+  margin: 0;
+  font-size: var(--eds-font-xs);
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--eds-text-muted);
+}
+
+.eds-text-muted {
+  color: var(--eds-text-muted);
+}
+
+.eds-text-subtle {
+  color: var(--eds-text-subtle);
+}
+
+.eds-text-strong {
+  color: var(--eds-text-strong);
+}
+
+.eds-text-primary {
+  color: var(--eds-primary);
+}
+
+.eds-text-success {
+  color: var(--eds-success);
+}
+
+.eds-text-warning {
+  color: var(--eds-warning);
+}
+
+.eds-text-danger {
+  color: var(--eds-danger);
+}
+
+.eds-text-balance {
+  text-wrap: balance;
+}
+
+.eds-truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eds-line-clamp-2,
+.eds-line-clamp-3 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.eds-line-clamp-2 {
+  -webkit-line-clamp: 2;
+}
+
+.eds-line-clamp-3 {
+  -webkit-line-clamp: 3;
+}

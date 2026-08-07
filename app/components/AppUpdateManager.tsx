@@ -35,6 +35,36 @@ type AppVersionChangedDetail = {
   metadata?: Partial<AppVersionMetadata>;
 };
 
+
+
+/**
+ * Publish a stable app-update event for status sheets and installed window
+ * controls without forcing those components to know service-worker details.
+ */
+function publishPwaUpdateReady(
+  registration?: ServiceWorkerRegistration | null,
+) {
+  if (
+    typeof window === "undefined"
+  ) {
+    return;
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(
+      "eleeveon:pwa-update-ready",
+      {
+        detail: {
+          waiting: Boolean(
+            registration?.waiting,
+          ),
+          at: Date.now(),
+        },
+      },
+    ),
+  );
+}
+
 export default function AppUpdateManager() {
   const database = useDatabase();
 
@@ -203,7 +233,8 @@ export default function AppUpdateManager() {
             buildId,
           )
         ) {
-          window.location.reload();
+          window.dispatchEvent(new Event("eleeveon:app-reloading"));
+      window.location.reload();
         }
       };
 

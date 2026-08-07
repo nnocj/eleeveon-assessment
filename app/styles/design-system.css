@@ -1,0 +1,413 @@
+/**
+ * app/styles/design-system.css
+ * --------------------------------------------------------------------------
+ * Root Eleeveon Design System CSS contract.
+ *
+ * Import this before the specialised style modules.
+ */
+
+:root {
+  --eds-primary: #2f6fed;
+  --eds-primary-hover: #255fd0;
+  --eds-primary-active: #1f4fae;
+  --eds-primary-soft: rgba(47, 111, 237, 0.12);
+  --eds-primary-softer: rgba(47, 111, 237, 0.065);
+  --eds-primary-text: #ffffff;
+
+  --eds-bg: #f6f8fc;
+  --eds-bg-raised: #fbfcff;
+  --eds-surface: #ffffff;
+  --eds-surface-raised: #ffffff;
+  --eds-surface-sunken: #f0f4fa;
+  --eds-surface-strong: #e9eef7;
+  --eds-card: #ffffff;
+  --eds-card-strong: #fbfdff;
+  --eds-input: #ffffff;
+  --eds-overlay: rgba(15, 23, 42, 0.46);
+
+  --eds-text: #1e293b;
+  --eds-text-strong: #0f172a;
+  --eds-text-muted: #64748b;
+  --eds-text-subtle: #94a3b8;
+  --eds-text-inverse: #ffffff;
+
+  --eds-border: rgba(100, 116, 139, 0.18);
+  --eds-border-strong: rgba(71, 85, 105, 0.28);
+  --eds-divider: rgba(100, 116, 139, 0.14);
+  --eds-focus-ring: rgba(37, 99, 235, 0.34);
+
+  --eds-success: #16a34a;
+  --eds-warning: #d97706;
+  --eds-danger: #dc2626;
+  --eds-info: #0284c7;
+
+  --eds-font-sans:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  --eds-font-display: var(--eds-font-sans);
+  --eds-font-mono:
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    Menlo,
+    monospace;
+
+  --eds-font-xs: 0.6875rem;
+  --eds-font-sm: 0.75rem;
+  --eds-font-md: 0.8125rem;
+  --eds-font-base: 0.875rem;
+  --eds-font-lg: 1rem;
+  --eds-font-xl: 1.125rem;
+  --eds-font-2xl: 1.375rem;
+  --eds-font-3xl: 1.75rem;
+  --eds-font-4xl: 2.25rem;
+
+  --eds-space-1: 0.25rem;
+  --eds-space-2: 0.5rem;
+  --eds-space-3: 0.75rem;
+  --eds-space-4: 1rem;
+  --eds-space-5: 1.25rem;
+  --eds-space-6: 1.5rem;
+
+  --eds-control-height: 2.625rem;
+  --eds-card-padding: 0.875rem;
+  --eds-section-gap: 0.75rem;
+
+  --eds-radius-xs: 0.375rem;
+  --eds-radius-sm: 0.625rem;
+  --eds-radius-md: 0.875rem;
+  --eds-radius-lg: 1.125rem;
+  --eds-radius-xl: 1.375rem;
+  --eds-radius-2xl: 1.75rem;
+  --eds-radius-pill: 999px;
+  --eds-radius-control: 0.875rem;
+  --eds-radius-card: 1.125rem;
+  --eds-radius-panel: 1.75rem;
+
+  --eds-shadow-hairline:
+    0 1px 0 rgba(255, 255, 255, 0.82) inset;
+  --eds-shadow-soft:
+    0 6px 20px rgba(15, 23, 42, 0.055);
+  --eds-shadow-card:
+    0 10px 28px rgba(15, 23, 42, 0.075),
+    0 1px 2px rgba(15, 23, 42, 0.035);
+  --eds-shadow-raised:
+    0 18px 44px rgba(15, 23, 42, 0.105),
+    0 3px 10px rgba(15, 23, 42, 0.055);
+  --eds-shadow-floating:
+    0 28px 70px rgba(15, 23, 42, 0.15),
+    0 8px 24px rgba(15, 23, 42, 0.08);
+  --eds-shadow-overlay:
+    0 34px 90px rgba(15, 23, 42, 0.24);
+  --eds-inset-highlight:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86);
+
+  --eds-gradient-brand:
+    linear-gradient(
+      135deg,
+      #2f6fed 0%,
+      #4f7cff 48%,
+      #6757e8 100%
+    );
+
+  --eds-gradient-brand-soft:
+    linear-gradient(
+      135deg,
+      rgba(47, 111, 237, 0.15),
+      rgba(99, 102, 241, 0.07)
+    );
+
+  --eds-gradient-page-glow:
+    radial-gradient(
+      circle at 12% 10%,
+      rgba(47, 111, 237, 0.1),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 88% 4%,
+      rgba(99, 102, 241, 0.08),
+      transparent 28%
+    );
+
+  --eds-gradient-window:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.96),
+      rgba(247, 250, 255, 0.92)
+    );
+
+  --eds-gradient-sidebar:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.98),
+      rgba(248, 250, 255, 0.96)
+    );
+
+  --eds-gradient-card-sheen:
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.82),
+      rgba(255, 255, 255, 0.12) 42%,
+      transparent 70%
+    );
+
+  --eds-duration-fast: 140ms;
+  --eds-duration-standard: 220ms;
+  --eds-duration-slow: 320ms;
+  --eds-ease-standard:
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+  --eds-ease-enter:
+    cubic-bezier(0.16, 1, 0.3, 1);
+
+  --eds-transition-color:
+    color var(--eds-duration-fast)
+      var(--eds-ease-standard),
+    background-color var(--eds-duration-fast)
+      var(--eds-ease-standard),
+    border-color var(--eds-duration-fast)
+      var(--eds-ease-standard);
+
+  --eds-transition-surface:
+    background var(--eds-duration-standard)
+      var(--eds-ease-standard),
+    box-shadow var(--eds-duration-standard)
+      var(--eds-ease-standard),
+    transform var(--eds-duration-standard)
+      var(--eds-ease-enter);
+
+  --eds-transition-transform:
+    transform var(--eds-duration-standard)
+      var(--eds-ease-enter);
+
+  --eds-glass-subtle-bg:
+    rgba(255, 255, 255, 0.78);
+  --eds-glass-subtle-filter:
+    blur(10px) saturate(1.18);
+  --eds-glass-medium-bg:
+    rgba(255, 255, 255, 0.86);
+  --eds-glass-medium-filter:
+    blur(18px) saturate(1.18);
+  --eds-glass-strong-bg:
+    rgba(255, 255, 255, 0.94);
+  --eds-glass-strong-filter:
+    blur(28px) saturate(1.18);
+
+  --eds-texture-intensity: 1;
+
+  --bg: var(--eds-bg);
+  --surface: var(--eds-surface);
+  --card: var(--eds-card);
+  --card-bg: var(--eds-card);
+  --input-bg: var(--eds-input);
+  --text: var(--eds-text);
+  --muted: var(--eds-text-muted);
+  --border: var(--eds-border);
+  --primary-color: var(--eds-primary);
+  --dashboard-primary: var(--eds-primary);
+  --branch-primary: var(--eds-primary);
+  --accent-color: var(--eds-primary);
+  --font-family: var(--eds-font-sans);
+  --font-size: 16px;
+}
+
+html[data-appearance-mode="dark"],
+[data-theme="dark"] {
+  --eds-bg: #07101f;
+  --eds-bg-raised: #0b1424;
+  --eds-surface: #0f1b2d;
+  --eds-surface-raised: #132238;
+  --eds-surface-sunken: #091322;
+  --eds-surface-strong: #192a43;
+  --eds-card: #101d30;
+  --eds-card-strong: #14243a;
+  --eds-input: #0c1728;
+  --eds-overlay: rgba(2, 6, 23, 0.72);
+
+  --eds-text: #e8eef8;
+  --eds-text-strong: #f8fbff;
+  --eds-text-muted: #9fb0c7;
+  --eds-text-subtle: #71839d;
+  --eds-text-inverse: #07101f;
+
+  --eds-border: rgba(148, 163, 184, 0.16);
+  --eds-border-strong: rgba(148, 163, 184, 0.26);
+  --eds-divider: rgba(148, 163, 184, 0.13);
+  --eds-focus-ring: rgba(96, 165, 250, 0.42);
+
+  --eds-primary: #6f9cff;
+  --eds-primary-hover: #86acff;
+  --eds-primary-active: #5b88ed;
+  --eds-primary-soft: rgba(111, 156, 255, 0.16);
+  --eds-primary-softer: rgba(111, 156, 255, 0.085);
+  --eds-primary-text: #07101f;
+
+  --eds-shadow-hairline:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  --eds-shadow-soft:
+    0 8px 24px rgba(0, 0, 0, 0.2);
+  --eds-shadow-card:
+    0 12px 34px rgba(0, 0, 0, 0.26),
+    0 1px 0 rgba(255, 255, 255, 0.025) inset;
+  --eds-shadow-raised:
+    0 20px 52px rgba(0, 0, 0, 0.34),
+    0 1px 0 rgba(255, 255, 255, 0.035) inset;
+  --eds-shadow-floating:
+    0 30px 80px rgba(0, 0, 0, 0.46),
+    0 10px 26px rgba(0, 0, 0, 0.24);
+  --eds-shadow-overlay:
+    0 36px 100px rgba(0, 0, 0, 0.62);
+  --eds-inset-highlight:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+
+  --eds-gradient-window:
+    linear-gradient(
+      180deg,
+      rgba(17, 30, 49, 0.97),
+      rgba(10, 20, 35, 0.94)
+    );
+
+  --eds-gradient-sidebar:
+    linear-gradient(
+      180deg,
+      rgba(15, 27, 45, 0.99),
+      rgba(9, 19, 34, 0.98)
+    );
+
+  --eds-gradient-card-sheen:
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.06),
+      transparent 44%
+    );
+
+  --eds-glass-subtle-bg:
+    rgba(15, 27, 45, 0.74);
+  --eds-glass-medium-bg:
+    rgba(15, 27, 45, 0.82);
+  --eds-glass-strong-bg:
+    rgba(15, 27, 45, 0.9);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light;
+  background: var(--eds-bg);
+}
+
+html[data-appearance-mode="dark"],
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background:
+    var(--eds-gradient-page-glow),
+    var(--eds-bg);
+  color: var(--eds-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  transition:
+    background var(--eds-duration-standard)
+      var(--eds-ease-standard),
+    color var(--eds-duration-fast)
+      var(--eds-ease-standard);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: var(--eds-primary-soft);
+  color: var(--eds-text-strong);
+}
+
+:focus-visible {
+  outline: 3px solid var(--eds-focus-ring);
+  outline-offset: 2px;
+}
+
+
+/* Mature neutral-shell contract ----------------------------------------- */
+:root,
+:root[data-appearance-mode="light"],
+:root[data-theme="light"],
+:root.theme-light {
+  --eds-shell-bg: #f4f7fb;
+  --eds-sidebar-bg: #fbfcfe;
+  --eds-header-bg: #f8fafc;
+  --eds-drawer-bg: #ffffff;
+  --eds-window-bg: #f8fafc;
+
+  --shell-sidebar-bg: var(--eds-sidebar-bg);
+  --shell-header-bg: var(--eds-header-bg);
+  --shell-menu-bg: var(--eds-drawer-bg);
+  --shell-section-bg: var(--eds-surface-sunken);
+  --shell-hover-bg: var(--eds-primary-softer);
+  --shell-active-bg: var(--eds-primary-soft);
+
+  --bg: var(--eds-bg);
+  --surface: var(--eds-surface);
+  --card: var(--eds-card);
+  --card-bg: var(--eds-card);
+  --text: var(--eds-text);
+  --muted: var(--eds-text-muted);
+  --border: var(--eds-border);
+  --input-bg: var(--eds-input);
+  --input-text: var(--eds-text);
+  --input-border: var(--eds-border);
+}
+
+:root[data-appearance-mode="dark"],
+:root[data-theme="dark"],
+:root.theme-dark {
+  --eds-shell-bg: #0b1220;
+  --eds-sidebar-bg: #0f1828;
+  --eds-header-bg: #111a2b;
+  --eds-drawer-bg: #111a2b;
+  --eds-window-bg: #111a2b;
+
+  --shell-sidebar-bg: var(--eds-sidebar-bg);
+  --shell-header-bg: var(--eds-header-bg);
+  --shell-menu-bg: var(--eds-drawer-bg);
+  --shell-section-bg: var(--eds-surface-sunken);
+  --shell-hover-bg: var(--eds-primary-softer);
+  --shell-active-bg: var(--eds-primary-soft);
+
+  --bg: var(--eds-bg);
+  --surface: var(--eds-surface);
+  --card: var(--eds-card);
+  --card-bg: var(--eds-card);
+  --text: var(--eds-text);
+  --muted: var(--eds-text-muted);
+  --border: var(--eds-border);
+  --input-bg: var(--eds-input);
+  --input-text: var(--eds-text);
+  --input-border: var(--eds-border);
+}

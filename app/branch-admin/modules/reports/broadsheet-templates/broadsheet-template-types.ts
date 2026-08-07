@@ -24,6 +24,11 @@ import type {
 
 import type { AnnualBroadsheet } from "../engine/cumulative-report-types";
 
+import type {
+  AssessmentReportProjection,
+  AssessmentReportProjectionSettings,
+} from "../../../../lib/assessments";
+
 // ======================================================
 // DOCUMENT TYPES
 // ======================================================
@@ -62,6 +67,18 @@ export type BroadsheetTemplateTone =
   | "university"
   | "analytics";
 
+
+/**
+ * Broadsheets intentionally do not support "item_rules".
+ *
+ * This type is derived directly from the Dexie model so the runtime template
+ * contract cannot drift from ReportCardTemplateSetting.
+ */
+export type BroadsheetAssessmentHierarchyDisplay =
+  NonNullable<
+    ReportCardTemplateSetting["broadsheetAssessmentHierarchyDisplay"]
+  >;
+
 // ======================================================
 // ENGINE DATASETS
 // ======================================================
@@ -86,6 +103,12 @@ export type BroadsheetReportTypeByKind = {
   annual: "annual_broadsheet";
 };
 
+export interface AssessmentAwareSubjectBroadsheet
+  extends ComputedSubjectBroadsheet {
+  assessmentProjection?: AssessmentReportProjection;
+  assessmentReportSettings?: AssessmentReportProjectionSettings;
+}
+
 // ======================================================
 // TEMPLATE SETTINGS
 // ======================================================
@@ -98,7 +121,10 @@ export type BroadsheetReportTypeByKind = {
  * with settings saved before the broadsheet template upgrade.
  */
 export interface BroadsheetTemplateSettings
-  extends Partial<ReportCardTemplateSetting> {
+  extends Omit<
+    Partial<ReportCardTemplateSetting>,
+    "broadsheetAssessmentHierarchyDisplay"
+  > {
   reportType?: BroadsheetReportType | string;
 
   templateCode?: BroadsheetTemplateCode;
@@ -122,6 +148,21 @@ export interface BroadsheetTemplateSettings
 
   // Subject controls
   showBroadsheetAssessmentBreakdown?: boolean;
+
+  broadsheetAssessmentHierarchyDisplay?: BroadsheetAssessmentHierarchyDisplay;
+  broadsheetShowAssessmentGroupHeaders?: boolean;
+  broadsheetMaximumAssessmentDepth?: number | null;
+
+  showAssessmentParentItems?: boolean;
+  showAssessmentChildItems?: boolean;
+  showCalculatedAssessmentItems?: boolean;
+  indentAssessmentChildren?: boolean;
+  showAssessmentMaximumScores?: boolean;
+  showAssessmentWeights?: boolean;
+  showAssessmentRawScores?: boolean;
+  showAssessmentWeightedScores?: boolean;
+  showAssessmentHierarchyPath?: boolean;
+
   showBroadsheetWeightedTotal?: boolean;
   showBroadsheetPercentage?: boolean;
   showBroadsheetGrade?: boolean;
@@ -181,6 +222,20 @@ export interface ResolvedBroadsheetTemplateSettings
   showBroadsheetSummary: boolean;
   showBroadsheetStatistics: boolean;
   showBroadsheetStudentPhoto: boolean;
+
+  broadsheetAssessmentHierarchyDisplay: BroadsheetAssessmentHierarchyDisplay;
+  broadsheetShowAssessmentGroupHeaders: boolean;
+  broadsheetMaximumAssessmentDepth: number | null;
+
+  showAssessmentParentItems: boolean;
+  showAssessmentChildItems: boolean;
+  showCalculatedAssessmentItems: boolean;
+  indentAssessmentChildren: boolean;
+  showAssessmentMaximumScores: boolean;
+  showAssessmentWeights: boolean;
+  showAssessmentRawScores: boolean;
+  showAssessmentWeightedScores: boolean;
+  showAssessmentHierarchyPath: boolean;
 
   broadsheetTitleLabel: string;
   broadsheetGeneratedDateLabel: string;
@@ -326,6 +381,21 @@ export const DEFAULT_BROADSHEET_SETTINGS: ResolvedBroadsheetTemplateSettings = {
   showBroadsheetStudentPhoto: false,
 
   showBroadsheetAssessmentBreakdown: true,
+
+  broadsheetAssessmentHierarchyDisplay: "parents_only",
+  broadsheetShowAssessmentGroupHeaders: true,
+  broadsheetMaximumAssessmentDepth: null,
+
+  showAssessmentParentItems: true,
+  showAssessmentChildItems: false,
+  showCalculatedAssessmentItems: true,
+  indentAssessmentChildren: true,
+  showAssessmentMaximumScores: true,
+  showAssessmentWeights: false,
+  showAssessmentRawScores: true,
+  showAssessmentWeightedScores: true,
+  showAssessmentHierarchyPath: false,
+
   showBroadsheetWeightedTotal: true,
   showBroadsheetPercentage: true,
   showBroadsheetGrade: true,

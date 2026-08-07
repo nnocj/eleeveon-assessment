@@ -1,0 +1,25 @@
+export { default as ActivityFeed } from "./ActivityFeed";
+export { default as CalendarPreview } from "./CalendarPreview";
+export { default as DashboardBackground } from "./DashboardBackground";
+export { default as DashboardGreeting } from "./DashboardGreeting";
+export { default as DashboardHeader } from "./DashboardHeader";
+export { default as DashboardHeroImage } from "./DashboardHeroImage";
+export { default as DashboardSection } from "./DashboardSection";
+export { default as DashboardWidgets, DashboardWidget } from "./DashboardWidgets";
+export { default as QuickActionGrid } from "./QuickActionGrid";
+export { default as StatisticCard } from "./StatisticCard";
+export { default as StatisticGrid } from "./StatisticGrid";
+export { default as WelcomeHero } from "./WelcomeHero";
+
+export type * from "./ActivityFeed";
+export type * from "./CalendarPreview";
+export type * from "./DashboardBackground";
+export type * from "./DashboardGreeting";
+export type * from "./DashboardHeader";
+export type * from "./DashboardHeroImage";
+export type * from "./DashboardSection";
+export type * from "./DashboardWidgets";
+export type * from "./QuickActionGrid";
+export type * from "./StatisticCard";
+export type * from "./StatisticGrid";
+export type * from "./WelcomeHero";

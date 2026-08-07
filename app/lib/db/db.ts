@@ -3,7 +3,7 @@ import { SyncStatus } from "../constants/syncStatus";
 import { APP_DB_VERSION, APP_DB_NAME } from "./db-version";
 import { LOCAL_PROTECTION_STORES, type DatabaseRecoveryBackup, type LocalMigrationJournal, type SyncQuarantineRecord } from "./db-migrations";
 import type { WebsiteTemplateSettings } from "../websites/types";
-import { APP_DB_STORES_V1, LEGACY_DB_STORES } from "./schema";
+import { registerSchemas } from "./schema/build-schema";
 
 // ======================================================
 // GLOBAL TYPES
@@ -1852,6 +1852,12 @@ export interface ClassSubject extends BaseSync {
   bannerImageMediaId?: string;
 
   // =========================
+  // REPORT / DISPLAY ORDER
+  // =========================
+  /** Lower values appear first on report cards and broadsheets. */
+  orderIndex?: number;
+
+  // =========================
   // STATUS
   // =========================
   active?: boolean;
@@ -1937,6 +1943,8 @@ export interface AssessmentApplicability extends BaseSync {
   classSubjectId: string; // 🔥 ONLY source of truth
 
   assessmentStructureId: string;
+  gradingStructureId?: string;
+  /** @deprecated Read compatibility for records created before the logical rename. */
   gradingSystemId?: string;
 
   organizationId?: string;
@@ -1953,18 +1961,18 @@ export interface AssessmentApplicability extends BaseSync {
 // GRADING & ASSESSMENT
 // ======================================================
 
-export type GradingSystemType =
+export type GradingStructureType =
   | "percentage"
   | "gpa"
   | "competency"
   | "custom";
 
-export interface GradingSystem extends BaseSync {
+export interface GradingStructure extends BaseSync {
   schoolId: string;
   branchId: string;
   organizationId?: string;
   name: string;
-  type: GradingSystemType;
+  type: GradingStructureType;
   description?: string;
   photo?: string;
   photoMediaId?: string;
@@ -1976,7 +1984,9 @@ export interface GradingSystem extends BaseSync {
 export interface GradeRule extends BaseSync {
   schoolId: string;
   branchId: string;
-  gradingSystemId: string;
+  gradingStructureId: string;
+  /** @deprecated Mirror gradingStructureId during the no-version-bump transition. */
+  gradingSystemId?: string;
   minScore: number;
   maxScore: number;
   grade: string;
@@ -2037,6 +2047,14 @@ export interface AssessmentStructureItem extends BaseSync {
   allowChildEntry?: boolean;
   showChildrenOnReport?: boolean;
   showParentOnReport?: boolean;
+  /** Number of decimal places used by recursive calculations. */
+  calculationPrecision?: number;
+  /** Scale child calculations into the parent contribution weight. */
+  normalizeChildrenToParentWeight?: boolean;
+  /** Minimum completed children required before a parent is complete. */
+  minimumRequiredChildren?: number | null;
+  /** Allows an authorised direct override of a calculated parent. */
+  allowManualOverride?: boolean;
   metadata?: Record<string, unknown> | null;
 }
 
@@ -2052,6 +2070,8 @@ export interface AssessmentComponent extends BaseSync {
   subjectId: string;
   academicPeriodId: string;
   assessmentStructureId: string;
+  gradingStructureId?: string;
+  /** @deprecated Legacy foreign-key compatibility. */
   gradingSystemId?: string;
   active: boolean;
 }
@@ -2066,6 +2086,8 @@ export interface AssessmentEntry extends BaseSync {
   academicStructureId?: string;
   academicPeriodId: string;
 
+  gradingStructureId?: string;
+  /** @deprecated Legacy foreign-key compatibility. */
   gradingSystemId?: string;
   assessmentStructureId?: string;
   assessmentStructureItemId: string;
@@ -2075,6 +2097,10 @@ export interface AssessmentEntry extends BaseSync {
   subjectId: string;
 
   score: number;
+  entrySource?: "direct" | "imported" | "override";
+  rawScore?: number;
+  normalizedScore?: number;
+  overrideReason?: string;
   grade?: string;
   remark?: string;
 
@@ -2097,6 +2123,8 @@ export interface ComputedResult extends BaseSync {
   academicStructureId: string;
   academicPeriodId: string;
 
+  gradingStructureId?: string;
+  /** @deprecated Legacy foreign-key compatibility. */
   gradingSystemId?: string;
 
   total: number;
@@ -2107,6 +2135,12 @@ export interface ComputedResult extends BaseSync {
   remark?: string;
   gpa?: number;
   position?: number;
+
+  assessmentProjectionVersion?: number;
+  assessmentTreeHash?: string;
+  assessmentBreakdown?: unknown[];
+  calculationWarnings?: string[];
+  calculatedAt?: number;
 
   published?: boolean;
   locked?: boolean;
@@ -2948,6 +2982,24 @@ export interface ReportCardTemplateSetting extends BaseSync {
   // =========================
   showTeacherNames?: boolean;
   showAssessmentBreakdown?: boolean;
+  assessmentHierarchyDisplay?:
+    | "parents_only"
+    | "children_only"
+    | "parents_and_children";
+  showAssessmentParentItems?: boolean;
+  showAssessmentChildItems?: boolean;
+  showCalculatedAssessmentItems?: boolean;
+  indentAssessmentChildren?: boolean;
+  showAssessmentGroupHeaders?: boolean;
+  flattenSingleChildAssessmentGroups?: boolean;
+  assessmentMaximumVisibleDepth?: number | null;
+  broadsheetAssessmentHierarchyDisplay?:
+    | "parents_only"
+    | "children_only"
+    | "parents_and_children"
+    | "compact";
+  broadsheetShowAssessmentGroupHeaders?: boolean;
+  broadsheetMaximumAssessmentDepth?: number | null;
   showSubjectTotal?: boolean;
   showSubjectAverage?: boolean;
   showSubjectGrade?: boolean;
@@ -4639,7 +4691,7 @@ export class EleeveonDatabase extends Dexie {
   classTeachers!: Table<ClassTeacher>;
   studentEnrollments!: Table<StudentEnrollment>;
 
-  gradingSystems!: Table<GradingSystem>;
+  gradingStructures!: Table<GradingStructure>;
   gradeRules!: Table<GradeRule>;
 
   assessmentStructures!: Table<AssessmentStructure>;
@@ -4843,39 +4895,12 @@ export class EleeveonDatabase extends Dexie {
     super(APP_DB_NAME);
 
     /**
-     * Version 1 remains registered as the historical baseline.
-     * Do not remove it after users have created an EleeveonDB database.
+     * All historical and current schemas are registered through one builder.
+     * Version 4 attaches the idempotent assessment hierarchy migration.
      */
-    this.version(1).stores({
-      ...LEGACY_DB_STORES,
-      ...LOCAL_PROTECTION_STORES,
-    });
+    registerSchemas(this);
 
-    /**
-     * Version 2 is retained as the exact pre-Platform-V2 schema. Keeping this
-     * historical declaration makes upgrades from currently installed v2
-     * databases deterministic and prevents the new indexes from being treated
-     * as if they had always existed.
-     */
-    this.version(2).stores({
-      ...LEGACY_DB_STORES,
-      ...LOCAL_PROTECTION_STORES,
-    });
-
-    /**
-     * The current APP_DB_VERSION activates the complete Platform V2 schema, including:
-     * - websiteTemplateSettings
-     * - websiteTemplateAssignments
-     * - Portal Highlight placement indexing for hero and gallery records
-     *
-     * APP_DB_STORES_V1 currently represents the complete schema inventory, so
-     * re-declaring it here lets Dexie compare the installed v1 database against
-     * the current schema and create any newly introduced stores and indexes safely.
-     */
-    this.version(APP_DB_VERSION).stores({
-      ...APP_DB_STORES_V1,
-      ...LOCAL_PROTECTION_STORES,
-    });
+    
   }
 }
 

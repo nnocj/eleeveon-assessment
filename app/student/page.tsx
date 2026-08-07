@@ -22,7 +22,6 @@ import { STUDENT_ROLES } from "../lib/auth/roleRedirect";
 
 import Studentdashboard from "./modules/Studentdashboard";
 //import MyAttendance from "./modules/MyAttendance";
-import Myresults from "./modules/Myresults";
 import MyReport from "./modules/MyReport";
 import MyCumulativeRecords from "./modules/MyCumulativeRecords";
 //import Announcements from "./modules/Announcements";
@@ -78,7 +77,6 @@ function StudentDashboardRoute({ navigate }: RouteProps) {
 const ROUTES = {
   studentDashboard: StudentDashboardRoute,
   //myAttendance: MyAttendance,
-  myResults: Myresults,
   myCumulativeRecords: MyCumulativeRecords,
   myReport: MyReport,
   /*announcements: Announcements,

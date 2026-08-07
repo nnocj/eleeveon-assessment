@@ -49,7 +49,7 @@ const CRITICAL_TABLES = [
   "studentEnrollments",
 
   // Hierarchical assessments and reporting.
-  "gradingSystems",
+  "gradingStructures",
   "gradeRules",
   "assessmentStructures",
   "assessmentStructureItems",

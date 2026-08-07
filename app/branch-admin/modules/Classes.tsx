@@ -3593,5 +3593,23 @@ const css = `
     grid-template-columns: repeat(2,minmax(0,1fr));
   }
 }
+@media (min-width:980px){
+  .ba-modal-backdrop,
+  .ba-sheet-backdrop{
+    top:var(--eds-shell-top-offset,0px);
+    right:0;
+    bottom:0;
+    left:var(--portal-content-left,0px);
+    width:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+  .ba-modal,
+  .ba-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
 
 `;

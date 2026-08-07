@@ -48,6 +48,11 @@ import { useSettings } from "../context/settings-context";
 import { useTheme } from "../context/theme-context";
 import { appearanceIdentityFor, appearanceIdentityMatches, appearanceScopeForRole } from "../lib/theme/appearanceScope";
 import {
+  useWorkspaceDisplayNames,
+  workspaceScopeLabel,
+  workspaceDetailLabel,
+} from "../lib/workspaces/useWorkspaceDisplayNames";
+import {
   collectUserMemberships,
   getPortalPathByRole,
   type UserMembership,
@@ -202,20 +207,28 @@ function membershipKey(membership: UserMembership, fallback = "membership") {
   );
 }
 
-function roleScope(membership: UserMembership) {
-  if (!membership.schoolId && !membership.branchId) return "Account level";
-  if (membership.schoolId && membership.branchId) {
-    return `School ${membership.schoolId} · Branch ${membership.branchId}`;
-  }
-  if (membership.schoolId) return `School ${membership.schoolId}`;
-  return `Branch ${membership.branchId || "workspace"}`;
+function roleScope(
+  membership: UserMembership,
+  names: ReturnType<
+    typeof useWorkspaceDisplayNames
+  >,
+) {
+  return workspaceScopeLabel(
+    membership,
+    names,
+  );
 }
 
-function roleDetail(membership: UserMembership) {
-  if (membership.teacherId) return `Teacher profile ${membership.teacherId}`;
-  if (membership.studentId) return `Student profile ${membership.studentId}`;
-  if (membership.parentId) return `Parent profile ${membership.parentId}`;
-  return "Workspace access";
+function roleDetail(
+  membership: UserMembership,
+  names: ReturnType<
+    typeof useWorkspaceDisplayNames
+  >,
+) {
+  return workspaceDetailLabel(
+    membership,
+    names,
+  );
 }
 
 function safeName(value?: string | null) {
@@ -356,6 +369,11 @@ export default function SelectRolePage() {
     return unique;
   }, [account, user]);
 
+  const workspaceNames =
+    useWorkspaceDisplayNames(
+      memberships,
+    );
+
   const roleRows = useMemo<RoleView[]>(
     () =>
       memberships.map((membership, index) => {
@@ -369,12 +387,18 @@ export default function SelectRolePage() {
           role: membership.role,
           label: roleLabel(membership.role),
           icon: roleIcon(membership.role),
-          scope: roleScope(membership),
-          detail: roleDetail(membership),
+          scope: roleScope(
+            membership,
+            workspaceNames,
+          ),
+          detail: roleDetail(
+            membership,
+            workspaceNames,
+          ),
           tone: roleTone(membership.role),
         };
       }),
-    [memberships]
+    [memberships, workspaceNames]
   );
 
   useEffect(() => {

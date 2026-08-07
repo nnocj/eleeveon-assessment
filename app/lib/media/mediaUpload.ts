@@ -612,7 +612,8 @@ export async function uploadMediaAsset(
 
   const ownerId =
     optionalString(
-      asset.ownerId,
+      asset.ownerId ??
+        asset.ownerLocalId,
     );
 
   const ownerTempKey =

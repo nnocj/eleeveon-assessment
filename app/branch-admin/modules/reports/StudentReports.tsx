@@ -1,50 +1,34 @@
 "use client";
 
 /**
- * reports/StudentReports.tsx
+ * app/branch-admin/modules/StudentReports.tsx
  * ---------------------------------------------------------
- * BRANCH-LOCKED ACADEMIC REPORT MODULE
+ * BRANCH ADMIN — STUDENT REPORTS
  * ---------------------------------------------------------
  *
- * No branch selector.
+ * Branch-locked report workspace:
+ * - resolves account, school and branch through useBranchWorkspaceScope()
+ * - exposes the full selected branch, not teacher-selected classes only
+ * - keeps branch selection outside this module and follows the active role portal
+ * - uses branch-table-aware revision tracking for offline-first refreshes
  *
- * Workspace-session aligned:
- * - reads the selected workspace session written by /select-role first
- * - falls back to ActiveMembershipProvider, then ActiveBranchContext/settings
- * - prevents reports from accidentally using stale school/branch context
- *   left behind by another role or portal
- * - all report engine data reads now use the resolved workspace schoolId and branchId
+ * Report behavior:
+ * - supports single-student and whole-class report generation
+ * - uses the shared branch-admin report engine, template router and export tools
+ * - resolves school/branch branding and student media from mediaAssets/mediaBlobs
+ * - keeps branch report-card template assignments and settings
+ * - injects branch context and theme values into report datasets
  *
- * Report card branch + theme update:
- * - automatically supplies the locked branch/campus name into each report-card dataset
- * - passes the golden primary color into the report preview scope as --ba-primary
- * - keeps term/class selection behavior unchanged
- *
- * Media asset report update:
- * - resolves report images from mediaAssets/mediaBlobs before building report datasets
- * - prefers active owner-bound media over legacy string fields
- * - prevents removed/deleted branch-setting media from reappearing on report cards
- * - injects resolved student photo, school logo, report background, watermark and signature URLs
- * - student report photos are now bound to report.studentId, not the filter state,
- *   so the selected/generated student is always the one whose photo appears
- *
- * Golden cleanup: no visible readiness/scope cards; top row stays Search + Print + Filter + More only.
- *
- * Report template system update:
- * - loads reportCardTemplates, reportCardTemplateSettings and reportCardTemplateAssignments
- * - resolves the branch default template assignment from Branch Settings
- * - injects the resolved template/settings into each report dataset
- * - passes template/settings into the new StudentReportCard template router
- * - keeps Classic Formal as a safe fallback while other templates are being implemented
+ * Role-portal behavior:
+ * - filter and More sheets remain inside the Branch Admin portal content area
+ * - desktop overlays respect --eds-shell-top-offset and --portal-content-left
+ * - no teacher membership, teacher profile or class-teacher gate is required
  */
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAccount } from "@/app/context/account-context";
-
 import { useSettings } from "../../../context/settings-context";
 import { useActiveBranch } from "../../../context/active-branch-context";
-import { useActiveMembership } from "../../../context/active-membership-context";
 
 import {
   db,
@@ -60,7 +44,7 @@ import {
   ClassSubject,
   ComputedResult,
   GradeRule,
-  GradingSystem,
+  GradingStructure,
   ReportCard,
   ReportCardItem,
   School,
@@ -108,8 +92,9 @@ import {
   normalizeStudentReportTemplateDefinition,
 } from "./shared/ReportTemplateTypes";
 
-import { useDataRevision } from "../../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../../hooks/useBackgroundLoader";
+import { useBranchWorkspaceScope } from "../../../hooks/useBranchWorkspaceScope";
+import { useBranchTableRevision } from "../../../hooks/useBranchTableRevision";
 const TemplateAwareStudentReportCard =
   StudentReportCard as React.ComponentType<any>;
 
@@ -146,7 +131,6 @@ function firstExistingId<T extends { id?: EntityId }>(rows: T[]): string | undef
   return id || undefined;
 }
 
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 const STUDENT_REPORT_PRINT_ZONE_ID = "student-report-print-zone";
 
 const REPORT_MEDIA_OWNER_STUDENTS = String(
@@ -200,21 +184,6 @@ function fallbackMediaValue(
   return safeRecordMediaValue(row[stringField]);
 }
 
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  teacherId?: string | null;
-  studentId?: string | null;
-  parentId?: string | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
-};
-
 function idOf(value: unknown): string {
   if (value === null || value === undefined) return "";
 
@@ -235,97 +204,6 @@ function cleanId(value: unknown): string {
   return idOf(value);
 }
 
-function safeStorageRead(key: string) {
-  if (typeof window === "undefined") return null;
-
-  try {
-    return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership() {
-  return safeJsonRead<Record<string, any>>("activeMembership");
-}
-
-function firstLocalId(...values: unknown[]): string {
-  for (const value of values) {
-    const id = idOf(value);
-    if (id) return id;
-  }
-
-  return "";
-}
-
-function selectedWorkspaceSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeSchoolId?: unknown;
-  activeSchool?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeStorageRead("activeSchoolId"),
-  );
-}
-
-function selectedWorkspaceBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeBranchId?: unknown;
-  activeBranch?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeStorageRead("activeBranchId"),
-  );
-}
-
 function labelOf<T extends { id?: EntityId; name?: string }>(
   rows: T[],
   id?: EntityId,
@@ -336,40 +214,51 @@ function labelOf<T extends { id?: EntityId; name?: string }>(
 }
 
 export default function StudentReports() {
-  const dataRevision = useDataRevision();
+  const dataRevision = useBranchTableRevision([
+    "schools",
+    "branches",
+    "schoolBranchSettings",
+    "academicStructures",
+    "academicPeriods",
+    "students",
+    "parents",
+    "teachers",
+    "classes",
+    "subjects",
+    "classSubjects",
+    "classTeachers",
+    "studentEnrollments",
+    "studentParents",
+    "assessmentApplicabilities",
+    "assessmentStructures",
+    "assessmentStructureItems",
+    "assessmentEntries",
+    "gradingStructures",
+    "gradeRules",
+    "attendance",
+    "studentAttendanceSummaries",
+    "computedResults",
+    "reportCards",
+    "reportCardItems",
+    "reportCardTemplates",
+    "reportCardTemplateSettings",
+    "reportCardTemplateAssignments",
+    "mediaAssets",
+    "mediaBlobs",
+  ]);
 
   const router = useRouter();
-
-  const { accountId, loading: accountLoading, authenticated } = useAccount();
-
   const { settings, loading: settingsLoading } = useSettings();
-
+  const { activeSchool, activeBranch } = useActiveBranch();
+  const workspace = useBranchWorkspaceScope();
   const {
-    activeSchool,
-    activeSchoolId,
-    activeBranch,
-    activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch();
-  const { activeMembership } = useActiveMembership();
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedWorkspaceSchoolId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeSchoolId,
-    activeSchool: activeSchool as any,
-    settings: settings as any,
-  });
-
-  const branchId = selectedWorkspaceBranchId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeBranchId,
-    activeBranch: activeBranch as any,
-    settings: settings as any,
-  });
+    accountId,
+    schoolId,
+    branchId,
+    authenticated,
+    restoring: accountLoading,
+    branchLoading: contextLoading,
+  } = workspace;
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
 
@@ -431,7 +320,7 @@ export default function StudentReports() {
   const [assessmentEntries, setAssessmentEntries] = useState<AssessmentEntry[]>(
     [],
   );
-  const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
+  const [gradingStructures, setGradingStructures] = useState<GradingStructure[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
   const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
@@ -496,7 +385,7 @@ export default function StudentReports() {
     setAssessmentStructures([]);
     setAssessmentStructureItems([]);
     setAssessmentEntries([]);
-    setGradingSystems([]);
+    setGradingStructures([]);
     setGradeRules([]);
     setAttendance([]);
     setStudentAttendanceSummaries([]);
@@ -567,7 +456,12 @@ export default function StudentReports() {
   };
 
   const load = async () => {
-    if (!authenticated || !accountId || !schoolId || !branchId) {
+    if (
+      !authenticated ||
+      !accountId ||
+      !schoolId ||
+      !branchId
+    ) {
       clearState();
       setPageLoading(false);
       return;
@@ -624,7 +518,7 @@ export default function StudentReports() {
         db.assessmentStructures.toArray(),
         db.assessmentStructureItems.toArray(),
         db.assessmentEntries.toArray(),
-        db.gradingSystems.toArray(),
+        db.gradingStructures.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
         (db as any).studentAttendanceSummaries?.toArray?.() || [],
@@ -672,6 +566,22 @@ export default function StudentReports() {
       const scopedReportCards = reportCardRows.filter(sameTenant);
       const scopedSettings = schoolBranchSettingRows.filter(sameTenant);
       const currentSetting = scopedSettings[0];
+
+      const scopedClassTeacherRows = classTeacherRows.filter(
+        (row: any) => sameTenant(row) && row.active !== false,
+      );
+
+      const scopedEnrollmentRows = enrollmentRows.filter(
+        (row: any) => sameTenant(row) && !row.isDeleted,
+      );
+
+      const scopedClassSubjectRows = classSubjectRows.filter(
+        (row: any) => sameTenant(row) && row.active !== false,
+      );
+
+      const scopedReportCardsForBranch = scopedReportCards.filter(
+        (row: any) => !row.isDeleted,
+      );
 
       const scopedReportCardTemplates = (
         reportCardTemplateRows as ReportCardTemplateLike[]
@@ -826,7 +736,14 @@ export default function StudentReports() {
       );
 
       const scopedStudentsWithMedia = await Promise.all(
-        studentRows.filter(sameTenant).map(async (student: any) => ({
+        studentRows
+          .filter(
+            (student: any) =>
+              sameTenant(student) &&
+              !student.isDeleted &&
+              student.status !== "withdrawn",
+          )
+          .map(async (student: any) => ({
           ...student,
           photo:
             (await resolveReportMediaUrl({
@@ -844,7 +761,7 @@ export default function StudentReports() {
         scopedAcademicPeriods.map((row) => idOf(row.id)).filter(Boolean),
       );
       const branchReportCardIds = new Set<string>(
-        scopedReportCards.map((row) => idOf(row.id)).filter(Boolean),
+        scopedReportCardsForBranch.map((row) => idOf(row.id)).filter(Boolean),
       );
 
       reportMediaUrls.forEach((url) => {
@@ -859,21 +776,23 @@ export default function StudentReports() {
       setAcademicPeriods(scopedAcademicPeriods);
       setStudents(scopedStudentsWithMedia as Student[]);
       setParents(parentRows.filter(sameTenant));
-      setTeachers(teacherRows.filter(sameTenant));
+      setTeachers(
+        teacherRows.filter(
+          (row: any) => sameTenant(row) && row.active !== false,
+        ),
+      );
       setClasses(
-        classRows.filter((row) => sameTenant(row) && row.active !== false),
+        classRows.filter(
+          (row: any) => sameTenant(row) && row.active !== false,
+        ),
       );
       setSubjects(
         subjectRows.filter((row) => sameTenant(row) && row.active !== false),
       );
-      setClassSubjects(
-        classSubjectRows.filter(
-          (row) => sameTenant(row) && row.active !== false,
-        ),
-      );
+      setClassSubjects(scopedClassSubjectRows);
       setStudentParents(studentParentRows.filter(sameTenant));
-      setStudentEnrollments(enrollmentRows.filter(sameTenant));
-      setClassTeachers(classTeacherRows.filter(sameTenant));
+      setStudentEnrollments(scopedEnrollmentRows);
+      setClassTeachers(scopedClassTeacherRows);
       setAssessmentApplicabilities(
         applicabilityRows.filter(
           (row) => sameTenant(row) && row.active !== false,
@@ -887,21 +806,33 @@ export default function StudentReports() {
           (row) => sameTenant(row) && row.active !== false,
         ),
       );
-      setAssessmentEntries(entryRows.filter(sameTenant));
-      setGradingSystems(
+      setAssessmentEntries(
+        entryRows.filter(
+          (row: any) => sameTenant(row) && !row.isDeleted,
+        ),
+      );
+      setGradingStructures(
         gradingRows.filter((row) => sameTenant(row) && row.active !== false),
       );
       setGradeRules(
         ruleRows.filter((row) => sameTenant(row) && row.active !== false),
       );
-      setAttendance(attendanceRows.filter(sameTenant));
+      setAttendance(
+        attendanceRows.filter(
+          (row: any) => sameTenant(row) && !row.isDeleted,
+        ),
+      );
       setStudentAttendanceSummaries(
         (studentAttendanceSummaryRows as StudentAttendanceSummary[]).filter(
           sameTenant,
         ),
       );
-      setComputedResults(computedRows.filter(sameTenant));
-      setReportCards(scopedReportCards);
+      setComputedResults(
+        computedRows.filter(
+          (row: any) => sameTenant(row) && !row.isDeleted,
+        ),
+      );
+      setReportCards(scopedReportCardsForBranch);
 
       setReportCardItems(
         reportCardItemRows.filter((row) => {
@@ -933,7 +864,13 @@ export default function StudentReports() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, accountId, schoolId, branchId, dataRevision]);
+  }, [
+    authenticated,
+    accountId,
+    schoolId,
+    branchId,
+    dataRevision,
+  ]);
 
   useEffect(() => {
     setFilters((prev) => {
@@ -1029,6 +966,20 @@ export default function StudentReports() {
     filters.academicPeriodId,
   ]);
 
+  useEffect(() => {
+    if (
+      filters.classId &&
+      !classes.some((row: any) => idOf(row.id) === idOf(filters.classId))
+    ) {
+      setFilters((prev) => ({
+        ...prev,
+        classId: undefined,
+        classSubjectId: undefined,
+        studentId: undefined,
+      }));
+    }
+  }, [classes, filters.classId]);
+
   const filteredClassSubjects = useMemo(() => {
     return classSubjects.filter((row) => {
       if (filters.classId && row.classId !== filters.classId) return false;
@@ -1105,7 +1056,7 @@ export default function StudentReports() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,
@@ -1132,7 +1083,7 @@ export default function StudentReports() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,
@@ -1168,7 +1119,7 @@ export default function StudentReports() {
     reportBranch?.name ||
     activeBranch?.name ||
     branches[0]?.name ||
-    "Assigned Branch"
+    "Selected Branch"
   }`;
 
   const selectedClassName = labelOf(classes, filters.classId);
@@ -1504,7 +1455,7 @@ export default function StudentReports() {
       <State
         primary={primary}
         title="Opening Student Reports..."
-        text="Checking account, assigned branch, academic setup, reports, results and attendance records."
+        text="Checking branch students, classes, reports, results, attendance and report templates."
       />
     );
   }
@@ -1821,8 +1772,7 @@ function FilterSheet({
           <div>
             <h2>Filters</h2>
             <p>
-              Choose the report scope. Branch stays locked to the assigned
-              branch.
+              Choose the report scope. The branch and class access stay locked to your class-teacher assignment.
             </p>
           </div>
           <button type="button" onClick={onClose} aria-label="Close filters">
@@ -1905,7 +1855,7 @@ function FilterSheet({
                 }))
               }
             >
-              <option value="">Select class</option>
+              <option value="">Select selected class</option>
               {filteredClasses.map((item: any) => (
                 <option key={item.id} value={item.id}>
                   {item.name}
@@ -3621,6 +3571,31 @@ const css = `
   .student-reports-page .ba-search input {
     min-height: 38px;
     font-size: 13px;
+  }
+}
+
+
+/* Role-portal modal/sheet containment -------------------------------- */
+@media (min-width:980px){
+  .ba-sheet-backdrop,
+  .ba-modal-backdrop{
+    position:fixed;
+    top:var(--eds-shell-top-offset,0px) !important;
+    right:0 !important;
+    bottom:0 !important;
+    left:var(--portal-content-left,0px) !important;
+    inset:auto 0 0 var(--portal-content-left,0px) !important;
+    width:auto;
+    height:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .ba-sheet,
+  .ba-modal{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
   }
 }
 

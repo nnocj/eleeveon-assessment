@@ -17,16 +17,19 @@
  *   item.report.overallPosition
  *   item.report.subjectResults
  *
- * Rule:
- *   average < 50  => Repeat
- *   average >= 50 => Promote
- *   no next class => Graduate
+ * Configurable recommendation rules:
+ * - average percentage with a user-entered threshold;
+ * - total score with a user-entered threshold;
+ * - class position with a user-entered maximum promoted position;
+ * - failed-subject count with configurable pass percentage and allowed failures;
+ * - manual recommendation mode;
+ * - no next class still recommends graduation.
  *
  * Production rules:
  * - Signed-in account required.
  * - Active school + branch required.
  * - All reads/writes are scoped by the selected workspace accountId + schoolId + branchId.
- * - Workspace source follows StudentReports: open workspace -> active membership -> active branch/settings.
+ * - Workspace scope follows the shared role-portal resolver used by SubjectSetup.tsx.
  * - Tenant matching is tolerant so string/number IDs and partially synced rows are not wrongly filtered out.
  * - Report engine dataset is same-tenant filtered.
  * - Mobile-first compact row cards like StudentEnrollment; desktop keeps a compact table option.
@@ -39,9 +42,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { useAccount } from "../../context/account-context";
 import { useActiveBranch } from "../../context/active-branch-context";
-import { useActiveMembership } from "../../context/active-membership-context";
 import { useSettings } from "../../context/settings-context";
 
 import {
@@ -59,7 +60,7 @@ import {
   ClassTeacher,
   ComputedResult,
   GradeRule,
-  GradingSystem,
+  GradingStructure,
   Parent,
   ReportCard,
   ReportCardItem,
@@ -75,7 +76,17 @@ import {
   Teacher,
 } from "../../lib/db/db";
 
-import { prepareSyncData } from "../../lib/sync/syncUtils";
+import {
+  createLocal,
+  prepareSyncData,
+  updateLocal,
+} from "../../lib/sync/syncUtils";
+
+import {
+  getMediaObjectUrl,
+  getOwnerFieldMediaAsset,
+  revokeMediaObjectUrl,
+} from "../../lib/media/mediaAssetUtils";
 
 import { buildReportEngineOutput } from "./reports/engine/report-engine";
 import type {
@@ -84,8 +95,9 @@ import type {
   ReportFiltersState,
 } from "./reports/engine/report-types";
 
-import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
+import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
 // ======================================================
 // TYPES
 // ======================================================
@@ -93,6 +105,17 @@ import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
 type Decision = "promote" | "repeat" | "graduate";
 type DecisionFilter = "all" | Decision | "selected" | "notProcessed";
 type ViewMode = "cards" | "table";
+
+type PromotionBasis =
+  | "average_percentage"
+  | "total_score"
+  | "class_position"
+  | "failed_subjects"
+  | "manual";
+
+type ManualDefaultDecision =
+  | "promote"
+  | "repeat";
 
 type TenantRow = {
   accountId?: string;
@@ -116,8 +139,10 @@ type PromotionRow = {
   average: number;
   position?: number;
   subjectCount: number;
+  failedSubjectCount: number;
 
   recommendation: Decision;
+  recommendationReason: string;
   finalDecision: Decision;
   recommendedClassId?: string;
   finalClassId?: string;
@@ -154,23 +179,6 @@ function safeNumber(value: unknown, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
-
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  teacherId?: string | null;
-  studentId?: string | null;
-  parentId?: string | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
-};
-
 function cleanId(value: unknown): string {
   if (value === null || value === undefined) return "";
   return String(value).trim();
@@ -184,97 +192,6 @@ function sameTextId(a: unknown, b: unknown) {
   const left = String(a ?? "").trim();
   const right = String(b ?? "").trim();
   return !!left && !!right && left === right;
-}
-
-function safeStorageRead(key: string) {
-  if (typeof window === "undefined") return null;
-
-  try {
-    return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership() {
-  return safeJsonRead<Record<string, any>>("activeMembership");
-}
-
-function firstLocalId(...values: unknown[]) {
-  for (const value of values) {
-    const parsed = idOf(value);
-    if (parsed) return parsed;
-  }
-
-  return "";
-}
-
-function selectedWorkspaceSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeSchoolId?: unknown;
-  activeSchool?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeStorageRead("activeSchoolId"),
-  );
-}
-
-function selectedWorkspaceBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeBranchId?: unknown;
-  activeBranch?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeStorageRead("activeBranchId"),
-  );
 }
 
 function tenantMatches(
@@ -316,12 +233,126 @@ function sortNamed<T extends { name?: string; order?: number; id?: string }>(
   });
 }
 
-function recommendationFromAverage(
-  average: number,
-  hasNextClass: boolean,
-): Decision {
-  if (!hasNextClass) return "graduate";
-  return average < 50 ? "repeat" : "promote";
+function recommendationFromCriteria(args: {
+  basis: PromotionBasis;
+  average: number;
+  total: number;
+  position?: number;
+  failedSubjectCount: number;
+  averageThreshold: number;
+  totalThreshold: number;
+  maximumPromotedPosition: number;
+  maximumFailedSubjects: number;
+  manualDefaultDecision: ManualDefaultDecision;
+  hasNextClass: boolean;
+}): {
+  decision: Decision;
+  reason: string;
+} {
+  if (!args.hasNextClass) {
+    return {
+      decision: "graduate",
+      reason:
+        "No next class is available.",
+    };
+  }
+
+  if (
+    args.basis ===
+    "average_percentage"
+  ) {
+    const passed =
+      args.average >=
+      args.averageThreshold;
+
+    return {
+      decision: passed
+        ? "promote"
+        : "repeat",
+      reason: `${args.average.toFixed(
+        2,
+      )}% ${
+        passed ? "meets" : "is below"
+      } the ${args.averageThreshold}% threshold.`,
+    };
+  }
+
+  if (
+    args.basis === "total_score"
+  ) {
+    const passed =
+      args.total >=
+      args.totalThreshold;
+
+    return {
+      decision: passed
+        ? "promote"
+        : "repeat",
+      reason: `Total ${args.total.toFixed(
+        2,
+      )} ${
+        passed ? "meets" : "is below"
+      } the ${args.totalThreshold} threshold.`,
+    };
+  }
+
+  if (
+    args.basis ===
+    "class_position"
+  ) {
+    const position =
+      safeNumber(
+        args.position,
+        Number.POSITIVE_INFINITY,
+      );
+    const passed =
+      Number.isFinite(position) &&
+      position <=
+        args.maximumPromotedPosition;
+
+    return {
+      decision: passed
+        ? "promote"
+        : "repeat",
+      reason: Number.isFinite(position)
+        ? `Position ${position} ${
+            passed
+              ? "is within"
+              : "is outside"
+          } the top ${args.maximumPromotedPosition}.`
+        : "No valid class position is available.",
+    };
+  }
+
+  if (
+    args.basis ===
+    "failed_subjects"
+  ) {
+    const passed =
+      args.failedSubjectCount <=
+      args.maximumFailedSubjects;
+
+    return {
+      decision: passed
+        ? "promote"
+        : "repeat",
+      reason: `${args.failedSubjectCount} failed subject${
+        args.failedSubjectCount === 1
+          ? ""
+          : "s"
+      }; maximum allowed is ${args.maximumFailedSubjects}.`,
+    };
+  }
+
+  return {
+    decision:
+      args.manualDefaultDecision,
+    reason:
+      args.manualDefaultDecision ===
+      "promote"
+        ? "Manual review mode defaults to Promote."
+        : "Manual review mode defaults to Repeat.",
+  };
 }
 
 function decisionTone(decision: Decision): "green" | "orange" | "purple" {
@@ -338,45 +369,259 @@ function isActiveStudent(student: Student) {
   );
 }
 
+function firstImageValue(
+  ...values: unknown[]
+) {
+  for (const value of values) {
+    if (
+      typeof value === "string" &&
+      value.trim()
+    ) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function isDisplayableImageUrl(
+  value: string,
+) {
+  return (
+    value.startsWith("blob:") ||
+    value.startsWith("data:image/") ||
+    value.startsWith("http://") ||
+    value.startsWith("https://") ||
+    value.startsWith("/")
+  );
+}
+
+function StudentPromotionAvatar({
+  student,
+  accountId,
+}: {
+  student: Student;
+  accountId?: string | null;
+}) {
+  const [imageUrl, setImageUrl] =
+    useState<string>("");
+  const [failed, setFailed] =
+    useState(false);
+
+  const studentId =
+    idOf(student.id);
+
+  const directImage =
+    firstImageValue(
+      (student as any)
+        .resolvedPhotoUrl,
+      (student as any)
+        .resolvedProfileImageUrl,
+      (student as any).photoUrl,
+      (student as any)
+        .profilePhotoUrl,
+      (student as any).avatarUrl,
+      (student as any).imageUrl,
+      (student as any).pictureUrl,
+      (student as any).photo,
+      (student as any)
+        .profilePhoto,
+      (student as any).avatar,
+      (student as any).image,
+      (student as any).picture,
+    );
+
+  const directMediaId =
+    firstImageValue(
+      (student as any)
+        .photoMediaId,
+      (student as any)
+        .profilePhotoMediaId,
+      (student as any)
+        .avatarMediaId,
+      (student as any)
+        .imageMediaId,
+      !isDisplayableImageUrl(
+        directImage,
+      )
+        ? directImage
+        : "",
+    );
+
+  useEffect(() => {
+    let cancelled = false;
+    let generatedUrl = "";
+
+    setFailed(false);
+    setImageUrl(
+      isDisplayableImageUrl(
+        directImage,
+      )
+        ? directImage
+        : "",
+    );
+
+    const resolve = async () => {
+      if (!studentId) return;
+
+      try {
+        const asset =
+          await getOwnerFieldMediaAsset({
+            accountId:
+              accountId ||
+              idOf(
+                (student as any)
+                  .accountId,
+              ) ||
+              undefined,
+            ownerTable: "students",
+            ownerId: studentId,
+            fieldKey: "photo",
+          });
+
+        const assetId =
+          idOf(asset?.id) ||
+          directMediaId;
+
+        if (!assetId) return;
+
+        const resolved =
+          await getMediaObjectUrl(
+            assetId,
+          );
+
+        if (
+          cancelled ||
+          !resolved
+        ) {
+          if (
+            resolved?.startsWith(
+              "blob:",
+            )
+          ) {
+            revokeMediaObjectUrl(
+              resolved,
+            );
+          }
+          return;
+        }
+
+        generatedUrl = resolved;
+        setImageUrl(resolved);
+      } catch (error) {
+        console.warn(
+          "[promotion] student photo could not be resolved",
+          {
+            studentId,
+            error,
+          },
+        );
+      }
+    };
+
+    if (
+      !isDisplayableImageUrl(
+        directImage,
+      ) ||
+      directMediaId
+    ) {
+      void resolve();
+    }
+
+    return () => {
+      cancelled = true;
+
+      if (
+        generatedUrl.startsWith(
+          "blob:",
+        )
+      ) {
+        revokeMediaObjectUrl(
+          generatedUrl,
+        );
+      }
+    };
+  }, [
+    accountId,
+    studentId,
+    directImage,
+    directMediaId,
+  ]);
+
+  const showImage =
+    Boolean(imageUrl) &&
+    !failed;
+
+  return (
+    <div className="promo-avatar">
+      {showImage ? (
+        <img
+          src={imageUrl}
+          alt={`${student.fullName} profile`}
+          loading="lazy"
+          onError={() =>
+            setFailed(true)
+          }
+        />
+      ) : (
+        student.fullName
+          .slice(0, 1)
+          .toUpperCase()
+      )}
+    </div>
+  );
+}
+
 // ======================================================
 // COMPONENT
 // ======================================================
 
 export default function PromotionPage() {
-  const dataRevision = useDataRevision();
+  const dataRevision = useBranchTableRevision([
+    "schools",
+    "branches",
+    "schoolBranchSettings",
+    "students",
+    "parents",
+    "studentParents",
+    "teachers",
+    "classes",
+    "classTeachers",
+    "classSubjects",
+    "studentEnrollments",
+    "academicStructures",
+    "academicPeriods",
+    "assessmentApplicabilities",
+    "assessmentStructures",
+    "assessmentStructureItems",
+    "assessmentEntries",
+    "gradingStructures",
+    "gradeRules",
+    "attendance",
+    "studentAttendanceSummaries",
+    "computedResults",
+    "reportCards",
+    "reportCardItems",
+    "studentReportSnapshots",
+    "studentPromotions",
+    "subjects",
+  ]);
 
   const router = useRouter();
-
-  const { accountId, authenticated, loading: accountLoading } = useAccount();
-
   const { settings, loading: settingsLoading } = useSettings();
-
   const {
     activeSchool,
-    activeSchoolId,
     activeBranch,
-    activeBranchId,
-    loading: contextLoading,
   } = useActiveBranch();
-  const { activeMembership } = useActiveMembership();
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedWorkspaceSchoolId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeSchoolId,
-    activeSchool: activeSchool as any,
-    settings: settings as any,
-  });
-
-  const branchId = selectedWorkspaceBranchId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeBranchId,
-    activeBranch: activeBranch as any,
-    settings: settings as any,
-  });
+  const workspace = useBranchWorkspaceScope();
+  const {
+    accountId,
+    schoolId,
+    branchId,
+    authenticated,
+    restoring: accountLoading,
+    branchLoading: contextLoading,
+  } = workspace;
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
 
@@ -419,7 +664,7 @@ export default function PromotionPage() {
   const [assessmentEntries, setAssessmentEntries] = useState<AssessmentEntry[]>(
     [],
   );
-  const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
+  const [gradingStructures, setGradingStructures] = useState<GradingStructure[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
   const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
@@ -451,6 +696,39 @@ export default function PromotionPage() {
   const [rowOverrides, setRowOverrides] = useState<OverrideState>({});
   const [search, setSearch] = useState("");
   const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
+
+  const [promotionBasis, setPromotionBasis] =
+    useState<PromotionBasis>(
+      "average_percentage",
+    );
+  const [
+    averageThreshold,
+    setAverageThreshold,
+  ] = useState(50);
+  const [
+    totalThreshold,
+    setTotalThreshold,
+  ] = useState(0);
+  const [
+    maximumPromotedPosition,
+    setMaximumPromotedPosition,
+  ] = useState(10);
+  const [
+    maximumFailedSubjects,
+    setMaximumFailedSubjects,
+  ] = useState(0);
+  const [
+    subjectPassPercentage,
+    setSubjectPassPercentage,
+  ] = useState(50);
+  const [
+    manualDefaultDecision,
+    setManualDefaultDecision,
+  ] =
+    useState<ManualDefaultDecision>(
+      "promote",
+    );
+
   const [viewMode, setViewMode] = useState<ViewMode>("cards");
   const [filterOpen, setFilterOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -503,7 +781,7 @@ export default function PromotionPage() {
     setAssessmentStructures([]);
     setAssessmentStructureItems([]);
     setAssessmentEntries([]);
-    setGradingSystems([]);
+    setGradingStructures([]);
     setGradeRules([]);
     setAttendance([]);
     setStudentAttendanceSummaries([]);
@@ -542,7 +820,7 @@ export default function PromotionPage() {
         assessmentStructureRows,
         assessmentStructureItemRows,
         assessmentEntryRows,
-        gradingSystemRows,
+        gradingStructureRows,
         gradeRuleRows,
         attendanceRows,
         studentAttendanceSummaryRows,
@@ -569,7 +847,7 @@ export default function PromotionPage() {
         db.assessmentStructures.toArray(),
         db.assessmentStructureItems.toArray(),
         db.assessmentEntries.toArray(),
-        db.gradingSystems.toArray(),
+        db.gradingStructures.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
         db.studentAttendanceSummaries.toArray(),
@@ -646,8 +924,8 @@ export default function PromotionPage() {
         assessmentStructureItemRows.filter(sameTenantLoose),
       );
       setAssessmentEntries(assessmentEntryRows.filter(sameTenantLoose));
-      setGradingSystems(
-        gradingSystemRows.filter(
+      setGradingStructures(
+        gradingStructureRows.filter(
           (row) => sameTenantLoose(row) && row.active !== false,
         ),
       );
@@ -871,7 +1149,7 @@ export default function PromotionPage() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,
@@ -898,7 +1176,7 @@ export default function PromotionPage() {
     assessmentStructures,
     assessmentStructureItems,
     assessmentEntries,
-    gradingSystems,
+    gradingStructures,
     gradeRules,
     attendance,
     studentAttendanceSummaries,
@@ -1095,11 +1373,49 @@ export default function PromotionPage() {
           safeNumber(storedReportCard?.average, 0),
         );
         const position =
-          engineReport?.overallPosition || storedReportCard?.position;
-        const subjectCount = engineReport?.subjectResults?.length || 0;
+          engineReport?.overallPosition ||
+          storedReportCard?.position;
 
-        const hasNextClass = !!defaultToClassId || !!nextAvailableClassId;
-        const recommendation = recommendationFromAverage(average, hasNextClass);
+        const subjectResults =
+          engineReport?.subjectResults ??
+          [];
+
+        const subjectCount =
+          subjectResults.length;
+
+        const failedSubjectCount =
+          subjectResults.filter(
+            (subject: any) =>
+              safeNumber(
+                subject.percentage ??
+                  subject.average ??
+                  subject.score,
+                0,
+              ) <
+              subjectPassPercentage,
+          ).length;
+
+        const hasNextClass =
+          !!defaultToClassId ||
+          !!nextAvailableClassId;
+
+        const recommendationResult =
+          recommendationFromCriteria({
+            basis: promotionBasis,
+            average,
+            total,
+            position,
+            failedSubjectCount,
+            averageThreshold,
+            totalThreshold,
+            maximumPromotedPosition,
+            maximumFailedSubjects,
+            manualDefaultDecision,
+            hasNextClass,
+          });
+
+        const recommendation =
+          recommendationResult.decision;
 
         const alreadyProcessed = branchPromotions.some((row) => {
           if (!sameTextId(row.studentId, student.id)) return false;
@@ -1149,7 +1465,10 @@ export default function PromotionPage() {
           average,
           position,
           subjectCount,
+          failedSubjectCount,
           recommendation,
+          recommendationReason:
+            recommendationResult.reason,
           finalDecision,
           recommendedClassId,
           finalClassId,
@@ -1176,6 +1495,13 @@ export default function PromotionPage() {
     nextAvailableClassId,
     fromAcademicStructureId,
     fromAcademicPeriodId,
+    promotionBasis,
+    averageThreshold,
+    totalThreshold,
+    maximumPromotedPosition,
+    maximumFailedSubjects,
+    subjectPassPercentage,
+    manualDefaultDecision,
   ]);
 
   const filteredRows = useMemo(() => {
@@ -1695,7 +2021,7 @@ export default function PromotionPage() {
     }
 
     const confirmed = window.confirm(
-      `Process ${selectedRows.length} selected student(s)? This will save report snapshots and update enrollments.`,
+      `Process ${selectedRows.length} selected student(s)? This will close the old enrollment, activate the destination enrollment, update each student's active class, and save report snapshots.`,
     );
 
     if (!confirmed) return;
@@ -1765,13 +2091,27 @@ export default function PromotionPage() {
 
         await db.studentPromotions.add(promotionPayload);
 
+        /*
+         * Promotion is one state transition:
+         *
+         * old enrollment -> promoted/completed
+         * destination enrollment -> active
+         * student.currentClassId -> destination class
+         *
+         * The historical enrollment is retained, but it is never left active.
+         */
         if (row.enrollment?.id) {
-          await db.studentEnrollments.update(row.enrollment.id, {
-            status: row.finalDecision === "graduate" ? "completed" : "promoted",
-            endDate: todayISO(),
-            updatedAt: Date.now(),
-            synced: false,
-          } as any);
+          await updateLocal(
+            "studentEnrollments",
+            String(row.enrollment.id),
+            {
+              status:
+                row.finalDecision === "promote"
+                  ? "promoted"
+                  : "completed",
+              endDate: todayISO(),
+            } as Partial<StudentEnrollment>,
+          );
         }
 
         if (
@@ -1780,49 +2120,110 @@ export default function PromotionPage() {
           toAcademicStructureId &&
           toAcademicPeriodId
         ) {
-          const existingNextEnrollment = branchStudentEnrollments.find(
-            (item) => {
-              return (
-                sameTextId(item.studentId, studentId) &&
-                sameTextId(item.classId, row.finalClassId) &&
-                sameTextId(item.academicStructureId, toAcademicStructureId) &&
-                sameTextId(item.academicPeriodId, toAcademicPeriodId) &&
-                item.status === "active" &&
-                !item.isDeleted
-              );
-            },
-          );
+          const destinationEnrollment =
+            branchStudentEnrollments.find(
+              (item) =>
+                sameTextId(
+                  item.studentId,
+                  studentId,
+                ) &&
+                sameTextId(
+                  item.classId,
+                  row.finalClassId,
+                ) &&
+                sameTextId(
+                  item.academicStructureId,
+                  toAcademicStructureId,
+                ) &&
+                sameTextId(
+                  item.academicPeriodId,
+                  toAcademicPeriodId,
+                ) &&
+                !item.isDeleted,
+            );
 
-          if (!existingNextEnrollment) {
-            const enrollmentPayload = prepareSyncData({
+          const destinationPatch:
+            Partial<StudentEnrollment> = {
               accountId,
-              schoolId: schoolId,
-              branchId: branchId,
+              schoolId,
+              branchId,
               studentId,
-              classId: row.finalClassId,
-              academicStructureId: toAcademicStructureId,
-              academicPeriodId: toAcademicPeriodId,
-              startDate: todayISO(),
+              classId:
+                row.finalClassId,
+              academicStructureId:
+                toAcademicStructureId,
+              academicPeriodId:
+                toAcademicPeriodId,
+              startDate:
+                destinationEnrollment?.startDate ||
+                todayISO(),
+              endDate: undefined,
               status: "active",
-            }) as unknown as StudentEnrollment;
+              isDeleted: false,
+            };
 
-            await db.studentEnrollments.add(enrollmentPayload);
+          if (destinationEnrollment?.id) {
+            await updateLocal(
+              "studentEnrollments",
+              String(
+                destinationEnrollment.id,
+              ),
+              destinationPatch,
+            );
+          } else {
+            await createLocal(
+              "studentEnrollments",
+              destinationPatch as unknown as StudentEnrollment,
+            );
           }
 
-          await db.students.update(studentId, {
-            currentClassId: row.finalClassId,
-            status: "active",
-            updatedAt: Date.now(),
-            synced: false,
-          } as any);
+          const localStudent =
+            students.find((item) =>
+              sameTextId(
+                item.id,
+                studentId,
+              ),
+            );
+
+          const localStudentId =
+            idOf(localStudent?.id) ||
+            studentId;
+
+          await updateLocal(
+            "students",
+            localStudentId,
+            {
+              currentClassId:
+                row.finalClassId,
+              status: "active",
+            } as Partial<Student>,
+          );
         }
 
-        if (row.finalDecision === "graduate") {
-          await db.students.update(studentId, {
-            status: "graduated",
-            updatedAt: Date.now(),
-            synced: false,
-          } as any);
+        if (
+          row.finalDecision ===
+          "graduate"
+        ) {
+          const localStudent =
+            students.find((item) =>
+              sameTextId(
+                item.id,
+                studentId,
+              ),
+            );
+
+          const localStudentId =
+            idOf(localStudent?.id) ||
+            studentId;
+
+          await updateLocal(
+            "students",
+            localStudentId,
+            {
+              currentClassId: null,
+              status: "graduated",
+            } as unknown as Partial<Student>,
+          );
         }
       }
 
@@ -1851,7 +2252,10 @@ export default function PromotionPage() {
       toAcademicStructureId,
       toAcademicPeriodId,
       defaultToClassId,
-      decisionFilter !== "all" ? decisionFilter : undefined,
+      decisionFilter !== "all"
+        ? decisionFilter
+        : undefined,
+      promotionBasis,
     ].filter(Boolean).length;
   }, [
     fromAcademicStructureId,
@@ -1861,6 +2265,7 @@ export default function PromotionPage() {
     toAcademicPeriodId,
     defaultToClassId,
     decisionFilter,
+    promotionBasis,
   ]);
 
   const selectedFromClassName = fromClassId
@@ -2025,9 +2430,10 @@ export default function PromotionPage() {
                   onClick={() => setSelectedPromotionStudentId(studentId)}
                   aria-label={`Open ${row.student.fullName} promotion actions`}
                 >
-                  <div className="promo-avatar">
-                    {row.student.fullName.slice(0, 1).toUpperCase()}
-                  </div>
+                  <StudentPromotionAvatar
+                    student={row.student}
+                    accountId={accountId}
+                  />
 
                   <span className="student-main">
                     <strong>{row.student.fullName}</strong>
@@ -2138,6 +2544,12 @@ export default function PromotionPage() {
                         <Chip tone={decisionTone(row.recommendation)}>
                           {decisionLabel[row.recommendation]}
                         </Chip>
+                        <small
+                          className="promotion-recommendation-reason"
+                          title={row.recommendationReason}
+                        >
+                          {row.recommendationReason}
+                        </small>
                       </td>
                       <td>
                         <select
@@ -2238,6 +2650,21 @@ export default function PromotionPage() {
           toAcademicPeriodId={toAcademicPeriodId}
           defaultToClassId={defaultToClassId}
           decisionFilter={decisionFilter}
+          promotionBasis={promotionBasis}
+          averageThreshold={averageThreshold}
+          totalThreshold={totalThreshold}
+          maximumPromotedPosition={
+            maximumPromotedPosition
+          }
+          maximumFailedSubjects={
+            maximumFailedSubjects
+          }
+          subjectPassPercentage={
+            subjectPassPercentage
+          }
+          manualDefaultDecision={
+            manualDefaultDecision
+          }
           branchAcademicStructures={branchAcademicStructures}
           fromPeriods={fromPeriods}
           toPeriods={toPeriods}
@@ -2250,6 +2677,27 @@ export default function PromotionPage() {
           setToAcademicPeriodId={setToAcademicPeriodId}
           setDefaultToClassId={setDefaultToClassId}
           setDecisionFilter={setDecisionFilter}
+          setPromotionBasis={
+            setPromotionBasis
+          }
+          setAverageThreshold={
+            setAverageThreshold
+          }
+          setTotalThreshold={
+            setTotalThreshold
+          }
+          setMaximumPromotedPosition={
+            setMaximumPromotedPosition
+          }
+          setMaximumFailedSubjects={
+            setMaximumFailedSubjects
+          }
+          setSubjectPassPercentage={
+            setSubjectPassPercentage
+          }
+          setManualDefaultDecision={
+            setManualDefaultDecision
+          }
           onClose={() => setFilterOpen(false)}
         />
       )}
@@ -2386,6 +2834,13 @@ function FilterSheet({
   toAcademicPeriodId,
   defaultToClassId,
   decisionFilter,
+  promotionBasis,
+  averageThreshold,
+  totalThreshold,
+  maximumPromotedPosition,
+  maximumFailedSubjects,
+  subjectPassPercentage,
+  manualDefaultDecision,
   branchAcademicStructures,
   fromPeriods,
   toPeriods,
@@ -2398,6 +2853,13 @@ function FilterSheet({
   setToAcademicPeriodId,
   setDefaultToClassId,
   setDecisionFilter,
+  setPromotionBasis,
+  setAverageThreshold,
+  setTotalThreshold,
+  setMaximumPromotedPosition,
+  setMaximumFailedSubjects,
+  setSubjectPassPercentage,
+  setManualDefaultDecision,
   onClose,
 }: {
   fromAcademicStructureId?: string;
@@ -2407,6 +2869,13 @@ function FilterSheet({
   toAcademicPeriodId?: string;
   defaultToClassId?: string;
   decisionFilter: DecisionFilter;
+  promotionBasis: PromotionBasis;
+  averageThreshold: number;
+  totalThreshold: number;
+  maximumPromotedPosition: number;
+  maximumFailedSubjects: number;
+  subjectPassPercentage: number;
+  manualDefaultDecision: ManualDefaultDecision;
   branchAcademicStructures: AcademicStructure[];
   fromPeriods: AcademicPeriod[];
   toPeriods: AcademicPeriod[];
@@ -2419,6 +2888,15 @@ function FilterSheet({
   setToAcademicPeriodId: (id?: string) => void;
   setDefaultToClassId: (id?: string) => void;
   setDecisionFilter: (value: DecisionFilter) => void;
+  setPromotionBasis: (value: PromotionBasis) => void;
+  setAverageThreshold: (value: number) => void;
+  setTotalThreshold: (value: number) => void;
+  setMaximumPromotedPosition: (value: number) => void;
+  setMaximumFailedSubjects: (value: number) => void;
+  setSubjectPassPercentage: (value: number) => void;
+  setManualDefaultDecision: (
+    value: ManualDefaultDecision,
+  ) => void;
   onClose: () => void;
 }) {
   return (
@@ -2548,6 +3026,220 @@ function FilterSheet({
               ))}
             </select>
           </label>
+
+          <section className="promotion-basis-panel">
+            <div>
+              <strong>
+                Promotion basis
+              </strong>
+              <small>
+                Choose how automatic recommendations are calculated. Every row can still be overridden manually.
+              </small>
+            </div>
+
+            <label>
+              <span>Base recommendation on</span>
+              <select
+                value={promotionBasis}
+                onChange={(event) =>
+                  setPromotionBasis(
+                    event.target
+                      .value as PromotionBasis,
+                  )
+                }
+              >
+                <option value="average_percentage">
+                  Average percentage
+                </option>
+                <option value="total_score">
+                  Total score
+                </option>
+                <option value="class_position">
+                  Class position
+                </option>
+                <option value="failed_subjects">
+                  Number of failed subjects
+                </option>
+                <option value="manual">
+                  Manual decision
+                </option>
+              </select>
+            </label>
+
+            {promotionBasis ===
+            "average_percentage" ? (
+              <label>
+                <span>
+                  Minimum average percentage
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.01"
+                  value={averageThreshold}
+                  onChange={(event) =>
+                    setAverageThreshold(
+                      Math.min(
+                        100,
+                        Math.max(
+                          0,
+                          safeNumber(
+                            event.target.value,
+                            0,
+                          ),
+                        ),
+                      ),
+                    )
+                  }
+                />
+              </label>
+            ) : null}
+
+            {promotionBasis ===
+            "total_score" ? (
+              <label>
+                <span>
+                  Minimum total score
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={totalThreshold}
+                  onChange={(event) =>
+                    setTotalThreshold(
+                      Math.max(
+                        0,
+                        safeNumber(
+                          event.target.value,
+                          0,
+                        ),
+                      ),
+                    )
+                  }
+                />
+              </label>
+            ) : null}
+
+            {promotionBasis ===
+            "class_position" ? (
+              <label>
+                <span>
+                  Promote up to position
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={
+                    maximumPromotedPosition
+                  }
+                  onChange={(event) =>
+                    setMaximumPromotedPosition(
+                      Math.max(
+                        1,
+                        Math.floor(
+                          safeNumber(
+                            event.target.value,
+                            1,
+                          ),
+                        ),
+                      ),
+                    )
+                  }
+                />
+              </label>
+            ) : null}
+
+            {promotionBasis ===
+            "failed_subjects" ? (
+              <>
+                <label>
+                  <span>
+                    Subject pass percentage
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step="0.01"
+                    value={
+                      subjectPassPercentage
+                    }
+                    onChange={(event) =>
+                      setSubjectPassPercentage(
+                        Math.min(
+                          100,
+                          Math.max(
+                            0,
+                            safeNumber(
+                              event.target.value,
+                              0,
+                            ),
+                          ),
+                        ),
+                      )
+                    }
+                  />
+                </label>
+
+                <label>
+                  <span>
+                    Maximum failed subjects allowed
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={
+                      maximumFailedSubjects
+                    }
+                    onChange={(event) =>
+                      setMaximumFailedSubjects(
+                        Math.max(
+                          0,
+                          Math.floor(
+                            safeNumber(
+                              event.target.value,
+                              0,
+                            ),
+                          ),
+                        ),
+                      )
+                    }
+                  />
+                </label>
+              </>
+            ) : null}
+
+            {promotionBasis ===
+            "manual" ? (
+              <label>
+                <span>
+                  Default manual decision
+                </span>
+                <select
+                  value={
+                    manualDefaultDecision
+                  }
+                  onChange={(event) =>
+                    setManualDefaultDecision(
+                      event.target
+                        .value as ManualDefaultDecision,
+                    )
+                  }
+                >
+                  <option value="promote">
+                    Promote
+                  </option>
+                  <option value="repeat">
+                    Repeat
+                  </option>
+                </select>
+              </label>
+            ) : null}
+          </section>
 
           <label>
             <span>Decision Filter</span>
@@ -4899,6 +5591,14 @@ const css = `
   box-shadow:0 10px 20px rgba(15,23,42,.10)!important;
 }
 
+.promotion-page .promo-avatar img{
+  width:100%;
+  height:100%;
+  display:block;
+  object-fit:cover;
+  border-radius:inherit;
+}
+
 .promotion-page .student-main{
   min-width:0;
   display:grid;
@@ -5041,6 +5741,69 @@ const css = `
 
   .promotion-page .promo-compact-stats{
     display:none;
+  }
+}
+
+.promotion-basis-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border, rgba(0,0,0,.1));
+  border-radius: 16px;
+  background: color-mix(
+    in srgb,
+    var(--primary-color, #2563eb) 5%,
+    var(--surface, #ffffff)
+  );
+}
+
+.promotion-basis-panel > div {
+  display: grid;
+  gap: 3px;
+}
+
+.promotion-basis-panel > div strong {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.promotion-basis-panel > div small {
+  color: var(--muted, #64748b);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.promotion-recommendation-reason {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 3px;
+  color: var(--muted, #64748b);
+  font-size: 9px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (min-width:980px){
+  .promotion-page .ba-modal-backdrop,
+  .promotion-page .ba-sheet-backdrop{
+    top:var(--eds-shell-top-offset,0px);
+    right:0;
+    bottom:0;
+    left:var(--portal-content-left,0px);
+    width:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .promotion-page .ba-modal,
+  .promotion-page .ba-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
   }
 }
 

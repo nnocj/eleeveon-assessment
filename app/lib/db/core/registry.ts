@@ -60,7 +60,7 @@ export const LOCAL_FIRST_SYNC_TABLES = [
   "classTeachers",
   "studentEnrollments",
 
-  "gradingSystems",
+  "gradingStructures",
   "gradeRules",
   "assessmentStructures",
   "assessmentStructureItems",

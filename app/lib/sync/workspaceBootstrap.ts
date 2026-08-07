@@ -165,9 +165,9 @@ const SETTINGS_CACHE_PREFIX =
 
 /**
  * Bump when the definition of a complete initial workspace changes.
- * Version 2 invalidates the earlier essential-table-only markers.
+ * Version 3 requires the complete Platform V2 local-first registry, including intelligent scheduling and feedback tables.
  */
-const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 3;
+export const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 3;
 
 
 export type ScopedWorkspaceSettingsCache = {

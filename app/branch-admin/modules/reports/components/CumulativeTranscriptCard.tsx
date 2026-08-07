@@ -35,6 +35,10 @@ import {
   resolveCumulativeTranscriptTemplateComponent,
 } from "../cumulative-transcript-templates";
 
+import {
+  normalizeCumulativeTranscriptDataset,
+} from "../cumulative-transcript-templates/cumulative-transcript-template-utils";
+
 // ======================================================
 // TYPES
 // ======================================================
@@ -281,6 +285,14 @@ export default function CumulativeTranscriptCard({
   const holdTimerRef = useRef<number | null>(null);
   const holdIntervalRef = useRef<number | null>(null);
 
+  const normalizedDataset = useMemo(
+    () =>
+      normalizeCumulativeTranscriptDataset(
+        dataset as any,
+      ),
+    [dataset],
+  );
+
   const resolvedSettings = useMemo(
     () => mergeTranscriptSettings({ template, settings, compact }),
     [template, settings, compact],
@@ -392,9 +404,9 @@ export default function CumulativeTranscriptCard({
     return () => stopZoomHold();
   }, [stopZoomHold]);
 
-  const reportPage = dataset ? (
+  const reportPage = normalizedDataset ? (
     <TemplateComponent
-      dataset={dataset}
+      dataset={normalizedDataset}
       template={template || null}
       settings={resolvedSettings}
       compact={compact}
@@ -404,7 +416,7 @@ export default function CumulativeTranscriptCard({
     />
   ) : (
     <section className="print-page report-page-break cumulative-transcript-empty-page ctc-a4-page">
-      <div className="ctc-empty-card">{emptyTranscriptMessage(dataset)}</div>
+      <div className="ctc-empty-card">{emptyTranscriptMessage(normalizedDataset)}</div>
     </section>
   );
 
@@ -425,8 +437,8 @@ export default function CumulativeTranscriptCard({
 
       <div className="ctc-mobile-toolbar report-no-print">
         <div>
-          <strong>{datasetStudentTitle(dataset)}</strong>
-          <span>{datasetSubtitle(dataset)}</span>
+          <strong>{datasetStudentTitle(normalizedDataset)}</strong>
+          <span>{datasetSubtitle(normalizedDataset)}</span>
         </div>
 
         <div

@@ -44,7 +44,13 @@ import {
   type AppVersionMetadata,
 } from "../lib/pwa/appVersion";
 
-import { SyncStatus } from "../lib/constants/syncStatus";
+export type SyncTableStatus = {
+  tableName: string;
+  pending: number;
+  failed: number;
+  conflicts: number;
+  total: number;
+};
 
 export type SystemStatusSnapshot = {
   online: boolean;
@@ -66,6 +72,7 @@ export type SystemStatusSnapshot = {
   currentBranchName?: string | null;
   currentSchoolName?: string | null;
   lastSyncError?: string | null;
+  tableBreakdown: SyncTableStatus[];
 };
 
 type ActionState = {
@@ -108,6 +115,102 @@ async function loadDiagnostics(
     );
   } catch {
     return null;
+  }
+}
+
+
+async function loadTableBreakdown(
+  accountId?: string | null,
+): Promise<SyncTableStatus[]> {
+  try {
+    const mod: any =
+      await import("../lib/db");
+    const database = mod.db;
+
+    if (!database?.tables) {
+      return [];
+    }
+
+    const results:
+      SyncTableStatus[] = [];
+
+    for (const table of database.tables) {
+      const rows =
+        await table.toArray();
+
+      let pending = 0;
+      let failed = 0;
+      let conflicts = 0;
+      let total = 0;
+
+      for (const row of rows as any[]) {
+        if (
+          accountId &&
+          row.accountId &&
+          row.accountId !== accountId
+        ) {
+          continue;
+        }
+
+        total += 1;
+
+        const state = String(
+          row.syncStatus ??
+            row.synced ??
+            "",
+        ).toLowerCase();
+
+        if (
+          state === "pending" ||
+          state === "0" ||
+          row.synced === 0
+        ) {
+          pending += 1;
+        }
+
+        if (
+          state === "failed" ||
+          state === "error" ||
+          state === "2" ||
+          row.synced === 2 ||
+          Boolean(row.syncError)
+        ) {
+          failed += 1;
+        }
+
+        if (
+          state === "conflict" ||
+          Boolean(row.conflictId)
+        ) {
+          conflicts += 1;
+        }
+      }
+
+      if (
+        pending ||
+        failed ||
+        conflicts
+      ) {
+        results.push({
+          tableName: table.name,
+          pending,
+          failed,
+          conflicts,
+          total,
+        });
+      }
+    }
+
+    return results.sort(
+      (left, right) =>
+        right.failed - left.failed ||
+        right.pending - left.pending ||
+        left.tableName.localeCompare(
+          right.tableName,
+        ),
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -199,6 +302,13 @@ export function useSystemStatus() {
     useState<any>(null);
 
   const [
+    tableBreakdown,
+    setTableBreakdown,
+  ] = useState<
+    SyncTableStatus[]
+  >([]);
+
+  const [
     remoteVersion,
     setRemoteVersion,
   ] =
@@ -229,6 +339,7 @@ export function useSystemStatus() {
         const [
           nextDiagnostics,
           nextVersion,
+          nextTableBreakdown,
         ] =
           await Promise.all([
             loadDiagnostics(
@@ -242,10 +353,17 @@ export function useSystemStatus() {
               : Promise.resolve(
                   null,
                 ),
+            loadTableBreakdown(
+              accountId,
+            ),
           ]);
 
         setDiagnostics(
           nextDiagnostics,
+        );
+
+        setTableBreakdown(
+          nextTableBreakdown,
         );
 
         if (nextVersion) {
@@ -446,9 +564,9 @@ export function useSystemStatus() {
                     ) &&
                     (
                       row.synced ===
-                        SyncStatus.FAILED ||
+                        "error" ||
                       row.syncStatus ===
-                        SyncStatus.FAILED ||
+                        "error" ||
                       Boolean(
                         row.syncError,
                       )
@@ -463,9 +581,9 @@ export function useSystemStatus() {
                   row.id,
                   {
                     synced:
-                      SyncStatus.PENDING,
+                      "pending",
                     syncStatus:
-                      SyncStatus.PENDING,
+                      "pending",
                     syncError:
                       undefined,
                     updatedAt:
@@ -789,6 +907,7 @@ export function useSystemStatus() {
       diagnostics?.lastSyncError ||
       sync.errors?.[0] ||
       null,
+    tableBreakdown,
   };
 
   return {

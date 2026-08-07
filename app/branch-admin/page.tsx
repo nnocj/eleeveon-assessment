@@ -97,24 +97,18 @@ import Organizations from "./modules/Organizations";
 // ACADEMIC SETUP
 // ======================================================
 
-import Academicstructures from "./modules/Academicstructures";
-import Academicperiods from "./modules/Academicperiods";
-import Curriculumsetup from "./modules/Curriculumsetup";
-import CurriculumPathways from "./modules/CurriculumPathways";
-import CurriculumSubjects from "./modules/CurriculumSubjects";
-import SubjectPrerequisites from "./modules/SubjectPrerequisites";
+import AcademicSystems from "./modules/AcademicSystems"
+import CurriculumSystems from "./modules/CurriculumSystems";
+import SubjectSetup from "./modules/SubjectSetup";
 import CourseOutline from "./modules/CourseOutline";
-import Subjects from "./modules/Subjects";
-import ClassSubjects from "./modules/ClassSubjects";
+
 // ======================================================
 // ASSESSMENT + GRADING
 // ======================================================
 
-import Assessmentstructure from "./modules/Assessmentstructure";
+import AssessmentSystems from "./modules/AssessmentSystems";
 import Assessmentapplicability from "./modules/Assessmentapplicability";
-import AssessmentItems from "./modules/AssessmentItems";
-import Gradingsystems from "./modules/Gradingsystems";
-import GradingRules from "./modules/GradingRules";
+import GradingSystems from "./modules/ZRGradingSystems";
 
 // ======================================================
 // ACADEMIC RECORDS
@@ -126,7 +120,6 @@ import ReportRemarks from "./modules/ReportRemarks";
 import Broadsheets from "./modules/reports/Broadsheets";
 import Promotion from "./modules/Promotion";
 import CumulativeRecords from "./modules/CumulativeRecords";
-import StudentProgressTimeline from "./modules/reports/StudentProgressTimeline";
 import AcademicProgress from "./modules/AcademicProgress";
 
 // ======================================================
@@ -372,34 +365,14 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         icon: "🏢",
       },
       {
-        key: "academicStructures",
-        label: "Academic Structures",
+        key: "academicSystems",
+        label: "Academic System",
         icon: "🧱",
       },
       {
-        key: "academicPeriods",
-        label: "Academic Periods",
-        icon: "🗓",
-      },
-      {
-        key: "curriculumSetup",
-        label: "Curriculum",
+        key: "curriculumSystems",
+        label: "Curriculum System",
         icon: "📚",
-      },
-      {
-        key: "curriculumPathways",
-        label: "Curriculum Pathways",
-        icon: "🗺️",
-      },
-      {
-        key: "subjects",
-        label: "Subjects",
-        icon: "📖",
-      },
-      {
-        key: "curriculumSubjects",
-        label: "Curriculum Subjects",
-        icon: "📖",
       },
       {
         key: "classes",
@@ -407,36 +380,21 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         icon: "🏫",
       },
       {
-        key: "classSubjects",
-        label: "ClassSubjects",
+        key: "subjectSetup",
+        label: "Subject Setup",
         icon: "📖",
-      },
-      {
-        key: "subjectPrerequisites",
-        label: "Subject Prerequisites",
-        icon: "🔗",
       },
 
       {
-        key: "assessmentStructure",
-        label: "Assessment Structure",
+        key: "assessmentSystems",
+        label: "Assessment System",
         icon: "🏗️",
-      },
-      {
-        key: "assessmentItems",
-        label: "Assessment Items",
-        icon: "📋",
       },
 
       {
         key: "gradingSystems",
-        label: "Grading Systems",
+        label: "Grading System",
         icon: "🎓",
-      },
-      {
-        key: "gradingRules",
-        label: "Grading Rules",
-        icon: "📏",
       },
       {
         key: "assessmentApplicability",
@@ -486,11 +444,6 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         icon: "📚",
       },
       {
-        key: "studentProgressTimeline",
-        label: "Student Progress Timeline",
-        icon: "⏳",
-      },
-      {
         key: "academicProgress",
         label: "Academic Progress",
         icon: "📈",
@@ -500,7 +453,7 @@ export const NAV_SECTIONS: RoleNavSection[] = [
 
   {
     title: "Administration",
-    defaultOpen: true,
+    defaultOpen:false,
     items: [
       {
         key: "students",
@@ -521,11 +474,6 @@ export const NAV_SECTIONS: RoleNavSection[] = [
         key: "classes",
         label: "Classes",
         icon: "🏫",
-      },
-      {
-        key: "classSubjects",
-        label: "Class Subjects",
-        icon: "📘",
       },
       {
         key: "studentEnrollments",
@@ -594,7 +542,7 @@ export const NAV_SECTIONS: RoleNavSection[] = [
 
   {
     title: "Attendance",
-    defaultOpen: true,
+    defaultOpen: false,
     items: [
       {
         key: "studentAttendance",
@@ -740,8 +688,7 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   teachers: Teachers,
   parents: Parents,
   classes: Classes,
-  classSubjects: ClassSubjects,
-  subjectPrerequisites: SubjectPrerequisites,
+  subjectSetup: SubjectSetup,
   studentEnrollments: StudentEnrollments,
 
   identityOverview: IdentityOverview,
@@ -771,25 +718,18 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   classTimetable: ClassTimetable,
   teacherTimetable: TeacherTimetable,
   examTimetable: ExamTimetable,
-
-  subjects: Subjects,
   organizations: Organizations,
 
   // Academic / Curriculum Setup
-  academicStructures: Academicstructures,
-  academicPeriods: Academicperiods,
-  curriculumPathways: CurriculumPathways,
-  curriculumSetup: Curriculumsetup,
-  curriculumSubjects: CurriculumSubjects,
+  academicSystems: AcademicSystems,
+  curriculumSystems: CurriculumSystems,
   courseOutline: CourseOutline,
 
   // Assessment / Grading
   assessmentEntries: AssessmentEntries,
-  assessmentStructure: Assessmentstructure,
-  assessmentItems: AssessmentItems,
+  assessmentSystems: AssessmentSystems,
   assessmentApplicability: Assessmentapplicability,
-  gradingSystems: Gradingsystems,
-  gradingRules: GradingRules,
+  gradingSystems: GradingSystems,
 
   // Records
   studentReports: StudentReports,
@@ -798,7 +738,6 @@ const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   promotion: Promotion,
   cumulativeRecords: CumulativeRecords,
   academicProgress: AcademicProgress,
-  studentProgressTimeline: StudentProgressTimeline,
 
   // Finance
   fees: Fees,

@@ -1,39 +1,90 @@
 /**
  * app/layout.tsx
  * --------------------------------------------------------------------------
- * Eleeveon Schools root layout.
- *
- * Global application infrastructure is centralized in app/providers.tsx:
- * - DatabaseBootstrap and the single Dexie instance;
- * - account, settings, school/branch and membership contexts;
- * - theme runtime;
- * - Phase 5 single-flight SyncBootstrap.
- *
- * Do not start auto-sync or mount duplicate providers in this file.
+ * Eleeveon Schools root layout with install-quality PWA metadata.
  */
 
-import type { Metadata, Viewport } from "next";
-import type { ReactNode } from "react";
+import type {
+  Metadata,
+  Viewport,
+} from "next";
+
+import type {
+  ReactNode,
+} from "react";
 
 import "./globals.css";
 
 import Providers from "./providers";
 import GlobalBrandingRuntime from "./components/GlobalBrandingRuntime";
 
-
 export const metadata: Metadata = {
-  title: "Eleeveon School Management",
-  description: "Offline-first school management system",
+  applicationName: "Eleeveon Schools",
+  title: {
+    default: "Eleeveon Schools",
+    template: "%s · Eleeveon Schools",
+  },
+  description:
+    "A connected, offline-first school management workspace.",
   manifest: "/manifest.json",
   icons: {
-    icon: "/favicon.ico",
+    icon: [
+      {
+        url: "/favicon.ico",
+      },
+      {
+        url: "/icons/icon-192.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+      {
+        url: "/icons/icon-512.png",
+        sizes: "512x512",
+        type: "image/png",
+      },
+    ],
     shortcut: "/favicon.ico",
-    apple: "/apple-touch-icon.png",
+    apple: [
+      {
+        url: "/apple-touch-icon.png",
+        sizes: "180x180",
+        type: "image/png",
+      },
+    ],
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle:
+      "black-translucent",
+    title: "Eleeveon",
+  },
+  formatDetection: {
+    telephone: false,
+  },
+  other: {
+    "msapplication-config":
+      "/browserconfig.xml",
+    "msapplication-TileColor":
+      "#2f6fed",
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#2f6fed",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: [
+    {
+      media:
+        "(prefers-color-scheme: light)",
+      color: "#f8fafc",
+    },
+    {
+      media:
+        "(prefers-color-scheme: dark)",
+      color: "#0f172a",
+    },
+  ],
   colorScheme: "light dark",
 };
 
@@ -43,17 +94,24 @@ export default function RootLayout({
   children: ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html
+      lang="en"
+      suppressHydrationWarning
+    >
       <body
         style={{
           margin: 0,
           minHeight: "100dvh",
-          background: "var(--bg, #f7f8fb)",
-          color: "var(--text, #111111)",
+          background:
+            "var(--bg, #f7f8fb)",
+          color:
+            "var(--text, #111111)",
           fontFamily:
             "var(--font-family, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif)",
-          fontSize: "var(--font-size, 16px)",
-          transition: "background .3s ease, color .3s ease",
+          fontSize:
+            "var(--font-size, 16px)",
+          transition:
+            "background .3s ease, color .3s ease",
         }}
       >
         <Providers>

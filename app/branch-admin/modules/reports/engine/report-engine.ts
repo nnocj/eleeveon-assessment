@@ -21,7 +21,7 @@
  *   -> AssessmentApplicability
  *   -> AssessmentStructure
  *   -> AssessmentStructureItems
- *   -> GradingSystem
+ *   -> GradingStructure
  *   -> GradeRules
  *   -> AssessmentEntries
  *   -> Student Reports / Broadsheets / Analytics
@@ -39,6 +39,19 @@ import type {
   StudentEnrollment,
   StudentAttendanceSummary,
 } from "../../../../lib/db/db";
+
+import {
+  computeStudentSubjectAssessmentForReport,
+  DEFAULT_ASSESSMENT_REPORT_SETTINGS,
+  type AssessmentReportProjection,
+  type AssessmentReportProjectionSettings,
+} from "../../../../lib/assessments";
+
+import {
+  reportBreakdownFromProjection,
+  reportColumnsFromProjection,
+} from "./report-utils";
+
 
 import type {
   AttendanceSummary,
@@ -127,8 +140,8 @@ export function buildLookups(dataset: ReportEngineDataset) {
     classSubjectMap: new Map(
       dataset.classSubjects.map((item) => [item.id, item]),
     ),
-    gradingSystemMap: new Map(
-      dataset.gradingSystems.map((item) => [item.id, item]),
+    gradingStructureMap: new Map(
+      dataset.gradingStructures.map((item) => [item.id, item]),
     ),
     assessmentStructureMap: new Map(
       dataset.assessmentStructures.map((item) => [item.id, item]),
@@ -578,7 +591,28 @@ export function getClassSubjectsForReport(
         return false;
       return true;
     })
-    .sort((a, b) => String(a.subjectId).localeCompare(String(b.subjectId)));
+    .sort((a, b) => {
+      const orderA = Number(a.orderIndex);
+      const orderB = Number(b.orderIndex);
+      const hasOrderA = Number.isFinite(orderA);
+      const hasOrderB = Number.isFinite(orderB);
+
+      if (hasOrderA && hasOrderB && orderA !== orderB) return orderA - orderB;
+      if (hasOrderA !== hasOrderB) return hasOrderA ? -1 : 1;
+
+      const subjectA = dataset.subjects.find(
+        (subject) => String(subject.id) === String(a.subjectId),
+      );
+      const subjectB = dataset.subjects.find(
+        (subject) => String(subject.id) === String(b.subjectId),
+      );
+
+      const nameDiff = String(
+        a.name || subjectA?.name || "",
+      ).localeCompare(String(b.name || subjectB?.name || ""));
+
+      return nameDiff || String(a.subjectId).localeCompare(String(b.subjectId));
+    });
 }
 
 export function getActiveEnrollmentsForReport(
@@ -644,20 +678,84 @@ export function getAssessmentColumns(
 ): ReportAssessmentColumn[] {
   if (!applicability?.assessmentStructureId) return [];
 
-  return dataset.assessmentStructureItems
+  const items = dataset.assessmentStructureItems
     .filter(
       (item) =>
         item.assessmentStructureId === applicability.assessmentStructureId &&
         isActive(item),
     )
-    .sort((a, b) => a.order - b.order)
-    .map((item) => ({
-      assessmentStructureItemId: String(item.id ?? ""),
+    .sort(
+      (a, b) =>
+        safeNumber(a.level) - safeNumber(b.level) ||
+        safeNumber(a.order) - safeNumber(b.order),
+    );
+
+  const itemById = new Map(
+    items.map((item) => [String(item.id ?? ""), item]),
+  );
+
+  const pathLabels = (item: AssessmentStructureItem): string[] => {
+    const labels: string[] = [item.name];
+    const visited = new Set<string>();
+    let parentId = item.parentItemId ? String(item.parentItemId) : "";
+
+    while (parentId && !visited.has(parentId)) {
+      visited.add(parentId);
+      const parent = itemById.get(parentId);
+      if (!parent) break;
+      labels.unshift(parent.name);
+      parentId = parent.parentItemId ? String(parent.parentItemId) : "";
+    }
+
+    return labels;
+  };
+
+  const childCounts = new Map<string, number>();
+  for (const item of items) {
+    const parentId = item.parentItemId ? String(item.parentItemId) : "";
+    if (parentId) {
+      childCounts.set(parentId, (childCounts.get(parentId) ?? 0) + 1);
+    }
+  }
+
+  return items.map((item) => {
+    const itemId = String(item.id ?? "");
+    const isParent = (childCounts.get(itemId) ?? 0) > 0;
+    const depth = safeNumber(item.level);
+    const effectiveWeight = item.parentItemId
+      ? safeNumber(item.contributionWeight ?? item.weight)
+      : safeNumber(item.weight);
+
+    return {
+      assessmentStructureItemId: itemId,
+      parentItemId: item.parentItemId ? String(item.parentItemId) : null,
       name: item.name,
-      maxScore: safeNumber(item.maxScore),
-      weight: safeNumber(item.weight),
+      shortLabel: item.name,
+      pathLabels: pathLabels(item),
+      depth,
       order: safeNumber(item.order),
-    }));
+      itemType: item.itemType,
+      aggregationMode: item.aggregationMode,
+      maxScore: safeNumber(item.maxScore),
+      weight: effectiveWeight,
+      effectiveWeight,
+      isParent,
+      isLeaf: !isParent,
+      calculatedFromChildren:
+        item.entryMode === "from_children" ||
+        item.itemType === "computed_total",
+      complete: false,
+      groupId: item.parentItemId
+        ? `assessment-group:${String(item.parentItemId)}`
+        : undefined,
+      groupLabel: item.parentItemId
+        ? itemById.get(String(item.parentItemId))?.name
+        : undefined,
+      groupDepth: item.parentItemId
+        ? safeNumber(itemById.get(String(item.parentItemId))?.level)
+        : undefined,
+    };
+  });
 }
 
 export function getAssessmentEntriesForSubject(
@@ -676,6 +774,74 @@ export function getAssessmentEntriesForSubject(
   });
 }
 
+function gradingStructureIdOf(
+  row?: { gradingStructureId?: string | null; gradingSystemId?: string | null },
+): string | undefined {
+  const value = row?.gradingStructureId ?? row?.gradingSystemId;
+  return value == null || String(value).trim() === ""
+    ? undefined
+    : String(value);
+}
+
+export function computeAssessmentReportProjection(
+  dataset: ReportEngineDataset,
+  input: {
+    studentId: string;
+    classSubjectId: string;
+    academicPeriodId?: string;
+    applicability?: AssessmentApplicability;
+    settings?: Partial<AssessmentReportProjectionSettings>;
+  },
+): AssessmentReportProjection | undefined {
+  const applicability =
+    input.applicability ??
+    getApplicabilityForClassSubject(dataset, input.classSubjectId);
+
+  if (!applicability?.assessmentStructureId) return undefined;
+
+  const structure = dataset.assessmentStructures.find(
+    (item) =>
+      String(item.id ?? "") ===
+        String(applicability.assessmentStructureId) &&
+      isActive(item),
+  );
+
+  if (!structure) return undefined;
+
+  const items = dataset.assessmentStructureItems.filter(
+    (item) =>
+      String(item.assessmentStructureId) === String(structure.id) &&
+      isActive(item),
+  );
+
+  const entries = getAssessmentEntriesForSubject(
+    dataset,
+    input.studentId,
+    input.classSubjectId,
+    input.academicPeriodId,
+  );
+
+  const gradingStructureId = gradingStructureIdOf(applicability as any);
+
+  const gradeRules = dataset.gradeRules.filter(
+    (rule) =>
+      (!gradingStructureId ||
+        gradingStructureIdOf(rule as any) === gradingStructureId) &&
+      isActive(rule),
+  );
+
+  return computeStudentSubjectAssessmentForReport({
+    structure,
+    items,
+    entries,
+    gradeRules,
+    reportSettings: {
+      ...DEFAULT_ASSESSMENT_REPORT_SETTINGS,
+      ...(input.settings || {}),
+    },
+  }).reportProjection;
+}
+
 // ======================================================
 // GRADING
 // ======================================================
@@ -683,9 +849,9 @@ export function getAssessmentEntriesForSubject(
 export function resolveGrade(
   dataset: ReportEngineDataset,
   percentage: number,
-  gradingSystemId?: string,
+  gradingStructureId?: string,
 ): GradeResolution {
-  if (!gradingSystemId) {
+  if (!gradingStructureId) {
     return {
       grade: "N/A",
       remark: "No grading system",
@@ -694,7 +860,7 @@ export function resolveGrade(
 
   const rule = dataset.gradeRules
     .filter(
-      (item) => item.gradingSystemId === gradingSystemId && isActive(item),
+      (item) => gradingStructureIdOf(item as any) === gradingStructureId && isActive(item),
     )
     .sort((a, b) => b.minScore - a.minScore)
     .find((item) => percentage >= item.minScore && percentage <= item.maxScore);
@@ -789,6 +955,7 @@ export function computeStudentSubjectResult(
   student: Student,
   classSubject: ClassSubject,
   filters: ReportFiltersState,
+  reportSettings?: Partial<AssessmentReportProjectionSettings>,
 ): StudentSubjectResult {
   const lookups = buildLookups(dataset);
   const subject = lookups.subjectMap.get(classSubject.subjectId);
@@ -800,51 +967,55 @@ export function computeStudentSubjectResult(
     dataset,
     classSubject.id != null ? String(classSubject.id) : undefined,
   );
-  const columns = getAssessmentColumns(dataset, applicability);
-  const entries = getAssessmentEntriesForSubject(
-    dataset,
-    String(student.id ?? ""),
-    classSubject.id != null ? String(classSubject.id) : undefined,
-    filters.academicPeriodId || classSubject.academicPeriodId,
-  );
 
-  let rawTotal = 0;
-  let rawMaxTotal = 0;
-  let weightedTotal = 0;
-  let totalWeight = 0;
+  const classSubjectId = String(classSubject.id ?? "");
+  const studentId = String(student.id ?? "");
+  const academicPeriodId =
+    filters.academicPeriodId || classSubject.academicPeriodId;
 
-  const breakdown: ReportBreakdownItem[] = columns.map((column) => {
-    const entry = entries.find(
-      (item) =>
-        item.assessmentStructureItemId === column.assessmentStructureItemId,
-    );
-
-    const score = safeNumber(entry?.score);
-    const maxScore = safeNumber(column.maxScore);
-    const weight = safeNumber(column.weight);
-    const weightedScore = maxScore > 0 ? (score / maxScore) * weight : 0;
-
-    rawTotal += score;
-    rawMaxTotal += maxScore;
-    weightedTotal += weightedScore;
-    totalWeight += weight;
-
-    return {
-      ...column,
-      score: round(score, 2),
-      weightedScore: round(weightedScore, 2),
-    };
+  const projection = computeAssessmentReportProjection(dataset, {
+    studentId,
+    classSubjectId,
+    academicPeriodId,
+    applicability,
+    settings: reportSettings,
   });
 
-  const percentage = totalWeight > 0 ? (weightedTotal / totalWeight) * 100 : 0;
+  const breakdown = reportBreakdownFromProjection(projection);
+  const columns = reportColumnsFromProjection(projection);
+
+  const rawTotal = projection
+    ? projection.roots.reduce((sum, node) => sum + safeNumber(node.rawScore), 0)
+    : breakdown.reduce((sum, item) => sum + safeNumber(item.rawScore), 0);
+  const rawMaxTotal = projection
+    ? projection.roots.reduce((sum, node) => sum + safeNumber(node.maxScore), 0)
+    : breakdown.reduce((sum, item) => sum + safeNumber(item.maxScore), 0);
+  const weightedTotal = projection
+    ? projection.roots.reduce(
+        (sum, node) => sum + safeNumber(node.weightedScore),
+        0,
+      )
+    : breakdown.reduce(
+        (sum, item) => sum + safeNumber(item.weightedScore),
+        0,
+      );
+  const totalWeight = projection
+    ? projection.roots.reduce(
+        (sum, node) => sum + safeNumber(node.effectiveWeight),
+        0,
+      )
+    : columns.reduce((sum, item) => sum + safeNumber(item.effectiveWeight), 0);
+  const percentage =
+    totalWeight > 0 ? (weightedTotal / totalWeight) * 100 : 0;
+
   const grade = resolveGrade(
     dataset,
     percentage,
-    applicability?.gradingSystemId,
+    gradingStructureIdOf(applicability as any),
   );
 
   return {
-    classSubjectId: String(classSubject.id ?? ""),
+    classSubjectId,
     subjectId: classSubject.subjectId,
     subjectName: classSubject.name || subject?.name || "Unknown Subject",
     subjectCode: classSubject.code || subject?.code,
@@ -853,9 +1024,11 @@ export function computeStudentSubjectResult(
     teacherName: teacher?.fullName,
 
     assessmentStructureId: applicability?.assessmentStructureId,
-    gradingSystemId: applicability?.gradingSystemId,
+    gradingStructureId: gradingStructureIdOf(applicability as any),
 
     breakdown,
+    assessmentProjection: projection,
+    assessmentReportSettings: projection?.settings,
 
     rawTotal: round(rawTotal, 2),
     rawMaxTotal: round(rawMaxTotal, 2),
@@ -881,11 +1054,18 @@ export function buildStudentReport(
   student: Student,
   filters: ReportFiltersState,
   classSubjects: ClassSubject[],
+  reportSettings?: Partial<AssessmentReportProjectionSettings>,
 ): ComputedStudentReport {
   const lookups = buildLookups(dataset);
 
   const subjectResults = classSubjects.map((classSubject) =>
-    computeStudentSubjectResult(dataset, student, classSubject, filters),
+    computeStudentSubjectResult(
+      dataset,
+      student,
+      classSubject,
+      filters,
+      reportSettings,
+    ),
   );
 
   const percentages = subjectResults.map((item) => item.percentage);
@@ -943,15 +1123,22 @@ export function buildStudentReport(
 // ======================================================
 
 export function applyOverallPositions(reports: ComputedStudentReport[]): void {
-  const sorted = [...reports].sort((a, b) => b.average - a.average);
+  const sorted = [...reports].sort(
+    (a, b) =>
+      b.total - a.total ||
+      b.average - a.average ||
+      (b.overallGPA || 0) - (a.overallGPA || 0) ||
+      a.studentName.localeCompare(b.studentName),
+  );
 
-  let lastScore: number | undefined;
+  let lastKey = "";
   let lastPosition = 0;
 
   sorted.forEach((report, index) => {
-    const position = lastScore === report.average ? lastPosition : index + 1;
+    const key = [report.total, report.average, report.overallGPA || 0].join("|");
+    const position = key === lastKey ? lastPosition : index + 1;
     report.overallPosition = position;
-    lastScore = report.average;
+    lastKey = key;
     lastPosition = position;
   });
 }
@@ -961,22 +1148,31 @@ export function applySubjectPositions(
   classSubjects: ClassSubject[],
 ): void {
   classSubjects.forEach((classSubject) => {
+    const classSubjectId = String(classSubject.id ?? "");
+    if (!classSubjectId) return;
+
     const subjectRows = reports
       .map((report) =>
         report.subjectResults.find(
-          (item) => item.classSubjectId === classSubject.id,
+          (item) => String(item.classSubjectId ?? "") === classSubjectId,
         ),
       )
       .filter((item): item is StudentSubjectResult => !!item)
-      .sort((a, b) => b.percentage - a.percentage);
+      .sort(
+        (a, b) =>
+          b.percentage - a.percentage ||
+          b.weightedTotal - a.weightedTotal ||
+          b.rawTotal - a.rawTotal,
+      );
 
-    let lastScore: number | undefined;
+    let lastKey = "";
     let lastPosition = 0;
 
     subjectRows.forEach((row, index) => {
-      const position = lastScore === row.percentage ? lastPosition : index + 1;
+      const key = [row.percentage, row.weightedTotal, row.rawTotal].join("|");
+      const position = key === lastKey ? lastPosition : index + 1;
       row.subjectPosition = position;
-      lastScore = row.percentage;
+      lastKey = key;
       lastPosition = position;
     });
   });
@@ -1009,15 +1205,32 @@ export function sortReports(
 export function buildClassReports(
   dataset: ReportEngineDataset,
   filters: ReportFiltersState,
+  reportSettings?: Partial<AssessmentReportProjectionSettings>,
 ): ComputedStudentReport[] {
-  const students = getStudentsForReport(dataset, filters);
-  const classSubjects = getClassSubjectsForReport(dataset, {
+  /**
+   * Positions must always be calculated against the complete selected class.
+   * A student-report preview may contain filters.studentId, but using that
+   * value here reduces the ranking cohort to one student and makes every
+   * student and every subject appear 1st. classSubjectId is also cleared so
+   * subject positions are calculated across the class's complete subject set.
+   */
+  const cohortFilters: ReportFiltersState = {
     ...filters,
+    studentId: undefined,
     classSubjectId: undefined,
-  });
+  };
+
+  const students = getStudentsForReport(dataset, cohortFilters);
+  const classSubjects = getClassSubjectsForReport(dataset, cohortFilters);
 
   const reports = students.map((student) =>
-    buildStudentReport(dataset, student, filters, classSubjects),
+    buildStudentReport(
+      dataset,
+      student,
+      cohortFilters,
+      classSubjects,
+      reportSettings,
+    ),
   );
 
   applyOverallPositions(reports);
@@ -1201,6 +1414,7 @@ export function buildAnalytics(
 export function buildReportEngineOutput(
   dataset: ReportEngineDataset,
   filters: ReportFiltersState,
+  reportSettings?: Partial<AssessmentReportProjectionSettings>,
 ): ReportEngineOutput {
   const header = buildReportHeader(dataset, filters);
   const generatedAt = new Date().toISOString();
@@ -1219,7 +1433,11 @@ export function buildReportEngineOutput(
     warnings.push("No class subjects found for the selected class and period.");
   }
 
-  const classReports = buildClassReports(dataset, filters);
+  const classReports = buildClassReports(
+    dataset,
+    filters,
+    reportSettings,
+  );
 
   const selectedReport = filters.studentId
     ? classReports.find((item) => item.studentId === filters.studentId)

@@ -324,3 +324,7 @@ export {
   MontessoriTemplate,
   UniversityTranscriptTemplate,
 };
+
+
+export * from "./student-report-template-types";
+export * from "./student-report-template-utils";

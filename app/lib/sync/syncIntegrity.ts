@@ -76,7 +76,7 @@ const SCHOOL_REQUIRED_TABLES = new Set([
   "curriculumPathways",
   "curriculumSubjects",
   "subjectPrerequisites",
-  "gradingSystems",
+  "gradingStructures",
   "gradeRules",
   "assessmentStructures",
   "assessmentStructureItems",
@@ -86,6 +86,9 @@ const SCHOOL_REQUIRED_TABLES = new Set([
   "feeStructures",
   "schoolCurrencySettings",
   "schoolPayoutSettings",
+  "schedulePeriodTemplates",
+  "schedulePeriodTemplateAssignments",
+  "schedulePeriodSlots",
 ]);
 
 const BRANCH_REQUIRED_TABLES = new Set([
@@ -126,6 +129,39 @@ const BRANCH_REQUIRED_TABLES = new Set([
   "payrollItems",
   "staffPaymentRecords",
   "schoolBranchSettings",
+  "scheduleTimetables",
+  "scheduleSessions",
+  "scheduleResources",
+  "scheduleConflicts",
+  "scheduleSharedBlocks",
+  "scheduleSharedBlockGroups",
+  "scheduleSharedBlockTeachers",
+  "scheduleGroups",
+  "scheduleGroupMembers",
+  "scheduleTeacherAvailability",
+  "scheduleTeacherWorkloadRules",
+  "scheduleSubjectRequirements",
+  "scheduleRequirementGroups",
+  "scheduleRequirementTeachers",
+  "scheduleResourceRequirements",
+  "scheduleConstraintRules",
+  "scheduleSessionGroups",
+  "scheduleSessionTeachers",
+  "scheduleSessionResources",
+  "scheduleGenerationRuns",
+  "scheduleDrafts",
+  "scheduleDraftSessions",
+  "scheduleDraftSessionGroups",
+  "scheduleDraftSessionTeachers",
+  "scheduleDraftSessionResources",
+  "scheduleGenerationIssues",
+  "scheduleGenerationSuggestions",
+  "scheduleSuggestionRequirements",
+  "scheduleSuggestionGroups",
+  "scheduleSuggestionTeachers",
+  "scheduleSuggestionResources",
+  "schedulePublishEvents",
+  "scheduleVersionSnapshots",
 ]);
 
 const UUID_PATTERN =
@@ -291,6 +327,32 @@ function tenantIssues(
       message:
         `${tableName} requires a valid branch UUID.`,
     });
+  }
+
+  if (tableName === "mediaAssets" && payload.isDeleted !== true && payload.active !== false) {
+    const ownerId = cleanString(payload.ownerId ?? payload.ownerLocalId);
+    const ownerTempKey = cleanString(payload.ownerTempKey);
+
+    for (const [field, value] of [
+      ["payload.ownerTable", payload.ownerTable],
+      ["payload.fieldKey", payload.fieldKey],
+    ] as const) {
+      if (!cleanString(value)) {
+        issues.push({
+          code: "INVALID_MEDIA_IDENTITY",
+          field,
+          message: "Active media metadata has incomplete owner identity.",
+        });
+      }
+    }
+
+    if (!ownerId && !ownerTempKey) {
+      issues.push({
+        code: "INVALID_MEDIA_IDENTITY",
+        field: "payload.ownerId",
+        message: "Active media metadata requires ownerId or ownerTempKey.",
+      });
+    }
   }
 
   return issues;

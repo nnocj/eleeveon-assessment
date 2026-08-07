@@ -1,0 +1,65 @@
+/**
+ * app/styles/scrollbar.css
+ * --------------------------------------------------------------------------
+ * Subtle application scrollbars.
+ */
+
+:root {
+  scrollbar-color:
+    color-mix(
+      in srgb,
+      var(--eds-text-muted) 38%,
+      transparent
+    )
+    transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--eds-radius-pill);
+  background:
+    color-mix(
+      in srgb,
+      var(--eds-text-muted) 34%,
+      transparent
+    );
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background:
+    color-mix(
+      in srgb,
+      var(--eds-text-muted) 52%,
+      transparent
+    );
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.eds-scrollbar-hidden {
+  scrollbar-width: none;
+}
+
+.eds-scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+.eds-scroll-area {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}

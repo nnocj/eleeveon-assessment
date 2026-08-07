@@ -1,0 +1,231 @@
+/**
+ * app/styles/utilities.css
+ * --------------------------------------------------------------------------
+ * Compact layout and visual utilities.
+ */
+
+.eds-stack {
+  display: flex;
+  flex-direction: column;
+  gap:
+    var(
+      --eds-stack-gap,
+      var(--eds-section-gap)
+    );
+}
+
+.eds-row {
+  display: flex;
+  align-items: center;
+  gap:
+    var(
+      --eds-row-gap,
+      var(--eds-space-2)
+    );
+}
+
+.eds-row-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap:
+    var(
+      --eds-row-gap,
+      var(--eds-space-2)
+    );
+}
+
+.eds-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content:
+    space-between;
+  gap: var(--eds-space-3);
+}
+
+.eds-grid {
+  display: grid;
+  gap:
+    var(
+      --eds-grid-gap,
+      var(--eds-section-gap)
+    );
+}
+
+.eds-auto-grid {
+  display: grid;
+  grid-template-columns:
+    repeat(
+      auto-fit,
+      minmax(
+        min(
+          100%,
+          var(
+            --eds-grid-min,
+            220px
+          )
+        ),
+        1fr
+      )
+    );
+  gap:
+    var(
+      --eds-grid-gap,
+      var(--eds-section-gap)
+    );
+}
+
+.eds-container {
+  width: min(
+    100%,
+    var(
+      --eds-container-width,
+      100%
+    )
+  );
+  margin-inline: auto;
+}
+
+.eds-center {
+  display: grid;
+  place-items: center;
+}
+
+.eds-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--eds-space-3);
+}
+
+.eds-grow {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.eds-shrink-0 {
+  flex-shrink: 0;
+}
+
+.eds-full-width {
+  width: 100%;
+}
+
+.eds-min-w-0 {
+  min-width: 0;
+}
+
+.eds-overflow-hidden {
+  overflow: hidden;
+}
+
+.eds-overflow-auto {
+  overflow: auto;
+}
+
+.eds-relative {
+  position: relative;
+}
+
+.eds-sticky-top {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.eds-radius-control {
+  border-radius:
+    var(--eds-radius-control);
+}
+
+.eds-radius-card {
+  border-radius:
+    var(--eds-radius-card);
+}
+
+.eds-radius-panel {
+  border-radius:
+    var(--eds-radius-panel);
+}
+
+.eds-radius-pill {
+  border-radius:
+    var(--eds-radius-pill);
+}
+
+.eds-pad-card {
+  padding:
+    var(--eds-card-padding);
+}
+
+.eds-pad-panel {
+  padding:
+    clamp(
+      0.875rem,
+      1.8vw,
+      1.5rem
+    );
+}
+
+.eds-gap-1 {
+  gap: var(--eds-space-1);
+}
+
+.eds-gap-2 {
+  gap: var(--eds-space-2);
+}
+
+.eds-gap-3 {
+  gap: var(--eds-space-3);
+}
+
+.eds-gap-4 {
+  gap: var(--eds-space-4);
+}
+
+.eds-hide-mobile {
+  display: none;
+}
+
+.eds-only-mobile {
+  display: initial;
+}
+
+@media (min-width: 760px) {
+  .eds-hide-mobile {
+    display: initial;
+  }
+
+  .eds-only-mobile {
+    display: none;
+  }
+}
+
+.eds-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.eds-safe-bottom {
+  padding-bottom:
+    max(
+      var(--eds-space-4),
+      env(safe-area-inset-bottom)
+    );
+}
+
+.eds-safe-top {
+  padding-top:
+    max(
+      var(--eds-space-2),
+      env(safe-area-inset-top)
+    );
+}

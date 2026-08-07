@@ -42,7 +42,7 @@ import type {
   Class,
   ClassSubject,
   GradeRule,
-  GradingSystem,
+  GradingStructure,
   ReportCard,
   ReportCardItem,
   School,
@@ -56,6 +56,12 @@ import type {
   Subject,
   Teacher,
 } from "../../../../lib/db/db";
+
+import type {
+  AssessmentReportProjection,
+  AssessmentReportProjectionSettings,
+} from "../../../../lib/assessments";
+
 
 // ======================================================
 // MODES
@@ -201,7 +207,7 @@ export interface ReportEngineDataset {
   assessmentStructures: AssessmentStructure[];
   assessmentStructureItems: AssessmentStructureItem[];
   assessmentEntries: AssessmentEntry[];
-  gradingSystems: GradingSystem[];
+  gradingStructures: GradingStructure[];
   gradeRules: GradeRule[];
 
   attendance: Attendance[];
@@ -218,15 +224,39 @@ export interface ReportEngineDataset {
 
 export interface ReportAssessmentColumn {
   assessmentStructureItemId: string;
+  parentItemId?: string | null;
+
   name: string;
-  weight: number;
-  maxScore: number;
+  shortLabel?: string;
+  pathLabels: string[];
+
+  depth: number;
   order: number;
+
+  itemType?: string;
+  aggregationMode?: string;
+
+  weight: number;
+  effectiveWeight: number;
+  maxScore: number;
+
+  isParent: boolean;
+  isLeaf: boolean;
+  calculatedFromChildren: boolean;
+  complete: boolean;
+
+  groupId?: string;
+  groupLabel?: string;
+  groupDepth?: number;
+  columnSpan?: number;
 }
 
 export interface ReportBreakdownItem extends ReportAssessmentColumn {
   score: number;
+  rawScore: number;
   weightedScore: number;
+  normalizedPercentage: number;
+  enteredDirectly: boolean;
 }
 
 export interface GradeResolution {
@@ -291,9 +321,13 @@ export interface StudentSubjectResult {
   teacherName?: string;
 
   assessmentStructureId?: string;
+  gradingStructureId?: string;
+  /** @deprecated Historical snapshot compatibility only. */
   gradingSystemId?: string;
 
   breakdown: ReportBreakdownItem[];
+  assessmentProjection?: AssessmentReportProjection;
+  assessmentReportSettings?: AssessmentReportProjectionSettings;
 
   rawTotal: number;
   rawMaxTotal: number;
@@ -358,6 +392,7 @@ export interface StudentReportCardDataset {
   header: ReportHeaderData;
   student?: Student;
   report?: ComputedStudentReport;
+  assessmentReportSettings?: AssessmentReportProjectionSettings;
   currentAcademicPeriod?: CurrentAcademicPeriodInfo;
   nextAcademicPeriod?: NextAcademicPeriodInfo;
 
@@ -419,6 +454,8 @@ export interface ComputedSubjectBroadsheet {
   teacherName?: string;
 
   assessmentColumns: ReportAssessmentColumn[];
+  assessmentProjection?: AssessmentReportProjection;
+  assessmentReportSettings?: AssessmentReportProjectionSettings;
   students: SubjectBroadsheetStudentRow[];
 
   highestScore: number;

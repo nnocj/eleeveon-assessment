@@ -11,3 +11,5 @@ export * from "./syncEngine";
 export * from "./syncStatus";
 export * from "./useSyncStatus";
 export * from "./syncIntegrity";
+
+export * from "./syncRegistryAudit";

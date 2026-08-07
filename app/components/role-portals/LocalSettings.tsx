@@ -60,11 +60,12 @@ import {
   clearLocalPortalSettings,
   DEFAULT_LOCAL_PORTAL_SETTINGS,
   getLocalSettingsStorageKey,
+  normalizeLocalPortalSettings,
   readLocalPortalSettings,
+  saveApplyAndAnnounceLocalPortalSettings,
   resolveLocalAppearance,
   resolveLocalFontSize,
   resolveSharedFontSize,
-  saveLocalPortalSettings,
   type LocalAppearanceId,
   type LocalAppearanceMode,
   type LocalDensity,
@@ -78,11 +79,12 @@ export {
   clearLocalPortalSettings,
   DEFAULT_LOCAL_PORTAL_SETTINGS,
   getLocalSettingsStorageKey,
+  normalizeLocalPortalSettings,
   readLocalPortalSettings,
+  saveApplyAndAnnounceLocalPortalSettings,
   resolveLocalAppearance,
   resolveLocalFontSize,
   resolveSharedFontSize,
-  saveLocalPortalSettings,
 };
 
 export type {
@@ -179,30 +181,22 @@ export default function LocalSettings({
   const applyAndAnnounce = (
     next: LocalPortalSettings,
   ) => {
-    applyLocalPortalSettings(
-      next,
-      {
-        sharedDefaultMode,
-        sharedPrimaryColor:
-          primaryColor,
-        sharedFontSize:
-          branchFontSize,
-      },
-    );
+    const normalized =
+      saveApplyAndAnnounceLocalPortalSettings(
+        storageKey,
+        next,
+        {
+          sharedDefaultMode,
+          sharedPrimaryColor:
+            primaryColor,
+          sharedFontSize:
+            branchFontSize,
+        },
+      );
 
-    announceLocalSettingsChange(
-      storageKey,
-      next,
-      {
-        sharedDefaultMode,
-        sharedPrimaryColor:
-          primaryColor,
-        sharedFontSize:
-          branchFontSize,
-      },
-    );
+    onChange?.(normalized);
 
-    onChange?.(next);
+    return normalized;
   };
 
   const [settings, setSettings] =
@@ -214,46 +208,54 @@ export default function LocalSettings({
     );
 
   /**
-   * A mounted portal can switch role, school, or branch without unmounting this
-   * component. Reload the settings for the new exact storage key and apply them.
+   * Navigation is read-only.
+   *
+   * Opening this page or switching to its navigation item must never apply a
+   * theme. LocalAppearanceRuntime already owns startup/workspace restoration.
+   * This component only reads the current saved values for display.
    */
   useEffect(() => {
-    const loaded =
+    setSettings(
       readLocalPortalSettings(
         storageKey,
-      );
-
-    setSettings(loaded);
-
-    applyLocalPortalSettings(
-      loaded,
-      {
-        sharedDefaultMode,
-        sharedPrimaryColor:
-          primaryColor,
-        sharedFontSize:
-          branchFontSize,
-      },
+      ),
     );
-  }, [
-    storageKey,
-    sharedDefaultMode,
-    primaryColor,
-    branchFontSize,
-  ]);
 
-  const updateSettings = (patch: Partial<LocalPortalSettings>) => {
-    const next = { ...settings, ...patch };
-    setSettings(next);
-    saveLocalPortalSettings(storageKey, next);
-    applyAndAnnounce(next);
+    setSectionOpen(null);
+    setMoreOpen(false);
+  }, [storageKey]);
+
+  const updateSettings = (
+    patch:
+      Partial<LocalPortalSettings>,
+  ) => {
+    const next =
+      normalizeLocalPortalSettings({
+        ...settings,
+        ...patch,
+      });
+
+    /*
+     * This is the only ordinary mutation path:
+     * explicit option click -> save -> apply -> announce.
+     */
+    const applied =
+      applyAndAnnounce(next);
+
+    setSettings(applied);
   };
 
   const resetSettings = () => {
-    clearLocalPortalSettings(storageKey);
-    setSettings(DEFAULT_LOCAL_PORTAL_SETTINGS);
-    saveLocalPortalSettings(storageKey, DEFAULT_LOCAL_PORTAL_SETTINGS);
-    applyAndAnnounce(DEFAULT_LOCAL_PORTAL_SETTINGS);
+    clearLocalPortalSettings(
+      storageKey,
+    );
+
+    const applied =
+      applyAndAnnounce({
+        ...DEFAULT_LOCAL_PORTAL_SETTINGS,
+      });
+
+    setSettings(applied);
   };
 
   const resolvedAppearance =
@@ -314,8 +316,8 @@ export default function LocalSettings({
   }, [branchFontSize, resolvedAppearance, search, settings]);
 
   const content = (
-    <main className="ba-page local-settings-page" style={{ "--ba-primary": primaryColor } as CssVars}>
-      <section className="ba-search-card" aria-label="Local settings search and actions">
+    <main className="ba-page local-settings-page eds-background eds-page-shell" style={{ "--ba-primary": primaryColor } as CssVars}>
+      <section className="ba-search-card eds-glass-subtle eds-elevation-1" aria-label="Local settings search and actions">
         <label className="ba-search">
           <span>⌕</span>
           <input
@@ -349,7 +351,7 @@ export default function LocalSettings({
 
       <section className="ba-list local-settings-list" aria-label={`${portalName} local settings`}>
         {rows.map((row) => (
-          <button key={row.key} type="button" className="student-row" onClick={() => setSectionOpen(row.key)}>
+          <button key={row.key} type="button" className="student-row eds-surface eds-hover-lift" onClick={() => setSectionOpen(row.key)}>
             <span className="local-row-icon">{row.icon}</span>
 
             <span className="student-main">
@@ -627,7 +629,7 @@ function Sheet({
 }) {
   return (
     <div className="ba-sheet-backdrop" role="dialog" aria-modal="true">
-      <section className={`ba-sheet ${small ? "small" : ""}`}>
+      <section className={`ba-sheet eds-surface eds-elevation-4 ${small ? "small" : ""}`}>
         <div className="ba-sheet-head">
           <div>
             <h2>{title}</h2>
@@ -1252,4 +1254,29 @@ const css = `
     transform:none!important;
   }
 }
+
+/* Role-portal modal/sheet containment -------------------------------- */
+@media (min-width:980px){
+  .ba-sheet-backdrop,
+  .ba-modal-backdrop{
+    position:fixed;
+    top:var(--eds-shell-top-offset,0px) !important;
+    right:0 !important;
+    bottom:0 !important;
+    left:var(--portal-content-left,0px) !important;
+    inset:auto 0 0 var(--portal-content-left,0px) !important;
+    width:auto;
+    height:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .ba-sheet,
+  .ba-modal{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
+
 `;

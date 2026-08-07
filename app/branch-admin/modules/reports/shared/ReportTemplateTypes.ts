@@ -40,6 +40,12 @@ import type {
   ComputedStudentReport,
   AttendanceSummary,
 } from "../engine/report-types";
+import type {
+  AssessmentReportDisplayMode,
+  AssessmentReportProjection,
+  AssessmentReportProjectionSettings,
+} from "../../../../lib/assessments";
+
 
 // ======================================================
 // TEMPLATE IDENTITY
@@ -245,6 +251,25 @@ export interface StudentReportVisibilitySettings {
   showWatermark: boolean;
   showParentSignature: boolean;
   showGeneratedDate: boolean;
+
+  showAssessmentBreakdown: boolean;
+  assessmentHierarchyDisplay: AssessmentReportDisplayMode;
+  showAssessmentParentItems: boolean;
+  showAssessmentChildItems: boolean;
+  showCalculatedAssessmentItems: boolean;
+  indentAssessmentChildren: boolean;
+  showAssessmentGroupHeaders: boolean;
+  flattenSingleChildAssessmentGroups: boolean;
+  assessmentMaximumVisibleDepth: number | null;
+  showAssessmentMaximumScores: boolean;
+  showAssessmentWeights: boolean;
+  showAssessmentRawScores: boolean;
+  showAssessmentWeightedScores: boolean;
+  showAssessmentHierarchyPath: boolean;
+
+  broadsheetAssessmentHierarchyDisplay: AssessmentReportDisplayMode;
+  broadsheetShowAssessmentGroupHeaders: boolean;
+  broadsheetMaximumAssessmentDepth: number | null;
 }
 
 export interface StudentReportLabelSettings {
@@ -416,6 +441,19 @@ export interface NormalizedStudentReportTemplateData {
   branding: ReportTemplateBrandingData;
   studentInfo: ReportTemplateStudentInfo;
   subjectResults: StudentSubjectResult[];
+
+  /**
+   * Flattened assessment projections collected from the normalized subject
+   * results. Templates may use this for report-wide assessment summaries.
+   */
+  assessmentProjections: AssessmentReportProjection[];
+
+  /**
+   * Resolved assessment visibility and hierarchy settings used when rendering
+   * the projections above.
+   */
+  assessmentReportSettings: AssessmentReportProjectionSettings;
+
   attendance?: AttendanceSummary;
   summary: ReportTemplateSummaryInfo;
   currentAcademicPeriod?: ReportTemplateCurrentPeriodInfo;
@@ -467,6 +505,25 @@ export const DEFAULT_STUDENT_REPORT_TEMPLATE_SETTINGS: StudentReportTemplateSett
     showWatermark: true,
     showParentSignature: true,
     showGeneratedDate: false,
+
+  showAssessmentBreakdown: true,
+  assessmentHierarchyDisplay: "item_rules",
+  showAssessmentParentItems: true,
+  showAssessmentChildItems: true,
+  showCalculatedAssessmentItems: true,
+  indentAssessmentChildren: true,
+  showAssessmentGroupHeaders: true,
+  flattenSingleChildAssessmentGroups: false,
+  assessmentMaximumVisibleDepth: null,
+  showAssessmentMaximumScores: true,
+  showAssessmentWeights: false,
+  showAssessmentRawScores: true,
+  showAssessmentWeightedScores: true,
+  showAssessmentHierarchyPath: false,
+
+  broadsheetAssessmentHierarchyDisplay: "parents_only",
+  broadsheetShowAssessmentGroupHeaders: true,
+  broadsheetMaximumAssessmentDepth: null,
 
     classTeacherLabel: "Class Teacher",
     headTeacherLabel: "Headteacher / Principal",

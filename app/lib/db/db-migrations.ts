@@ -370,3 +370,120 @@ export function failMigrationJournalEntry(
     error: message,
   };
 }
+
+// ============================================================================
+// NO-VERSION-BUMP DOMAIN COMPATIBILITY REPAIRS
+// ============================================================================
+// These helpers intentionally do not change APP_DB_VERSION or PLATFORM_SCHEMA_VERSION.
+// IndexedDB object stores cannot be physically renamed without a version upgrade.
+// The runtime therefore aliases `gradingStructures` to the persisted
+// `gradingSystems` store and normalizes legacy foreign-key payloads at the edges.
+
+export type GradingForeignKeyCompatibleRecord = {
+  gradingStructureId?: unknown;
+  gradingSystemId?: unknown;
+  [key: string]: unknown;
+};
+
+export type NormalizedGradingForeignKeyRecord<
+  T extends GradingForeignKeyCompatibleRecord,
+> = Omit<T, "gradingStructureId" | "gradingSystemId"> & {
+  gradingStructureId?: string;
+  gradingSystemId?: string;
+};
+
+export function normalizeGradingStructureForeignKey<
+  T extends GradingForeignKeyCompatibleRecord,
+>(
+  record: T,
+): NormalizedGradingForeignKeyRecord<T> {
+  const resolved = String(
+    record.gradingStructureId ??
+      record.gradingSystemId ??
+      "",
+  ).trim();
+
+  const normalized = {
+    ...record,
+  } as NormalizedGradingForeignKeyRecord<T>;
+
+  if (!resolved) {
+    delete normalized.gradingStructureId;
+    delete normalized.gradingSystemId;
+
+    return normalized;
+  }
+
+  return {
+    ...normalized,
+    gradingStructureId: resolved,
+    // Keep the legacy mirror while the physical store/index version is retained.
+    gradingSystemId: resolved,
+  };
+}
+
+export type ClassSubjectOrderCompatibleRecord = {
+  id?: unknown;
+  classId?: unknown;
+  academicStructureId?: unknown;
+  academicPeriodId?: unknown;
+  curriculumSubjectId?: unknown;
+  orderIndex?: unknown;
+  [key: string]: unknown;
+};
+
+export type CurriculumSubjectOrderRecord = {
+  id?: unknown;
+  orderIndex?: unknown;
+  [key: string]: unknown;
+};
+
+/**
+ * Returns repaired copies of class-subject rows without mutating the source.
+ * Existing explicit order values win, followed by curriculum order, then the
+ * next available sequence inside the same class/structure/period group.
+ */
+export function backfillClassSubjectOrderIndexes<
+  T extends ClassSubjectOrderCompatibleRecord,
+>(
+  classSubjects: readonly T[],
+  curriculumSubjects: readonly CurriculumSubjectOrderRecord[],
+): Array<T & { orderIndex: number }> {
+  const curriculumOrder = new Map<string, number>();
+
+  curriculumSubjects.forEach((row) => {
+    const id = String(row.id ?? "").trim();
+    const order = Number(row.orderIndex);
+    if (id && Number.isFinite(order) && order >= 0) {
+      curriculumOrder.set(id, order);
+    }
+  });
+
+  const nextByGroup = new Map<string, number>();
+
+  return classSubjects.map((row) => {
+    const explicit = Number(row.orderIndex);
+    const curriculumId = String(row.curriculumSubjectId ?? "").trim();
+    const inherited = curriculumOrder.get(curriculumId);
+    const groupKey = [
+      String(row.classId ?? ""),
+      String(row.academicStructureId ?? ""),
+      String(row.academicPeriodId ?? ""),
+    ].join("::");
+
+    const currentNext = nextByGroup.get(groupKey) ?? 1;
+    const resolved =
+      Number.isFinite(explicit) && explicit >= 0
+        ? explicit
+        : inherited !== undefined
+          ? inherited
+          : currentNext;
+
+    nextByGroup.set(groupKey, Math.max(currentNext, resolved + 1));
+
+    return {
+      ...row,
+      orderIndex: resolved,
+    };
+  });
+}

@@ -60,7 +60,7 @@ import {
   ClassSubject,
   ComputedResult,
   GradeRule,
-  GradingSystem,
+  GradingStructure,
   ReportCard,
   ReportCardItem,
   School,
@@ -452,7 +452,7 @@ export default function TeacherStudentReports() {
   const [assessmentEntries, setAssessmentEntries] = useState<AssessmentEntry[]>(
     [],
   );
-  const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
+  const [gradingStructures, setGradingStructures] = useState<GradingStructure[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
   const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
@@ -517,7 +517,7 @@ export default function TeacherStudentReports() {
     setAssessmentStructures([]);
     setAssessmentStructureItems([]);
     setAssessmentEntries([]);
-    setGradingSystems([]);
+    setGradingStructures([]);
     setGradeRules([]);
     setAttendance([]);
     setStudentAttendanceSummaries([]);
@@ -652,7 +652,7 @@ export default function TeacherStudentReports() {
         db.assessmentStructures.toArray(),
         db.assessmentStructureItems.toArray(),
         db.assessmentEntries.toArray(),
-        db.gradingSystems.toArray(),
+        db.gradingStructures.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
         (db as any).studentAttendanceSummaries?.toArray?.() || [],
@@ -976,7 +976,7 @@ export default function TeacherStudentReports() {
               assignedStudentIds.has(idOf(row.studentId))),
         ),
       );
-      setGradingSystems(
+      setGradingStructures(
         gradingRows.filter((row) => sameTenant(row) && row.active !== false),
       );
       setGradeRules(
@@ -1228,7 +1228,7 @@ export default function TeacherStudentReports() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,
@@ -1255,7 +1255,7 @@ export default function TeacherStudentReports() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,

@@ -2842,4 +2842,36 @@ const css = `
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
+
+/* =========================================================
+   PORTAL-AWARE MODALS AND SHEETS
+   =========================================================
+   On desktop, overlays belong to the active page column rather than the
+   complete browser viewport. RolePortalShell publishes --portal-content-left,
+   which is 0 when the sidebar is hidden and the live sidebar width otherwise.
+*/
+@media (min-width: 980px) {
+  .ba-modal-backdrop,
+  .ba-sheet-backdrop {
+    top: var(--eds-shell-top-offset, 0px);
+    right: 0;
+    bottom: 0;
+    left: var(--portal-content-left, 0px);
+    width: auto;
+    max-width: calc(100vw - var(--portal-content-left, 0px));
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .ba-modal,
+  .ba-sheet {
+    min-width: 0;
+    max-width: calc(
+      100vw -
+      var(--portal-content-left, 0px) -
+      20px
+    );
+  }
+}
+
 `;

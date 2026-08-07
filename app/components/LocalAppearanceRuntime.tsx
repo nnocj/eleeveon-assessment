@@ -1,23 +1,5 @@
 "use client";
 
-/**
- * app/components/LocalAppearanceRuntime.tsx
- * --------------------------------------------------------------------------
- * Applies role-local display preferences after the shared ThemeContext has
- * finished applying the active workspace branding.
- *
- * Ownership:
- * - ThemeContext owns shared branding, primary colour and shared defaults.
- * - This runtime owns the user's local mode override, density, motion and
- *   personal font-size preference.
- *
- * Safety:
- * - waits for the matching active appearance identity before writing CSS;
- * - resets readiness whenever the role-scoped storage identity changes;
- * - keeps the resolved mode from the exact application result;
- * - never replaces the protected shared primary colour.
- */
-
 import React, {
   createContext,
   useCallback,
@@ -31,6 +13,12 @@ import React, {
 import { useActiveMembership } from "../context/active-membership-context";
 import { useSettings } from "../context/settings-context";
 import { useTheme } from "../context/theme-context";
+
+import {
+  applyEleeveonDesignTokens,
+  createEleeveonDesignTokens,
+  type EleeveonDensity,
+} from "../lib/design";
 import {
   applyLocalPortalSettings,
   DEFAULT_LOCAL_PORTAL_SETTINGS,
@@ -53,6 +41,7 @@ type LocalAppearanceRuntimeValue = {
 type LocalSettingsChangeDetail = {
   storageKey?: string;
   settings?: LocalPortalSettings;
+  resolvedMode?: ResolvedAppearanceMode;
 };
 
 const LocalAppearanceRuntimeContext =
@@ -73,9 +62,7 @@ function cleanRole(value: unknown): string {
 }
 
 function resolveSharedMode(value: unknown): ResolvedAppearanceMode {
-  return String(value || "")
-    .trim()
-    .toLowerCase() === "dark"
+  return String(value || "").trim().toLowerCase() === "dark"
     ? "dark"
     : "light";
 }
@@ -83,20 +70,84 @@ function resolveSharedMode(value: unknown): ResolvedAppearanceMode {
 function sameIdentityValue(left: unknown, right: unknown): boolean {
   const leftId = cleanId(left);
   const rightId = cleanId(right);
-
   if (!leftId || !rightId) return true;
   return leftId === rightId;
 }
 
+function publishWindowAppearance(
+  mode: ResolvedAppearanceMode,
+  primaryColor: string,
+  settings: LocalPortalSettings,
+  sharedFontSize: unknown,
+) {
+  if (typeof document === "undefined") return;
+
+  const density = String(
+    settings.density || "comfortable",
+  ) as EleeveonDensity;
+
+  const tokens = createEleeveonDesignTokens({
+    mode,
+    density:
+      density === "compact" ||
+      density === "spacious"
+        ? density
+        : "comfortable",
+    reduceMotion: Boolean(settings.reduceMotion),
+    primaryColor,
+    fontSize: Number(settings.fontSize || sharedFontSize || 16),
+    textureIntensity: 1,
+  });
+
+  applyEleeveonDesignTokens(
+    document.documentElement,
+    tokens,
+  );
+
+  const root = document.documentElement;
+  const computed =
+    getComputedStyle(
+      document.documentElement,
+    );
+
+  const windowColor =
+    computed
+      .getPropertyValue(
+        "--eds-header-bg",
+      )
+      .trim() ||
+    (mode === "dark"
+      ? "#111a2b"
+      : "#f8fafc");
+
+  root.dataset.appearanceMode = mode;
+  root.dataset.edsReady = "true";
+  root.style.setProperty(
+    "--window-chrome-fallback",
+    windowColor,
+  );
+
+  let meta =
+    document.querySelector<HTMLMetaElement>(
+      'meta[name="theme-color"]:not([media])',
+    );
+
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.name = "theme-color";
+    document.head.appendChild(meta);
+  }
+
+  meta.content = windowColor;
+}
+
 export function useLocalAppearanceRuntime() {
   const context = useContext(LocalAppearanceRuntimeContext);
-
   if (!context) {
     throw new Error(
       "useLocalAppearanceRuntime must be used inside LocalAppearanceRuntime.",
     );
   }
-
   return context;
 }
 
@@ -112,30 +163,18 @@ export default function LocalAppearanceRuntime({
   const accountId = cleanId(
     activeMembership?.accountId ?? settingsContext.loadedFor?.accountId,
   );
-
   const schoolId = cleanId(
     activeMembership?.schoolId ?? settingsContext.loadedFor?.schoolId,
   );
-
   const branchId = cleanId(
     activeMembership?.branchId ?? settingsContext.loadedFor?.branchId,
   );
-
   const roleKey = cleanRole(
-    activeRole ||
-      activeMembership?.role ||
-      settingsContext.loadedFor?.role ||
-      "portal",
+    activeRole || activeMembership?.role || settingsContext.loadedFor?.role || "portal",
   );
 
   const storageKey = useMemo(
-    () =>
-      getLocalSettingsStorageKey({
-        accountId,
-        schoolId,
-        branchId,
-        roleKey,
-      }),
+    () => getLocalSettingsStorageKey({ accountId, schoolId, branchId, roleKey }),
     [accountId, branchId, roleKey, schoolId],
   );
 
@@ -145,34 +184,21 @@ export default function LocalAppearanceRuntime({
     null;
 
   const sharedDefaultMode = resolveSharedMode(
-    sharedSettings?.appearanceMode ||
-      sharedSettings?.theme ||
-      sharedSettings?.mode ||
-      theme.mode,
+    sharedSettings?.appearanceMode || sharedSettings?.theme || sharedSettings?.mode || theme.mode,
   );
-
   const sharedPrimaryColor = String(
-    sharedSettings?.primaryColor ||
-      theme.primaryColor ||
-      "var(--primary-color, #2f6fed)",
+    sharedSettings?.primaryColor || theme.primaryColor || "#2f6fed",
   ).trim();
+  const sharedFontSize = sharedSettings?.fontSize ?? theme.fontSize ?? 16;
 
-  const sharedFontSize =
-    sharedSettings?.fontSize ?? theme.fontSize ?? 16;
-
-  const [settings, setSettings] = useState<LocalPortalSettings>(
-    DEFAULT_LOCAL_PORTAL_SETTINGS,
-  );
-  const [resolvedMode, setResolvedMode] =
-    useState<ResolvedAppearanceMode>(sharedDefaultMode);
+  const [settings, setSettings] = useState<LocalPortalSettings>(DEFAULT_LOCAL_PORTAL_SETTINGS);
+  const [resolvedMode, setResolvedMode] = useState<ResolvedAppearanceMode>(sharedDefaultMode);
   const [ready, setReady] = useState(false);
-
   const lastAppliedSignatureRef = useRef<string | null>(null);
   const activeStorageKeyRef = useRef(storageKey);
 
   const appearanceMatchesWorkspace = useMemo(() => {
     if (!theme.appliedFor) return false;
-
     return (
       cleanRole(theme.appliedFor.role) === roleKey &&
       sameIdentityValue(theme.appliedFor.accountId, accountId) &&
@@ -182,14 +208,29 @@ export default function LocalAppearanceRuntime({
   }, [accountId, branchId, roleKey, schoolId, theme.appliedFor]);
 
   const apply = useCallback(
-    (preferred?: LocalPortalSettings | null) => {
+    (
+      preferred?:
+        LocalPortalSettings | null,
+      source:
+        "bootstrap" |
+        "explicit" |
+        "storage" |
+        "shared-refresh" =
+          "bootstrap",
+    ) => {
       const next = preferred || readLocalPortalSettings(storageKey);
-
       const result = applyLocalPortalSettings(next, {
         sharedDefaultMode,
         sharedPrimaryColor,
         sharedFontSize,
       });
+
+      publishWindowAppearance(
+        result.resolvedMode,
+        sharedPrimaryColor,
+        result.settings,
+        sharedFontSize,
+      );
 
       const signature = JSON.stringify({
         storageKey,
@@ -212,11 +253,23 @@ export default function LocalAppearanceRuntime({
       setResolvedMode(result.resolvedMode);
       setReady(true);
 
-      if (
-        lastAppliedSignatureRef.current !== signature &&
-        typeof window !== "undefined"
-      ) {
+      if (lastAppliedSignatureRef.current !== signature && typeof window !== "undefined") {
         lastAppliedSignatureRef.current = signature;
+        window.dispatchEvent(
+          new CustomEvent("eleeveon:appearance-design-bridge", {
+            detail: {
+              resolvedMode: result.resolvedMode,
+              density: result.settings.density,
+              reduceMotion: result.settings.reduceMotion,
+              fontSize: result.settings.fontSize,
+              appearanceMode:
+                result.settings.appearanceMode,
+              source,
+              storageKey,
+              at: Date.now(),
+            },
+          }),
+        );
 
         window.dispatchEvent(
           new CustomEvent(LOCAL_APPEARANCE_APPLIED_EVENT, {
@@ -235,13 +288,7 @@ export default function LocalAppearanceRuntime({
 
       return result;
     },
-    [
-      sharedDefaultMode,
-      sharedFontSize,
-      sharedPrimaryColor,
-      storageKey,
-      theme.appliedFor?.key,
-    ],
+    [sharedDefaultMode, sharedFontSize, sharedPrimaryColor, storageKey, theme.appliedFor?.key],
   );
 
   const refresh = useCallback(() => {
@@ -249,14 +296,8 @@ export default function LocalAppearanceRuntime({
     apply();
   }, [appearanceMatchesWorkspace, apply, theme.ready]);
 
-  /*
-   * A role, school or branch change creates a different local-settings scope.
-   * Mark the runtime unready immediately so consumers never read preferences
-   * from the previously opened workspace while ThemeContext is transitioning.
-   */
   useEffect(() => {
     if (activeStorageKeyRef.current === storageKey) return;
-
     activeStorageKeyRef.current = storageKey;
     lastAppliedSignatureRef.current = null;
     setSettings(DEFAULT_LOCAL_PORTAL_SETTINGS);
@@ -269,56 +310,112 @@ export default function LocalAppearanceRuntime({
       setReady(false);
       return;
     }
-
     apply();
-  }, [
-    appearanceMatchesWorkspace,
-    apply,
-    settingsContext.loadedFor?.key,
-    theme.appliedFor?.key,
-    theme.ready,
-  ]);
+  }, [appearanceMatchesWorkspace, apply, settingsContext.loadedFor?.key, theme.appliedFor?.key, theme.ready]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const handleLocalChange = (event: Event) => {
-      const custom = event as CustomEvent<LocalSettingsChangeDetail>;
+    const handleLocalChange = (
+      event: Event,
+    ) => {
+      const custom =
+        event as CustomEvent<
+          LocalSettingsChangeDetail
+        >;
 
       if (
         custom.detail?.storageKey &&
-        custom.detail.storageKey !== storageKey
+        custom.detail.storageKey !==
+          storageKey
       ) {
         return;
       }
 
-      if (!theme.ready || !appearanceMatchesWorkspace) return;
-      apply(custom.detail?.settings || null);
+      /*
+       * This is an explicit user selection. Do not wait for another nav click,
+       * ThemeContext refresh or route remount. The exact storage key is enough
+       * authority to apply it immediately.
+       */
+      apply(
+        custom.detail?.settings ||
+          readLocalPortalSettings(
+            storageKey,
+          ),
+        "explicit",
+      );
     };
 
-    const handleStorage = (event: StorageEvent) => {
+    const handleLocalRefresh = (
+      event: Event,
+    ) => {
+      const custom =
+        event as CustomEvent<
+          LocalSettingsChangeDetail
+        >;
+
       if (
-        event.storageArea === window.localStorage &&
+        custom.detail?.storageKey &&
+        custom.detail.storageKey !==
+          storageKey
+      ) {
+        return;
+      }
+
+      apply(
+        custom.detail?.settings ||
+          readLocalPortalSettings(
+            storageKey,
+          ),
+        "explicit",
+      );
+    };
+
+    const handleStorage = (
+      event: StorageEvent,
+    ) => {
+      if (
+        event.storageArea ===
+          window.localStorage &&
         event.key === storageKey &&
         theme.ready &&
         appearanceMatchesWorkspace
       ) {
-        apply();
+        apply(null, "storage");
       }
     };
 
-    const handleThemeRefresh = () => {
-      if (theme.ready && appearanceMatchesWorkspace) apply();
-    };
+    const handleSharedAppearance =
+      () => {
+        if (
+          theme.ready &&
+          appearanceMatchesWorkspace
+        ) {
+          apply(
+            null,
+            "shared-refresh",
+          );
+        }
+      };
 
     window.addEventListener(
       LOCAL_SETTINGS_CHANGED_EVENT,
       handleLocalChange,
     );
-    window.addEventListener("storage", handleStorage);
+
     window.addEventListener(
-      "eleeveon:theme-refresh",
-      handleThemeRefresh,
+      "eleeveon:local-appearance-refresh",
+      handleLocalRefresh,
+    );
+
+    window.addEventListener(
+      "storage",
+      handleStorage,
+    );
+
+    window.addEventListener(
+      "eleeveon:shared-theme-applied",
+      handleSharedAppearance,
     );
 
     return () => {
@@ -326,10 +423,20 @@ export default function LocalAppearanceRuntime({
         LOCAL_SETTINGS_CHANGED_EVENT,
         handleLocalChange,
       );
-      window.removeEventListener("storage", handleStorage);
+
       window.removeEventListener(
-        "eleeveon:theme-refresh",
-        handleThemeRefresh,
+        "eleeveon:local-appearance-refresh",
+        handleLocalRefresh,
+      );
+
+      window.removeEventListener(
+        "storage",
+        handleStorage,
+      );
+
+      window.removeEventListener(
+        "eleeveon:shared-theme-applied",
+        handleSharedAppearance,
       );
     };
   }, [
@@ -340,13 +447,7 @@ export default function LocalAppearanceRuntime({
   ]);
 
   const value = useMemo<LocalAppearanceRuntimeValue>(
-    () => ({
-      ready,
-      storageKey,
-      settings,
-      resolvedMode,
-      refresh,
-    }),
+    () => ({ ready, storageKey, settings, resolvedMode, refresh }),
     [ready, refresh, resolvedMode, settings, storageKey],
   );
 

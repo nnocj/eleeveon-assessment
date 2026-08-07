@@ -25,7 +25,19 @@ export type SyncDiagnostics = {
   deleted: number;
   lastSyncOkAt: number;
   lastSyncError: string | null;
-  byTable: Record<string, { pending: number; errors: number; synced: number; deleted: number; total: number }>;
+  byTable: Record<string, {
+    pending: number;
+    errors: number;
+    synced: number;
+    deleted: number;
+    total: number;
+    records: Array<{
+      id: string;
+      label: string;
+      status: string | number | undefined;
+      syncError?: string;
+    }>;
+  }>;
 };
 
 export async function getSyncDiagnostics(options?: { tables?: string[]; excludeTables?: string[] }): Promise<SyncDiagnostics> {
@@ -43,7 +55,14 @@ export async function getSyncDiagnostics(options?: { tables?: string[]; excludeT
     const rows = await table.toArray();
     const scopedRows = accountId ? rows.filter((row: any) => !row.accountId || row.accountId === accountId) : rows;
 
-    const tableCounts = { pending: 0, errors: 0, synced: 0, deleted: 0, total: scopedRows.length };
+    const tableCounts: SyncDiagnostics["byTable"][string] = {
+      pending: 0,
+      errors: 0,
+      synced: 0,
+      deleted: 0,
+      total: scopedRows.length,
+      records: [],
+    };
 
     for (const row of scopedRows) {
       const status = normalizeSyncStatus(row.synced);
@@ -51,6 +70,17 @@ export async function getSyncDiagnostics(options?: { tables?: string[]; excludeT
       else if (status === SYNC_STATUS_VALUE.ERROR) tableCounts.errors++;
       else if (status === SYNC_STATUS_VALUE.SYNCED) tableCounts.synced++;
       if (row.isDeleted) tableCounts.deleted++;
+      if (
+        status === SYNC_STATUS_VALUE.PENDING ||
+        status === SYNC_STATUS_VALUE.ERROR
+      ) {
+        tableCounts.records.push({
+          id: String(row.id ?? ""),
+          label: String(row.name ?? row.title ?? row.subject ?? row.code ?? row.id ?? "Record"),
+          status: row.synced,
+          syncError: typeof row.syncError === "string" ? row.syncError : undefined,
+        });
+      }
     }
 
     pending += tableCounts.pending;

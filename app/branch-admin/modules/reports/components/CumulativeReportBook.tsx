@@ -2,17 +2,67 @@
 
 /**
  * reports/components/CumulativeReportBook.tsx
- * ---------------------------------------------------------
- * Compatibility wrapper.
- *
- * The real implementation lives in reports/cumulative-book/CumulativeReportBook.tsx
- * so book pages, helpers and types stay grouped together.
+ * --------------------------------------------------------------------------
+ * Historical assessment-aware compatibility wrapper.
  */
 
-export { default } from "../cumulative-book/CumulativeReportBook";
+import React, {
+  useMemo,
+} from "react";
+
+import CumulativeReportBookImplementation from "../cumulative-book/CumulativeReportBook";
+
+import {
+  hydrateStudentReportCardDataset,
+} from "../reportSnapshotService";
+
+import type {
+  CumulativeReportBookProps,
+} from "../cumulative-book/cumulative-book-types";
+
 export type {
   CumulativeReportBookDataset,
   CumulativeReportBookProps,
   CumulativeReportBookSettings,
   CumulativeBookPeriodDataset,
 } from "../cumulative-book/cumulative-book-types";
+
+export default function CumulativeReportBook(
+  props: CumulativeReportBookProps,
+) {
+  const dataset = useMemo(() => {
+    if (!props.dataset) return props.dataset;
+
+    return {
+      ...props.dataset,
+      periods: props.dataset.periods
+        .map((period) => {
+          const hydrated =
+            hydrateStudentReportCardDataset(
+              (period as any).snapshot ||
+              (period as any).rawSnapshot ||
+              (period as any).reportData ||
+              period.dataset,
+            );
+
+          return hydrated
+            ? {
+                ...period,
+                dataset: hydrated,
+              }
+            : period;
+        })
+        .filter(
+          (period) =>
+            Boolean(period.dataset),
+        ),
+    };
+  }, [props.dataset]);
+
+  return (
+    <CumulativeReportBookImplementation
+      {...props}
+      dataset={dataset}
+    />
+  );
+}

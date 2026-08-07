@@ -23,7 +23,7 @@
  *
  * Correct responsibility:
  * - activate a chosen AssessmentStructure for a specific ClassSubject
- * - optionally attach a GradingSystem
+ * - optionally attach a GradingStructure
  * - classSubjectId remains the ONLY source of truth for where assessment applies
  *
  * Class-first workflow upgrade:
@@ -59,7 +59,7 @@ import {
   type CurriculumPathway,
   type CurriculumSubject,
   type GradeRule,
-  type GradingSystem,
+  type GradingStructure,
   type Organization,
   type Subject,
   type Teacher,
@@ -91,7 +91,7 @@ type ApplicabilityForm = {
   id?: string;
   classSubjectId: string;
   assessmentStructureId: string;
-  gradingSystemId: string;
+  gradingStructureId: string;
   organizationId: string;
   groupCode: string;
   isElective: boolean;
@@ -145,7 +145,7 @@ type ClassApplicabilityView = {
 const emptyForm = (): ApplicabilityForm => ({
   classSubjectId: "",
   assessmentStructureId: "",
-  gradingSystemId: "",
+  gradingStructureId: "",
   organizationId: "",
   groupCode: "",
   isElective: false,
@@ -392,7 +392,7 @@ export default function Assessmentapplicability() {
   const [assessmentStructures, setAssessmentStructures] = useState<
     AssessmentStructure[]
   >([]);
-  const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
+  const [gradingStructures, setGradingStructures] = useState<GradingStructure[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [entries, setEntries] = useState<AssessmentEntry[]>([]);
@@ -451,7 +451,7 @@ export default function Assessmentapplicability() {
     setCurriculums([]);
     setPathways([]);
     setAssessmentStructures([]);
-    setGradingSystems([]);
+    setGradingStructures([]);
     setGradeRules([]);
     setOrganizations([]);
     setEntries([]);
@@ -479,7 +479,7 @@ export default function Assessmentapplicability() {
         curriculumRows,
         pathwayRows,
         assessmentStructureRows,
-        gradingSystemRows,
+        gradingStructureRows,
         gradeRuleRows,
         organizationRows,
         entryRows,
@@ -499,7 +499,7 @@ export default function Assessmentapplicability() {
           schoolId: schoolId,
           branchId: branchId,
         } as any),
-        listActiveLocal("gradingSystems", {
+        listActiveLocal("gradingStructures", {
           accountId,
           schoolId: schoolId,
           branchId: branchId,
@@ -562,7 +562,7 @@ export default function Assessmentapplicability() {
         ),
       );
       setAssessmentStructures(assessmentStructureRows as AssessmentStructure[]);
-      setGradingSystems(gradingSystemRows as GradingSystem[]);
+      setGradingStructures(gradingStructureRows as GradingStructure[]);
       setGradeRules(
         (gradeRuleRows as GradeRule[])
           .filter((row) => sameTenant(row as TenantRow))
@@ -634,9 +634,9 @@ export default function Assessmentapplicability() {
     () => new Map(assessmentStructures.map((row: any) => [idOf(row.id), row])),
     [assessmentStructures],
   );
-  const gradingSystemMap = useMemo(
-    () => new Map(gradingSystems.map((row: any) => [idOf(row.id), row])),
-    [gradingSystems],
+  const gradingStructureMap = useMemo(
+    () => new Map(gradingStructures.map((row: any) => [idOf(row.id), row])),
+    [gradingStructures],
   );
   const organizationMap = useMemo(
     () => new Map(organizations.map((row: any) => [idOf(row.id), row])),
@@ -707,7 +707,7 @@ export default function Assessmentapplicability() {
   const gradeRuleCount = useMemo(() => {
     const map = new Map<string, number>();
     gradeRules.forEach((rule: any) => {
-      const id = idOf(rule.gradingSystemId);
+      const id = idOf(rule.gradingStructureId);
       if (!id) return;
       map.set(id, (map.get(id) || 0) + 1);
     });
@@ -740,7 +740,7 @@ export default function Assessmentapplicability() {
       const structure = assessmentStructureMap.get(
         idOf(row.assessmentStructureId),
       ) as any;
-      const grading = gradingSystemMap.get(idOf(row.gradingSystemId)) as any;
+      const grading = gradingStructureMap.get(idOf(row.gradingStructureId)) as any;
       const organization = organizationMap.get(idOf(row.organizationId)) as any;
 
       return {
@@ -756,7 +756,7 @@ export default function Assessmentapplicability() {
         assessmentName: structure?.name || "Unknown assessment",
         gradingName: grading?.name || "No grading",
         organizationName: organization?.name || "No organization",
-        gradeRuleCount: gradeRuleCount.get(idOf(row.gradingSystemId)) || 0,
+        gradeRuleCount: gradeRuleCount.get(idOf(row.gradingStructureId)) || 0,
         groupCode: row.groupCode || "",
         isElective: !!row.isElective,
         active: isActiveRow(row),
@@ -769,7 +769,7 @@ export default function Assessmentapplicability() {
     assessmentStructureMap,
     entryCountByClassSubject,
     gradeRuleCount,
-    gradingSystemMap,
+    gradingStructureMap,
     optionMap,
     organizationMap,
   ]);
@@ -980,7 +980,7 @@ export default function Assessmentapplicability() {
       id: idOf(row.id),
       classSubjectId: String(row.classSubjectId || ""),
       assessmentStructureId: String(row.assessmentStructureId || ""),
-      gradingSystemId: String(row.gradingSystemId || ""),
+      gradingStructureId: String(row.gradingStructureId || ""),
       organizationId: String(row.organizationId || ""),
       groupCode: row.groupCode || "",
       isElective: !!row.isElective,
@@ -1033,7 +1033,7 @@ export default function Assessmentapplicability() {
         branchId: branchId,
         classSubjectId: idOf(form.classSubjectId),
         assessmentStructureId: idOf(form.assessmentStructureId),
-        gradingSystemId: idOf(form.gradingSystemId) || undefined,
+        gradingStructureId: idOf(form.gradingStructureId) || undefined,
         organizationId:
           idOf(form.organizationId) ||
           selectedOption?.organizationId ||
@@ -1091,7 +1091,7 @@ export default function Assessmentapplicability() {
       <State
         primary={primary}
         title="Opening Assessment Applicability..."
-        text="Checking class subjects, assessment structures and grading systems."
+        text="Checking class subjects, assessment structures and grading structures."
       />
     );
   }
@@ -1205,9 +1205,9 @@ export default function Assessmentapplicability() {
         </section>
       )}
 
-      {!gradingSystems.length && (
+      {!gradingStructures.length && (
         <section className="ba-warning">
-          No grading system found. Applicability can save without grading, but
+          No grading structure found. Applicability can save without grading, but
           reports need grading rules.
         </section>
       )}
@@ -1350,7 +1350,7 @@ export default function Assessmentapplicability() {
                 <Empty
                   icon="🔗"
                   title="No assessment applicability"
-                  text="Connect a class subject to an assessment structure and grading system."
+                  text="Connect a class subject to an assessment structure and grading structure."
                 />
               )}
             </section>
@@ -1403,7 +1403,7 @@ export default function Assessmentapplicability() {
           modalClassId={modalClassId}
           setModalClassId={setModalClassId}
           assessmentStructures={assessmentStructures}
-          gradingSystems={gradingSystems}
+          gradingStructures={gradingStructures}
           organizations={organizations}
           gradeRuleCount={gradeRuleCount}
           optionMap={optionMap}
@@ -1839,7 +1839,7 @@ function ApplicabilityModal({
   modalClassId,
   setModalClassId,
   assessmentStructures,
-  gradingSystems,
+  gradingStructures,
   organizations,
   gradeRuleCount,
   optionMap,
@@ -1854,7 +1854,7 @@ function ApplicabilityModal({
   modalClassId: string;
   setModalClassId: (value: string) => void;
   assessmentStructures: AssessmentStructure[];
-  gradingSystems: GradingSystem[];
+  gradingStructures: GradingStructure[];
   organizations: Organization[];
   gradeRuleCount: Map<string, number>;
   optionMap: Map<string, ClassSubjectOption>;
@@ -1955,13 +1955,13 @@ function ApplicabilityModal({
             <label>
               <span>Grading System</span>
               <select
-                value={form.gradingSystemId}
+                value={form.gradingStructureId}
                 onChange={(event) =>
-                  updateForm({ gradingSystemId: event.target.value })
+                  updateForm({ gradingStructureId: event.target.value })
                 }
               >
-                <option value="">No grading system</option>
-                {gradingSystems.map((row: any) => (
+                <option value="">No grading structure</option>
+                {gradingStructures.map((row: any) => (
                   <option key={String(row.id)} value={String(row.id)}>
                     {row.name} ({gradeRuleCount.get(idOf(row.id)) || 0} rules)
                   </option>
@@ -2471,6 +2471,24 @@ const css = `
       transparent
     ),
     0 10px 24px rgba(15,23,42,.08);
+}
+@media (min-width:980px){
+  .ba-modal-backdrop,
+  .ba-sheet-backdrop{
+    top:var(--eds-shell-top-offset,0px);
+    right:0;
+    bottom:0;
+    left:var(--portal-content-left,0px);
+    width:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+  .ba-modal,
+  .ba-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
 }
 
 `;

@@ -6,6 +6,12 @@
 
 import type { CSSProperties } from "react";
 
+import {
+  resolveBroadsheetAssessmentReportSettings,
+  type AssessmentReportProjection,
+  type AssessmentReportProjectionSettings,
+} from "../../../../lib/assessments";
+
 import type {
   AnnualBroadsheet,
   AnnualBroadsheetStudentRow,
@@ -14,6 +20,8 @@ import type {
 import type {
   ClassBroadsheetStudentRow,
   ComputedClassBroadsheet,
+  ReportAssessmentColumn,
+  ReportBreakdownItem,
   ComputedSubjectBroadsheet,
   ReportHeaderData,
   SubjectBroadsheetStudentRow,
@@ -224,10 +232,41 @@ export function resolveBroadsheetTemplateSettings(args: {
   const { kind, settings, template } = args;
   const templateCode = templateCodeOf(template, settings);
   const definition = template as BroadsheetTemplateDefinition | undefined;
+  const assessmentSettings =
+    resolveBroadsheetAssessmentReportSettings(
+      settings as any,
+    );
 
   return {
     ...DEFAULT_BROADSHEET_SETTINGS,
     ...(settings || {}),
+
+    broadsheetAssessmentHierarchyDisplay:
+      assessmentSettings.displayMode,
+    broadsheetShowAssessmentGroupHeaders:
+      assessmentSettings.showGroupHeaders,
+    broadsheetMaximumAssessmentDepth:
+      assessmentSettings.maximumVisibleDepth,
+
+    showAssessmentParentItems:
+      assessmentSettings.showParentItems,
+    showAssessmentChildItems:
+      assessmentSettings.showChildItems,
+    showCalculatedAssessmentItems:
+      assessmentSettings.showCalculatedItems,
+    indentAssessmentChildren:
+      assessmentSettings.indentChildren,
+    showAssessmentMaximumScores:
+      assessmentSettings.showMaximumScores,
+    showAssessmentWeights:
+      assessmentSettings.showWeights,
+    showAssessmentRawScores:
+      assessmentSettings.showRawScores,
+    showAssessmentWeightedScores:
+      assessmentSettings.showWeightedScores,
+    showAssessmentHierarchyPath:
+      assessmentSettings.showHierarchyPath,
+
     reportType: reportTypeForBroadsheetKind(kind),
     templateCode,
     layoutKey:
@@ -555,4 +594,209 @@ export function defaultBroadsheetEmptyMessage(kind: BroadsheetKind): string {
     return "No annual broadsheet records are available for the selected filters.";
   }
   return "No subject broadsheet records are available for the selected filters.";
+}
+
+
+export function resolveSubjectBroadsheetAssessmentSettings(
+  settings?: BroadsheetTemplateSettings | null,
+): AssessmentReportProjectionSettings {
+  return resolveBroadsheetAssessmentReportSettings(
+    settings as any,
+  );
+}
+
+export function visibleBroadsheetAssessmentColumns(args: {
+  dataset?: ComputedSubjectBroadsheet | null;
+  settings: ResolvedBroadsheetTemplateSettings;
+}): ReportAssessmentColumn[] {
+  const { dataset, settings } = args;
+  if (!dataset) return [];
+
+  const projection =
+    dataset.assessmentProjection as
+      | AssessmentReportProjection
+      | undefined;
+
+  const source: ReportAssessmentColumn[] =
+    projection?.columns?.length
+      ? projection.columns.map(
+          (column) => ({
+            assessmentStructureItemId:
+              column.itemId,
+            parentItemId:
+              column.parentItemId,
+            name: column.name,
+            shortLabel:
+              column.shortLabel,
+            pathLabels: [
+              ...column.pathLabels,
+            ],
+            depth: column.depth,
+            order: column.order,
+            itemType:
+              column.itemType,
+            aggregationMode:
+              column.aggregationMode,
+            weight:
+              column.effectiveWeight,
+            effectiveWeight:
+              column.effectiveWeight,
+            maxScore:
+              column.maxScore,
+            isParent:
+              column.isParent,
+            isLeaf:
+              column.isLeaf,
+            calculatedFromChildren:
+              column.calculatedFromChildren,
+            complete:
+              column.complete,
+            groupId:
+              column.groupId,
+            groupLabel:
+              column.groupLabel,
+            groupDepth:
+              column.groupDepth,
+            columnSpan:
+              column.columnSpan,
+          }),
+        )
+      : dataset.assessmentColumns ?? [];
+
+  return source
+    .filter((column) => {
+      const depth =
+        column.depth ?? 0;
+
+      if (
+        settings.broadsheetMaximumAssessmentDepth !==
+          null &&
+        settings.broadsheetMaximumAssessmentDepth !==
+          undefined &&
+        depth >
+          settings.broadsheetMaximumAssessmentDepth
+      ) {
+        return false;
+      }
+
+      if (
+        !settings.showAssessmentParentItems &&
+        column.isParent
+      ) {
+        return false;
+      }
+
+      if (
+        !settings.showAssessmentChildItems &&
+        depth > 0
+      ) {
+        return false;
+      }
+
+      if (
+        !settings.showCalculatedAssessmentItems &&
+        column.calculatedFromChildren
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        (a.order ?? 0) -
+          (b.order ?? 0) ||
+        (a.depth ?? 0) -
+          (b.depth ?? 0) ||
+        a.name.localeCompare(
+          b.name,
+        ),
+    );
+}
+
+export function broadsheetAssessmentColumnLabel(
+  column: ReportAssessmentColumn,
+  settings: ResolvedBroadsheetTemplateSettings,
+): string {
+  if (
+    settings.showAssessmentHierarchyPath &&
+    column.pathLabels?.length
+  ) {
+    return column.pathLabels.join(
+      " · ",
+    );
+  }
+
+  const label =
+    column.shortLabel ||
+    column.name;
+
+  if (
+    settings.indentAssessmentChildren &&
+    (column.depth ?? 0) > 0
+  ) {
+    return `${"› ".repeat(
+      Math.min(
+        column.depth ?? 0,
+        3,
+      ),
+    )}${label}`;
+  }
+
+  return label;
+}
+
+export function broadsheetAssessmentCellText(args: {
+  item?: ReportBreakdownItem;
+  settings: ResolvedBroadsheetTemplateSettings;
+  decimals?: number;
+}): string {
+  const {
+    item,
+    settings,
+    decimals = 0,
+  } = args;
+
+  if (!item) return "-";
+
+  const raw =
+    item.rawScore ??
+    item.score ??
+    0;
+
+  if (
+    settings.showAssessmentRawScores &&
+    settings.showAssessmentMaximumScores
+  ) {
+    return `${formatNumber(
+      raw,
+      decimals,
+    )}/${formatNumber(
+      item.maxScore,
+      decimals,
+    )}`;
+  }
+
+  if (
+    settings.showAssessmentRawScores
+  ) {
+    return formatNumber(
+      raw,
+      decimals,
+    );
+  }
+
+  if (
+    settings.showAssessmentWeightedScores
+  ) {
+    return formatNumber(
+      item.weightedScore,
+      1,
+    );
+  }
+
+  return formatPercent(
+    item.normalizedPercentage,
+    0,
+  );
 }

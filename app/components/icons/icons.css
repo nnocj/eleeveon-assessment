@@ -1,0 +1,60 @@
+/**
+ * app/components/icons/icons.css
+ * --------------------------------------------------------------------------
+ * Optional shared icon presentation utilities.
+ */
+
+.eds-icon {
+  color: inherit;
+  transition:
+    color var(--eds-duration-fast)
+      var(--eds-ease-standard),
+    transform var(--eds-duration-fast)
+      var(--eds-ease-enter);
+}
+
+button:hover .eds-icon,
+a:hover .eds-icon {
+  transform: translateY(-0.5px);
+}
+
+.eds-icon-spin {
+  animation:
+    eds-spin
+    0.8s
+    linear
+    infinite;
+}
+
+.eds-icon-pulse {
+  animation:
+    eds-pulse-soft
+    1.7s
+    var(--eds-ease-standard)
+    infinite;
+}
+
+.eds-icon-tile {
+  width: 2.5rem;
+  height: 2.5rem;
+  display: inline-grid;
+  place-items: center;
+  border-radius:
+    var(--eds-radius-control);
+  background:
+    var(--eds-primary-soft);
+  color:
+    var(--eds-primary);
+}
+
+.eds-icon-tile-muted {
+  background:
+    var(--eds-surface-sunken);
+  color:
+    var(--eds-text-muted);
+}
+
+.eds-logo-mark {
+  flex: 0 0 auto;
+  user-select: none;
+}

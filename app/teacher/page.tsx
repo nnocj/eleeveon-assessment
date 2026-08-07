@@ -24,7 +24,7 @@ import RolePortalShell, {
 import { TEACHER_ROLES } from "../lib/auth/roleRedirect";
 
 import Teacherdashboard from "./modules/Teacherdashboard";
-import TeacherAssessmentEntry from "./modules/StudentAssessmentEntry";
+import StudentAssessmentEntry from "./modules/StudentAssessmentEntry";
 import StudentAttendance from "./modules/StudentAttendance";
 import CourseOutline from "./modules/TeacherCourseOutline";
 
@@ -76,7 +76,7 @@ export const NAV_SECTIONS: RoleNavSection[] = [
     title: "Records",
     defaultOpen: false,
     items: [
-      { key: "teacherAssessmentEntry", label: "Assessment Entry", icon: "📝" },
+      { key: "studentAssessmentEntry", label: "Assessment Entry", icon: "📝" },
       { key: "teacherReportRemarks", label: "Report Remarks", icon: "📄" },
       { key: "broadsheets", label: "Broadsheets", icon: "📊" },
     ],
@@ -130,7 +130,7 @@ function TeacherDashboardRoute(props: RouteProps) {
 
 const ROUTES: Record<string, React.ComponentType<RouteProps>> = {
   teacherDashboard: TeacherDashboardRoute,
-  teacherAssessmentEntry: TeacherAssessmentEntry,
+  studentAssessmentEntry: StudentAssessmentEntry,
   studentAttendance: StudentAttendance,
   courseOutline: CourseOutline,
 

@@ -1,0 +1,163 @@
+/**
+ * app/styles/animations.css
+ * --------------------------------------------------------------------------
+ * Reusable Eleeveon motion primitives.
+ */
+
+@keyframes eds-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes eds-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes eds-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.975);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes eds-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes eds-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes eds-pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.58;
+  }
+}
+
+@keyframes eds-sheen {
+  from {
+    transform: translateX(-120%);
+  }
+
+  to {
+    transform: translateX(120%);
+  }
+}
+
+.eds-animate-fade {
+  animation:
+    eds-fade-in
+    var(--eds-duration-standard)
+    var(--eds-ease-enter)
+    both;
+}
+
+.eds-animate-fade-up {
+  animation:
+    eds-fade-up
+    var(--eds-duration-standard)
+    var(--eds-ease-enter)
+    both;
+}
+
+.eds-animate-scale {
+  animation:
+    eds-scale-in
+    var(--eds-duration-standard)
+    var(--eds-ease-enter)
+    both;
+}
+
+.eds-animate-slide-right {
+  animation:
+    eds-slide-in-right
+    var(--eds-duration-standard)
+    var(--eds-ease-enter)
+    both;
+}
+
+.eds-spin {
+  animation:
+    eds-spin
+    0.8s
+    linear
+    infinite;
+}
+
+.eds-pulse {
+  animation:
+    eds-pulse-soft
+    1.8s
+    var(--eds-ease-standard)
+    infinite;
+}
+
+.eds-motion-surface {
+  transition:
+    var(--eds-transition-surface);
+}
+
+.eds-motion-color {
+  transition:
+    var(--eds-transition-color);
+}
+
+.eds-motion-transform {
+  transition:
+    var(--eds-transition-transform);
+}
+
+.eds-pressable {
+  transition:
+    transform
+    var(--eds-duration-fast)
+    var(--eds-ease-enter);
+}
+
+.eds-pressable:active {
+  transform: scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

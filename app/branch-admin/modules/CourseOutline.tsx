@@ -5,12 +5,11 @@
  * Eleeveon Course Outline V2.
  * Branch-scoped, offline-first, read-only delivery map.
  *
- * Workspace-session aligned:
- * - reads the selected workspace session written by /select-role first
- * - falls back to ActiveMembershipProvider, then ActiveBranchContext/settings
- * - prevents this branch-admin academic setup page from accidentally using stale
- *   school/branch context left behind by another role or portal
- * - all reads and writes now use the resolved workspace schoolId and branchId
+ * Role-portal workspace aligned:
+ * - resolves account, school and branch through useBranchWorkspaceScope()
+ * - follows the same selected-role workspace contract as SubjectSetup.tsx
+ * - listens only to the branch tables that drive this generated delivery map
+ * - keeps filter/more sheets inside the role-portal content area on desktop
  *
  * Data behavior intentionally preserved and clarified:
  * - This module does NOT create a separate courseOutlines table.
@@ -33,10 +32,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { useAccount } from "../../context/account-context";
 import { useSettings } from "../../context/settings-context";
-import { useActiveBranch } from "../../context/active-branch-context";
-import { useActiveMembership } from "../../context/active-membership-context";
 
 import {
   db,
@@ -52,8 +48,9 @@ import {
   type Teacher,
 } from "../../lib/db/db";
 
-import { useDataRevision } from "../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../hooks/useBackgroundLoader";
+import { useBranchWorkspaceScope } from "../../hooks/useBranchWorkspaceScope";
+import { useBranchTableRevision } from "../../hooks/useBranchTableRevision";
 type ViewMode = "cards" | "table" | "summary";
 type ReadinessFilter =
   | "all"
@@ -98,114 +95,6 @@ const idOf = (value: any): string => {
   if (value === undefined || value === null) return "";
   return String(value).trim();
 };
-
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
-
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  teacherId?: string | null;
-  studentId?: string | null;
-  parentId?: string | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
-};
-
-function safeStorageRead(key: string) {
-  if (typeof window === "undefined") return null;
-
-  try {
-    return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership() {
-  return safeJsonRead<Record<string, any>>("activeMembership");
-}
-
-function firstPermanentId(...values: unknown[]): string {
-  for (const value of values) {
-    const parsed = idOf(value);
-    if (parsed) return parsed;
-  }
-
-  return "";
-}
-
-function selectedWorkspaceSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeSchoolId?: unknown;
-  activeSchool?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstPermanentId(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeStorageRead("activeSchoolId"),
-  );
-}
-
-function selectedWorkspaceBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeBranchId?: unknown;
-  activeBranch?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstPermanentId(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeStorageRead("activeBranchId"),
-  );
-}
 
 const sameId = (a: any, b: any) => String(a ?? "") === String(b ?? "");
 const safeLower = (value: any) =>
@@ -315,37 +204,30 @@ function typeTone(type: string): "green" | "orange" | "purple" {
 }
 
 export default function CourseOutline() {
-  const dataRevision = useDataRevision();
+  const dataRevision = useBranchTableRevision([
+    "classSubjects",
+    "curriculumSubjects",
+    "curriculums",
+    "curriculumPathways",
+    "subjects",
+    "classes",
+    "teachers",
+    "academicStructures",
+    "academicPeriods",
+    "assessmentApplicabilities",
+  ]);
 
   const router = useRouter();
-  const { accountId, authenticated, loading: accountLoading } = useAccount();
   const { settings, loading: settingsLoading } = useSettings();
+  const workspace = useBranchWorkspaceScope();
   const {
-    activeSchool,
-    activeSchoolId,
-    activeBranch,
-    activeBranchId,
-    loading: contextLoading,
-  } = useActiveBranch();
-  const { activeMembership } = useActiveMembership();
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedWorkspaceSchoolId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeSchoolId,
-    activeSchool: activeSchool as any,
-    settings: settings as any,
-  });
-
-  const branchId = selectedWorkspaceBranchId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeBranchId,
-    activeBranch: activeBranch as any,
-    settings: settings as any,
-  });
+    accountId,
+    schoolId,
+    branchId,
+    authenticated,
+    restoring: accountLoading,
+    branchLoading: contextLoading,
+  } = workspace;
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
 
@@ -1567,4 +1449,22 @@ function AnalysisCard({
 const css = `
 @keyframes spin { to { transform: rotate(360deg); } }
 .ba-page{--ease:cubic-bezier(.2,.8,.2,1);min-height:100dvh;width:100%;max-width:100%;min-width:0;padding:calc(8px * var(--local-density-scale,1));padding-bottom:max(40px,env(safe-area-inset-bottom));background:radial-gradient(circle at top left,color-mix(in srgb,var(--ba-primary) 9%,transparent),transparent 30rem),var(--bg,#f7f8fb);color:var(--text,#111827);font-family:var(--font-family,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:var(--font-size,14px);overflow-x:hidden}.ba-page *,.ba-page *::before,.ba-page *::after{box-sizing:border-box;min-width:0}.ba-page button,.ba-page input,.ba-page select,.ba-page textarea{font:inherit;max-width:100%}.ba-page input,.ba-page select,.ba-page textarea{width:100%;min-height:44px;border:1px solid var(--input-border,var(--border,rgba(0,0,0,.10)));border-radius:16px;padding:0 12px;background:var(--input-bg,var(--surface,#fff));color:var(--input-text,var(--text,#111827));outline:none;font-weight:750}.ba-page input:focus,.ba-page select:focus,.ba-page textarea:focus{border-color:color-mix(in srgb,var(--ba-primary) 52%,var(--border,rgba(0,0,0,.10)));box-shadow:0 0 0 4px color-mix(in srgb,var(--ba-primary) 12%,transparent)}.ba-state,.ba-search-card,.course-row-card,.ba-card,.ba-table-card,.ba-analysis,.ba-empty,.ba-sheet{background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.10));box-shadow:0 12px 28px rgba(15,23,42,.045)}.ba-state{min-height:min(420px,calc(100dvh - 32px));width:min(520px,100%);margin:0 auto;display:grid;place-items:center;align-content:center;gap:10px;padding:22px;border-radius:28px;text-align:center}.ba-spinner{width:38px;height:38px;border-radius:999px;border:4px solid color-mix(in srgb,var(--ba-primary) 18%,transparent);border-top-color:var(--ba-primary);animation:spin .8s linear infinite}.ba-state h2{margin:0;font-size:22px;font-weight:1000;letter-spacing:-.04em}.ba-state p{max-width:34rem;margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.ba-state-button{min-height:42px;border:0;border-radius:999px;padding:0 16px;background:var(--ba-primary);color:#fff;font-weight:950;cursor:pointer}.ba-search-card{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center;margin-top:2px;padding:8px;border-radius:24px}.ba-search{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:44px;padding:0 11px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 7%,transparent)}.ba-search span{color:var(--muted,#64748b);font-size:17px;font-weight:1000}.ba-search input{min-height:42px;border:0;padding:0;border-radius:0;background:transparent;box-shadow:none;font-size:14px}.ba-icon-button,.ba-filter-button{width:42px;height:42px;border:1px solid var(--border,rgba(0,0,0,.10));border-radius:999px;display:grid;place-items:center;background:var(--card-bg,var(--surface,#fff));color:var(--text,#111827);font-size:18px;font-weight:1000;cursor:pointer;box-shadow:0 10px 22px rgba(15,23,42,.045)}.ba-filter-button{position:relative;background:color-mix(in srgb,var(--ba-primary) 8%,var(--card-bg,#fff));color:var(--ba-primary)}.ba-filter-button.active{background:var(--ba-primary);color:#fff;border-color:var(--ba-primary)}.ba-filter-button b{position:absolute;top:-4px;right:-4px;min-width:19px;height:19px;display:grid;place-items:center;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;border:2px solid var(--card-bg,#fff)}.ba-slider-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.ba-filter-chips{display:flex;gap:7px;overflow-x:auto;padding:8px 1px 0;scrollbar-width:none}.ba-filter-chips::-webkit-scrollbar{display:none}.ba-filter-chips button{flex:0 0 auto;min-height:31px;border:0;border-radius:999px;padding:0 10px;background:color-mix(in srgb,var(--ba-primary) 11%,transparent);color:var(--ba-primary);font-size:11px;font-weight:950;white-space:nowrap;cursor:pointer}.ba-chip{max-width:100%;display:inline-flex;align-items:center;min-height:25px;padding:4px 9px;border-radius:999px;font-size:11px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ba-chip.green{background:rgba(34,197,94,.12);color:#16a34a}.ba-chip.red{background:rgba(239,68,68,.12);color:#dc2626}.ba-chip.blue{background:rgba(59,130,246,.12);color:#2563eb}.ba-chip.gray{background:rgba(107,114,128,.12);color:var(--muted,#64748b)}.ba-chip.orange{background:rgba(245,158,11,.14);color:#b45309}.ba-chip.purple{background:rgba(147,51,234,.12);color:#7e22ce}.course-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin-top:10px;align-items:start}.ba-grid,.ba-analysis-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;margin-top:10px}.course-row-card{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:22px;text-align:left;color:var(--text,#111827);cursor:pointer;transition:transform .16s var(--ease),box-shadow .16s var(--ease),border-color .16s var(--ease)}.course-row-card:hover{transform:translateY(-1px);border-color:color-mix(in srgb,var(--ba-primary) 26%,var(--border,rgba(0,0,0,.10)))}.course-row-card.active{border-color:var(--ba-primary);box-shadow:0 18px 40px color-mix(in srgb,var(--ba-primary) 14%,transparent)}.ba-avatar{width:44px;height:44px;flex:0 0 auto;display:grid;place-items:center;border-radius:17px;color:#fff;font-size:13px;font-weight:1000;box-shadow:0 12px 24px rgba(15,23,42,.12)}.course-row-main{display:grid;gap:2px;min-width:0}.course-row-main strong,.course-row-main small,.course-row-main em{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.course-row-main strong{font-size:14px;font-weight:1000;color:var(--text,#111827)}.course-row-main small{color:var(--muted,#64748b);font-size:11px;font-weight:850}.course-row-main em{color:var(--muted,#64748b);font-size:11px;font-style:normal}.course-row-side{display:flex;align-items:center;gap:8px}.course-row-side i{color:var(--muted,#64748b);font-style:normal;font-size:18px;font-weight:1000}.status-dot-mini{width:9px;height:9px;border-radius:999px;background:var(--muted,#64748b);box-shadow:0 0 0 4px color-mix(in srgb,var(--muted,#64748b) 12%,transparent)}.status-dot-mini.green{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.13)}.status-dot-mini.red{background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.13)}.status-dot-mini.orange{background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.15)}.status-dot-mini.gray{background:var(--muted,#64748b)}.ba-card,.ba-analysis,.ba-table-card,.ba-empty{border-radius:24px;padding:13px}.course-detail-card{min-height:240px;align-self:start}.course-detail-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.course-detail-head div{min-width:0}.course-detail-head h3{margin:0;font-size:22px;font-weight:1000;letter-spacing:-.05em}.course-detail-head p{margin:4px 0 0;color:var(--muted,#64748b);font-size:12px;font-weight:750}.connection-map{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);align-items:stretch;gap:6px;margin-top:12px;padding:10px;border-radius:18px;background:color-mix(in srgb,var(--ba-primary) 7%,transparent);border:1px solid color-mix(in srgb,var(--ba-primary) 14%,var(--border,rgba(0,0,0,.10)))}.connection-map div{padding:8px;border-radius:14px;background:var(--card-bg,var(--surface,#fff));border:1px solid var(--border,rgba(0,0,0,.08));overflow:hidden}.connection-map span,.connection-map strong,.connection-map small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.connection-map span{font-size:9px;font-weight:1000;letter-spacing:.07em;text-transform:uppercase;color:var(--muted,#64748b)}.connection-map strong{margin-top:2px;font-size:12px;font-weight:1000;color:var(--text,#111827)}.connection-map small{margin-top:2px;font-size:10px;color:var(--muted,#64748b);font-weight:850}.connection-map i{align-self:center;width:18px;height:2px;border-radius:999px;background:var(--ba-primary);position:relative}.connection-map i::after{content:"";position:absolute;right:0;top:50%;width:6px;height:6px;border-top:2px solid var(--ba-primary);border-right:2px solid var(--ba-primary);transform:translateY(-50%) rotate(45deg)}.course-detail-section{margin-top:11px;padding:12px;border-radius:18px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent);border:1px solid var(--border,rgba(0,0,0,.08))}.course-detail-section h4{margin:0;color:var(--muted,#64748b);font-size:11px;font-weight:1000;letter-spacing:.08em;text-transform:uppercase}.course-detail-section.readiness p{margin:10px 0 0;color:var(--muted,#64748b);font-size:13px;line-height:1.55;font-weight:720}.ba-mini-chips,.ba-meta{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.course-info-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-top:10px}.course-info-grid div{min-width:0;padding:9px;border-radius:15px;background:var(--surface,#fff);border:1px solid var(--border,rgba(0,0,0,.08));overflow:hidden}.course-info-grid span,.course-info-grid strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.course-info-grid span{color:var(--muted,#64748b);font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.06em}.course-info-grid strong{margin-top:3px;font-size:13px;font-weight:900}.ba-table-card{margin-top:10px;padding:0}.ba-table-scroll{width:100%;max-width:100%;overflow-x:auto;border-radius:22px;border:1px solid var(--border,rgba(0,0,0,.08));background:var(--card-bg,var(--surface,#fff))}.ba-table-scroll table{width:100%;min-width:1180px;border-collapse:collapse;background:var(--card-bg,var(--surface,#fff))}.ba-table-scroll th,.ba-table-scroll td{padding:11px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));vertical-align:top;text-align:left;font-size:13px;color:var(--text,#111827)}.ba-table-scroll th{background:color-mix(in srgb,var(--ba-primary) 7%,var(--card-bg,var(--surface,#fff)));color:var(--muted,#64748b);font-size:11px;font-weight:1000;text-transform:uppercase;letter-spacing:.07em;white-space:nowrap}.ba-table-scroll td strong,.ba-table-scroll td span{display:block}.ba-table-scroll td span{margin-top:3px;color:var(--muted,#64748b);font-size:11px}.table-course-cell strong{font-weight:1000}.table-link-map{display:flex;align-items:center;gap:6px;white-space:nowrap}.table-link-map b{display:inline-flex;align-items:center;max-width:145px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:950;color:var(--text,#111827)}.table-link-map i{color:var(--ba-primary);font-style:normal;font-weight:1000}.table-link-map.muted b{color:var(--muted,#64748b)}.table-note{display:block;margin-top:4px;color:var(--muted,#64748b);font-size:10px;font-weight:850}.table-load{display:flex;gap:6px;white-space:nowrap}.table-load span{display:inline-flex;flex-direction:column;min-width:48px;padding:6px 8px;border-radius:12px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent);font-weight:1000}.table-load small{font-size:9px;color:var(--muted,#64748b);font-weight:900}.ba-empty-table{padding:22px;text-align:center;color:var(--muted,#64748b);font-weight:850}.ba-analysis span{color:var(--muted,#64748b);font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.ba-analysis strong{display:block;margin-top:8px;font-size:clamp(22px,7vw,30px);line-height:1;font-weight:1000;letter-spacing:-.06em;overflow-wrap:anywhere}.ba-analysis p{margin:8px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5}.ba-analysis-list{display:grid;gap:10px;margin-top:12px}.ba-analysis-list section{display:grid;gap:6px;padding:10px;border-radius:16px;background:color-mix(in srgb,var(--muted,#64748b) 8%,transparent)}.ba-analysis-list section>div:first-child{display:flex;justify-content:space-between;gap:10px}.ba-analysis-list b,.ba-analysis-list small{font-size:12px}.ba-analysis-list small{color:var(--muted,#64748b);font-weight:850}.ba-progress{height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted,#64748b) 18%,transparent);overflow:hidden}.ba-progress i{display:block;height:100%;border-radius:inherit;background:var(--ba-primary)}.ba-empty{display:grid;place-items:center;align-content:center;gap:8px;min-height:220px;text-align:center;border-style:dashed}.ba-empty-icon{width:56px;height:56px;display:grid;place-items:center;border-radius:22px;background:color-mix(in srgb,var(--ba-primary) 12%,#fff);font-size:28px}.ba-empty h3{margin:0;font-size:18px;font-weight:1000}.ba-empty p{margin:0;color:var(--muted,#64748b);font-size:13px;line-height:1.6}.ba-sheet-backdrop{position:fixed;inset:0;z-index:80;display:grid;place-items:end center;padding:10px;background:rgba(15,23,42,.55);backdrop-filter:blur(10px)}.ba-sheet{width:min(760px,100%);max-height:min(88dvh,760px);overflow:auto;border-radius:28px;padding:14px}.ba-sheet.small{width:min(470px,100%)}.ba-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:3px 2px 14px}.ba-sheet-head h2{margin:0;font-size:20px;font-weight:1000;letter-spacing:-.05em;color:var(--text,#111827)}.ba-sheet-head p{margin:4px 0 0;color:var(--muted,#64748b);font-size:12px;line-height:1.5}.ba-sheet-head button{width:38px;height:38px;border-radius:999px;border:1px solid var(--border,rgba(0,0,0,.08));background:var(--surface,#fff);color:var(--muted,#64748b);font-weight:1000;cursor:pointer}.ba-form{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}.ba-form.compact label{display:grid;gap:6px}.ba-form.compact span{color:var(--muted,#64748b);font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.06em}.ba-sheet-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:13px}.ba-sheet-actions button{min-height:42px;border-radius:999px;border:0;background:color-mix(in srgb,var(--muted,#64748b) 8%,var(--surface,#fff));color:var(--text,#111827);font-weight:950;cursor:pointer}.ba-sheet-actions button.primary{background:var(--ba-primary);color:#fff}.ba-menu-list{display:grid;gap:8px}.ba-menu-list button{display:grid;grid-template-columns:42px minmax(0,1fr);grid-template-areas:"icon title" "icon text";gap:2px 10px;align-items:center;text-align:left;min-height:62px;border:1px solid var(--border,rgba(0,0,0,.08));border-radius:18px;padding:9px;background:var(--surface,#fff);color:var(--text,#111827);cursor:pointer}.ba-menu-list button span{grid-area:icon;width:42px;height:42px;display:grid;place-items:center;border-radius:15px;background:color-mix(in srgb,var(--ba-primary) 10%,transparent);color:var(--ba-primary);font-weight:1000}.ba-menu-list button b{grid-area:title;font-size:13px;font-weight:1000}.ba-menu-list button small{grid-area:text;color:var(--muted,#64748b);font-size:11px;font-weight:750}.ba-menu-list button.active{background:var(--ba-primary);border-color:var(--ba-primary);color:#fff;box-shadow:0 14px 32px color-mix(in srgb,var(--ba-primary) 22%,transparent)}.ba-menu-list button.active span{background:rgba(255,255,255,.18);color:#fff}.ba-menu-list button.active small{color:rgba(255,255,255,.82)}@media (min-width:680px){.ba-page{padding:calc(12px * var(--local-density-scale,1))}.ba-grid,.ba-analysis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.course-info-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ba-form{grid-template-columns:repeat(2,minmax(0,1fr))}.ba-sheet-backdrop{place-items:center;padding:18px}}@media (min-width:1040px){.ba-page{padding:calc(16px * var(--local-density-scale,1))}.course-layout{grid-template-columns:minmax(300px,.86fr) minmax(390px,1.14fr);gap:14px}.course-card-grid{grid-template-columns:minmax(0,1fr)}.course-detail-card{position:sticky;top:62px}.course-analysis-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (min-width:1400px){.course-layout{grid-template-columns:minmax(620px,1fr) minmax(430px,.68fr)}.course-card-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (max-width:620px){.ba-page{padding:calc(6px * var(--local-density-scale,1))}.connection-map{grid-template-columns:minmax(0,1fr);}.connection-map i{width:2px;height:16px;justify-self:center}.connection-map i::after{right:50%;top:auto;bottom:0;transform:translateX(50%) rotate(135deg)}.ba-card,.ba-analysis,.ba-table-card,.ba-empty,.ba-sheet{border-radius:20px;padding:11px}.course-detail-head{display:grid}.ba-sheet-actions{grid-template-columns:minmax(0,1fr)}}
+
+@media (min-width:980px){
+  .ba-sheet-backdrop{
+    top:var(--eds-shell-top-offset,0px);
+    right:0;
+    bottom:0;
+    left:var(--portal-content-left,0px);
+    width:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .ba-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
 `;

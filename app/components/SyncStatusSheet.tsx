@@ -7,6 +7,10 @@
  */
 
 import {
+  useState,
+} from "react";
+
+import {
   useSystemStatus,
 } from "../hooks/useSystemStatus";
 
@@ -60,6 +64,13 @@ function StatusRow({
 }
 
 export default function SyncStatusSheet() {
+  const [
+    breakdownMode,
+    setBreakdownMode,
+  ] = useState<
+    "pending" | "failed" | null
+  >(null);
+
   const {
     statusSheetOpen,
     closeStatusSheet,
@@ -87,6 +98,48 @@ export default function SyncStatusSheet() {
       note: "Push and pull now",
       action:
         actions.refreshData,
+    },
+    {
+      key: "refresh-app",
+      label: "Refresh application",
+      note: "Reload this page and restart Eleeveon",
+      action: async () => {
+        closeStatusSheet();
+
+        await new Promise<void>(
+          (resolve) => {
+            window.setTimeout(
+              resolve,
+              150,
+            );
+          },
+        );
+
+        if (
+          "serviceWorker" in navigator
+        ) {
+          try {
+            const registrations =
+              await navigator
+                .serviceWorker
+                .getRegistrations();
+
+            await Promise.all(
+              registrations.map(
+                (registration) =>
+                  registration.update(),
+              ),
+            );
+          } catch (error) {
+            console.warn(
+              "[system status] service-worker refresh check failed",
+              error,
+            );
+          }
+        }
+
+        window.location.reload();
+      },
     },
     {
       key: "retry-failed",
@@ -248,29 +301,67 @@ export default function SyncStatusSheet() {
             )}
           />
 
-          <StatusRow
-            label="Pending changes"
-            value={
-              status.pendingChanges
+          <button
+            type="button"
+            className="system-status-click-row"
+            onClick={() =>
+              setBreakdownMode(
+                breakdownMode ===
+                  "pending"
+                  ? null
+                  : "pending",
+              )
             }
-            tone={
-              status.pendingChanges
-                ? "warning"
-                : "good"
-            }
-          />
+          >
+            <StatusRow
+              label="Pending changes"
+              value={
+                status.pendingChanges
+              }
+              tone={
+                status.pendingChanges
+                  ? "warning"
+                  : "good"
+              }
+            />
+            <span>
+              {breakdownMode ===
+              "pending"
+                ? "−"
+                : "›"}
+            </span>
+          </button>
 
-          <StatusRow
-            label="Failed changes"
-            value={
-              status.failedChanges
+          <button
+            type="button"
+            className="system-status-click-row"
+            onClick={() =>
+              setBreakdownMode(
+                breakdownMode ===
+                  "failed"
+                  ? null
+                  : "failed",
+              )
             }
-            tone={
-              status.failedChanges
-                ? "danger"
-                : "good"
-            }
-          />
+          >
+            <StatusRow
+              label="Failed changes"
+              value={
+                status.failedChanges
+              }
+              tone={
+                status.failedChanges
+                  ? "danger"
+                  : "good"
+              }
+            />
+            <span>
+              {breakdownMode ===
+              "failed"
+                ? "−"
+                : "›"}
+            </span>
+          </button>
 
           <StatusRow
             label="Database version"
@@ -328,6 +419,77 @@ export default function SyncStatusSheet() {
             }
           />
         </section>
+
+        {breakdownMode ? (
+          <section className="system-table-breakdown">
+            <header>
+              <div>
+                <span>
+                  {breakdownMode ===
+                  "pending"
+                    ? "Pending records"
+                    : "Failed records"}
+                </span>
+                <strong>
+                  Table breakdown
+                </strong>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setBreakdownMode(null)
+                }
+              >
+                Close
+              </button>
+            </header>
+
+            <div>
+              {status.tableBreakdown
+                .filter((item) =>
+                  breakdownMode ===
+                  "pending"
+                    ? item.pending > 0
+                    : item.failed > 0,
+                )
+                .map((item) => (
+                  <article
+                    key={item.tableName}
+                  >
+                    <strong>
+                      {item.tableName}
+                    </strong>
+                    <span>
+                      {breakdownMode ===
+                      "pending"
+                        ? `${item.pending} pending`
+                        : `${item.failed} failed`}
+                    </span>
+                    <small>
+                      {item.total} local
+                      record
+                      {item.total === 1
+                        ? ""
+                        : "s"}
+                    </small>
+                  </article>
+                ))}
+
+              {!status.tableBreakdown.some(
+                (item) =>
+                  breakdownMode ===
+                  "pending"
+                    ? item.pending > 0
+                    : item.failed > 0,
+              ) ? (
+                <p>
+                  No matching table
+                  records were found.
+                </p>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
 
         {status.lastSyncError && (
           <div className="system-error">
@@ -478,6 +640,118 @@ const css = `
 .system-status-grid {
   display: grid;
   gap: 6px;
+}
+
+
+.system-status-click-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.system-status-click-row >
+.system-status-row {
+  width: 100%;
+}
+
+.system-status-click-row >
+span {
+  color:
+    var(--muted, #64748b);
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.system-table-breakdown {
+  margin-top: 12px;
+  border: 1px solid
+    var(--border, rgba(0,0,0,.1));
+  border-radius: 18px;
+  padding: 11px;
+  background:
+    color-mix(
+      in srgb,
+      var(--muted, #64748b)
+      5%,
+      var(--surface, #fff)
+    );
+}
+
+.system-table-breakdown > header {
+  display: flex;
+  align-items: center;
+  justify-content:
+    space-between;
+  gap: 10px;
+  padding: 0 0 9px;
+}
+
+.system-table-breakdown > header span,
+.system-table-breakdown > header strong {
+  display: block;
+}
+
+.system-table-breakdown > header span {
+  color:
+    var(
+      --primary-color,
+      #2563eb
+    );
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+}
+
+.system-table-breakdown > header button {
+  border: 1px solid
+    var(--border, rgba(0,0,0,.1));
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  padding: 7px 9px;
+}
+
+.system-table-breakdown > div {
+  display: grid;
+  gap: 6px;
+}
+
+.system-table-breakdown article {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr) auto;
+  gap: 3px 10px;
+  padding: 9px;
+  border-radius: 12px;
+  background:
+    var(--surface, #fff);
+}
+
+.system-table-breakdown article strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-table-breakdown article span {
+  font-weight: 900;
+}
+
+.system-table-breakdown article small {
+  grid-column: 1 / -1;
+  color:
+    var(--muted, #64748b);
 }
 
 .system-status-row {

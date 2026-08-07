@@ -1,32 +1,24 @@
 "use client";
 
-/**
- * app/providers.tsx
- * --------------------------------------------------------------------------
- * Global provider order with role-aware appearance readiness.
- *
- * Important dependency note:
- * ActiveBranchProvider currently consumes SettingsContext, so SettingsProvider
- * must remain outside ActiveBranchProvider until that older dependency is
- * removed. PortalAppearanceRuntime explicitly hydrates Settings from the active
- * membership, giving the desired role-aware behavior without a provider cycle.
- * LocalAppearanceRuntime then layers the exact historical LocalSettings
- * light/dark palette plus device-only density, motion and text-size preferences
- * over the resolved shared branding.
- */
-
 import type {
   ReactNode,
 } from "react";
 
 import AppUpdateManager from "./components/AppUpdateManager";
 import DatabaseBootstrap from "./components/DatabaseBootstrap";
-import PortalAppearanceRuntime from "./components/PortalAppearanceRuntime";
 import LocalAppearanceRuntime from "./components/LocalAppearanceRuntime";
+import PortalAppearanceRuntime from "./components/PortalAppearanceRuntime";
 import SyncBootstrap from "./components/SyncBootstrap";
+import WindowChromeRuntime from "./components/window/WindowChromeRuntime";
+import WindowTitleBar from "./components/window/WindowTitleBar";
+
+import {
+  SubscriptionBootstrap,
+} from "./components/subscription/SubscriptionBootstrap";
 
 import {
   AccountProvider,
+  useAccount,
 } from "./context/account-context";
 
 import {
@@ -35,6 +27,7 @@ import {
 
 import {
   ActiveMembershipProvider,
+  useActiveMembership,
 } from "./context/active-membership-context";
 
 import {
@@ -61,8 +54,49 @@ import {
   useDatabase,
 } from "./context/database-context";
 
+import {
+  WindowChromeProvider,
+} from "./context/window-chrome-context";
+
+function SubscriptionAccessRuntime({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const accountContext =
+    useAccount();
+
+  const membershipContext =
+    useActiveMembership();
+
+  const accountId =
+    accountContext.account?.id ??
+    accountContext.accountId ??
+    membershipContext
+      .activeMembership
+      ?.accountId ??
+    null;
+
+  const authenticated =
+    Boolean(
+      accountId &&
+      membershipContext
+        .activeMembership,
+    );
+
+  return (
+    <SubscriptionBootstrap
+      accountId={accountId}
+      authenticated={authenticated}
+    >
+      {children}
+    </SubscriptionBootstrap>
+  );
+}
+
 function DatabaseReadyRuntime() {
-  const database = useDatabase();
+  const database =
+    useDatabase();
 
   if (!database.ready) {
     return null;
@@ -87,20 +121,27 @@ export default function Providers({
         <SettingsProvider>
           <ActiveBranchProvider>
             <ActiveMembershipProvider>
-              <ThemeProvider>
-                <PortalAppearanceRuntime>
-                  <LocalAppearanceRuntime>
-                    <RealtimeProvider>
-                    <SyncBootstrapProvider>
-                      <SyncProvider>
-                        <DatabaseReadyRuntime />
-                        {children}
-                      </SyncProvider>
-                    </SyncBootstrapProvider>
-                    </RealtimeProvider>
-                  </LocalAppearanceRuntime>
-                </PortalAppearanceRuntime>
-              </ThemeProvider>
+              <WindowChromeProvider>
+                <SubscriptionAccessRuntime>
+                  <ThemeProvider>
+                    <PortalAppearanceRuntime>
+                      <LocalAppearanceRuntime>
+                        <WindowChromeRuntime />
+                        <WindowTitleBar />
+
+                        <RealtimeProvider>
+                          <SyncBootstrapProvider>
+                            <SyncProvider>
+                              <DatabaseReadyRuntime />
+                              {children}
+                            </SyncProvider>
+                          </SyncBootstrapProvider>
+                        </RealtimeProvider>
+                      </LocalAppearanceRuntime>
+                    </PortalAppearanceRuntime>
+                  </ThemeProvider>
+                </SubscriptionAccessRuntime>
+              </WindowChromeProvider>
             </ActiveMembershipProvider>
           </ActiveBranchProvider>
         </SettingsProvider>

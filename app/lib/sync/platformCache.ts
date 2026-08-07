@@ -1,20 +1,12 @@
-/**
- * app/lib/sync/platformCache.ts
- * ---------------------------------------------------------
- * Backend-owned platform cache helpers.
- * ---------------------------------------------------------
- * These helpers update local Dexie cache tables used for UI display:
- * accounts, subscriptions, invoices, API clients, webhooks, audit logs, etc.
- * They do not push secrets or backend-only records from the browser.
- */
+/** Backend-owned, account-scoped platform-cache application. */
 
 import { db } from "../db/db";
 import {
   assertAccountId,
-  CachePullRecord,
+  type CachePullRecord,
   getDeviceId,
   getLastPlatformCacheAt,
-  PlatformCacheResponse,
+  type PlatformCacheResponse,
   setLastPlatformCacheAt,
   SYNC_ENDPOINTS,
 } from "./syncConfig";
@@ -25,122 +17,211 @@ export type PlatformCacheResult = {
   updated: number;
   skipped: number;
   errors: string[];
+  changedTables: string[];
 };
 
-function normalizeCachePayload(record: CachePullRecord) {
-  const payload = { ...(record.payload || {}) } as any;
+const SENSITIVE_FIELDS = new Set([
+  "passwordHash",
+  "secret",
+  "secretHash",
+  "apiKey",
+  "apiKeyHash",
+  "token",
+  "refreshToken",
+  "accessToken",
+  "privateKey",
+  "licenseSecret",
+]);
 
-  const id = record.id || payload.id || record.id || payload.id;
-  if (id !== undefined && id !== null) payload.id = String(id);
+function sanitizeCacheValue(
+  value: unknown,
+  seen = new WeakSet<object>(),
+): unknown {
+  if (value == null) return value;
+  if (["string", "number", "boolean"].includes(typeof value)) return value;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeCacheValue(item, seen));
+  }
+  if (typeof value !== "object") return undefined;
+  if (seen.has(value as object)) return undefined;
+  seen.add(value as object);
 
-  if (record.accountId && !payload.accountId) payload.accountId = record.accountId;
-  if (record.updatedAt && !payload.updatedAt) payload.updatedAt = record.updatedAt;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_FIELDS.has(key)) continue;
+    const safe = sanitizeCacheValue(child, seen);
+    if (safe !== undefined) output[key] = safe;
+  }
+  return output;
+}
+
+function normalizeCachePayload(
+  record: CachePullRecord,
+  activeAccountId: string,
+) {
+  const raw = sanitizeCacheValue(record.payload || {});
+  const payload =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+
+  const id =
+    record.id ??
+    record.cloudId ??
+    payload.id ??
+    payload.accountId;
+
+  if (id != null) payload.id = String(id);
+
+  const recordAccountId =
+    record.accountId ?? payload.accountId;
+
+  if (
+    recordAccountId != null &&
+    String(recordAccountId) !== activeAccountId
+  ) {
+    throw new Error(
+      `Rejected platform-cache record for another account (${String(recordAccountId)}).`,
+    );
+  }
+
+  if (!payload.accountId) payload.accountId = activeAccountId;
+  if (record.updatedAt != null && payload.updatedAt == null) {
+    payload.updatedAt = Number(record.updatedAt);
+  }
 
   return payload;
 }
 
-export async function applyPlatformCacheRecords(records: CachePullRecord[] = []): Promise<PlatformCacheResult> {
+export async function applyPlatformCacheRecords(
+  records: CachePullRecord[] = [],
+): Promise<PlatformCacheResult> {
+  const accountId = assertAccountId();
   const errors: string[] = [];
+  const changedTables = new Set<string>();
   let updated = 0;
   let skipped = 0;
 
-  for (const record of records) {
-    try {
-      if (!record?.tableName || !isBackendCacheTable(record.tableName)) {
-        skipped++;
-        continue;
+  const accepted = records.filter(
+    (record) =>
+      Boolean(record?.tableName) &&
+      isBackendCacheTable(record.tableName),
+  );
+
+  await db.transaction(
+    "rw",
+    [...new Set(accepted.map((record) => record.tableName))]
+      .map((name) => db.tables.find((table) => table.name === name))
+      .filter(Boolean) as typeof db.tables,
+    async () => {
+      for (const record of records) {
+        try {
+          if (!record?.tableName || !isBackendCacheTable(record.tableName)) {
+            skipped += 1;
+            continue;
+          }
+
+          const table = db.tables.find(
+            (candidate) => candidate.name === record.tableName,
+          );
+
+          if (!table) {
+            skipped += 1;
+            errors.push(`${record.tableName}: registered cache table is missing from Dexie.`);
+            continue;
+          }
+
+          const payload = normalizeCachePayload(record, accountId);
+          const id = payload.id;
+
+          if (!id) {
+            skipped += 1;
+            errors.push(`${record.tableName}: cache record has no stable id.`);
+            continue;
+          }
+
+          if (record.isDeleted) {
+            await table.delete(id as string);
+          } else {
+            await table.put(payload);
+          }
+
+          updated += 1;
+          changedTables.add(record.tableName);
+        } catch (error) {
+          errors.push(
+            `${record?.tableName || "unknown"}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
+    },
+  );
 
-      const table = (db as any)[record.tableName];
-      if (!table) {
-        skipped++;
-        continue;
-      }
-
-      const payload = normalizeCachePayload(record);
-      const id = payload.id;
-
-      if (!id) {
-        skipped++;
-        continue;
-      }
-
-      if (record.isDeleted) {
-        await table.delete(id).catch(async () => {
-          const existing = await table.get(id);
-          if (existing) await table.update(id, { ...existing, isDeleted: true });
-        });
-        updated++;
-        continue;
-      }
-
-      await table.put(payload);
-      updated++;
-    } catch (error: any) {
-      errors.push(`${record?.tableName || "unknown"}: ${error?.message || String(error)}`);
-    }
-  }
-
-  return { updated, skipped, errors };
+  return {
+    updated,
+    skipped,
+    errors,
+    changedTables: [...changedTables],
+  };
 }
 
-export async function refreshPlatformCache(options?: { silent?: boolean }): Promise<PlatformCacheResult> {
-  const errors: string[] = [];
+function responseRecords(response: PlatformCacheResponse) {
+  return [
+    ...(response.records || []),
+    ...(response.cacheRecords || []),
+    ...(response.platformRecords || []),
+  ];
+}
 
+export async function refreshPlatformCache(options?: {
+  silent?: boolean;
+}): Promise<PlatformCacheResult> {
   try {
     const accountId = assertAccountId();
-    const deviceId = getDeviceId();
-    const since = getLastPlatformCacheAt();
+    const response = await syncHttp<PlatformCacheResponse>(
+      SYNC_ENDPOINTS.PLATFORM_CACHE,
+      {
+        method: "POST",
+        body: {
+          accountId,
+          deviceId: getDeviceId(),
+          since: getLastPlatformCacheAt(),
+        },
+      },
+    );
 
-    const response = await syncHttp<PlatformCacheResponse>(SYNC_ENDPOINTS.PLATFORM_CACHE, {
-      method: "POST",
-      body: { accountId, deviceId, since },
-    });
-
-    const records = [
-      ...(response.records || []),
-      ...(response.cacheRecords || []),
-      ...(response.platformRecords || []),
-    ];
-
-    const result = await applyPlatformCacheRecords(records);
-    if (response.serverTime) setLastPlatformCacheAt(Number(response.serverTime));
-    return result;
-  } catch (error: any) {
-    const message = error?.message || String(error);
-
-    // Keep this drop-in safe while your backend catches up.
-    // Missing optional platform-cache endpoint should not break normal school sync.
-    if (options?.silent || /404|not found|Cannot POST|Cannot GET/i.test(message)) {
-      return { updated: 0, skipped: 0, errors: [] };
+    const result = await applyPlatformCacheRecords(responseRecords(response));
+    if (response.serverTime && !result.errors.length) {
+      setLastPlatformCacheAt(Number(response.serverTime));
     }
-
-    errors.push(message);
-    return { updated: 0, skipped: 0, errors };
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (options?.silent || /404|not found|Cannot POST|Cannot GET/i.test(message)) {
+      return { updated: 0, skipped: 0, errors: [], changedTables: [] };
+    }
+    return { updated: 0, skipped: 0, errors: [message], changedTables: [] };
   }
 }
 
 export async function bootstrapAccountContext(options?: { silent?: boolean }) {
   try {
     const accountId = assertAccountId();
-    const deviceId = getDeviceId();
-    const response = await syncHttp<PlatformCacheResponse>(SYNC_ENDPOINTS.BOOTSTRAP, {
-      method: "POST",
-      body: { accountId, deviceId },
-    });
-
-    const records = [
-      ...(response.records || []),
-      ...(response.cacheRecords || []),
-      ...(response.platformRecords || []),
-    ];
-
-    return applyPlatformCacheRecords(records);
-  } catch (error: any) {
-    const message = error?.message || String(error);
+    const response = await syncHttp<PlatformCacheResponse>(
+      SYNC_ENDPOINTS.BOOTSTRAP,
+      {
+        method: "POST",
+        body: { accountId, deviceId: getDeviceId() },
+      },
+    );
+    return applyPlatformCacheRecords(responseRecords(response));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     if (options?.silent || /404|not found|Cannot POST|Cannot GET/i.test(message)) {
-      return { updated: 0, skipped: 0, errors: [] };
+      return { updated: 0, skipped: 0, errors: [], changedTables: [] };
     }
-    return { updated: 0, skipped: 0, errors: [message] };
+    return { updated: 0, skipped: 0, errors: [message], changedTables: [] };
   }
 }

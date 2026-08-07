@@ -1,26 +1,72 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@import "./styles/design-system.css";
+@import "./styles/surfaces.css";
+@import "./styles/textures.css";
+@import "./styles/typography.css";
+@import "./styles/animations.css";
+@import "./styles/scrollbar.css";
+@import "./styles/window.css";
+@import "./styles/utilities.css";
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-background: var(--eds-bg);
+  --color-foreground: var(--eds-text);
+  --font-sans: var(--font-family, var(--eds-font-sans));
+  --font-mono: var(--eds-font-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100dvh;
+}
+
+#__next {
+  min-height: 100dvh;
+}
+
+img,
+svg,
+canvas,
+video {
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  max-width: 100%;
+}
+
+
+/*
+ * Installed desktop chrome is owned exclusively by styles/window.css.
+ * No secondary portal-header overrides belong in globals.css.
+ */
+
+
+/* One main page scrollbar --------------------------------------------- */
+html {
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+body {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.role-shell,
+.app-main,
+.app-content,
+.app-content-inner {
+  overflow-y: visible !important;
 }

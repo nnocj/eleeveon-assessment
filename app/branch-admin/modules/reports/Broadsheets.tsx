@@ -8,12 +8,11 @@
  *
  * No branch selector.
  *
- * Workspace-session aligned:
- * - reads the selected workspace session written by /select-role first
- * - falls back to ActiveMembershipProvider, then ActiveBranchContext/settings
- * - prevents broadsheets from accidentally using stale school/branch context
- *   left behind by another role or portal
- * - all broadsheet engine data reads now use the resolved workspace schoolId and branchId
+ * Role-portal workspace aligned:
+ * - resolves account, school and branch through useBranchWorkspaceScope()
+ * - follows the same selected-role workspace contract as SubjectSetup.tsx
+ * - keeps broadsheet reads locked to the resolved branch workspace
+ * - retains ActiveBranchContext only for display/header fallbacks
  *
  * Branch header fix:
  * - mirrors StudentReports.tsx behavior
@@ -53,11 +52,8 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAccount } from "@/app/context/account-context";
-
 import { useSettings } from "../../../context/settings-context";
 import { useActiveBranch } from "../../../context/active-branch-context";
-import { useActiveMembership } from "../../../context/active-membership-context";
 
 import {
   db,
@@ -73,7 +69,7 @@ import {
   ClassSubject,
   ComputedResult,
   GradeRule,
-  GradingSystem,
+  GradingStructure,
   ReportCard,
   ReportCardItem,
   School,
@@ -116,6 +112,9 @@ import type {
 } from "./broadsheet-templates";
 
 import { buildReportEngineOutput } from "./engine/report-engine";
+import {
+  resolveSubjectBroadsheetAssessmentReportSettings,
+} from "./shared/ReportTemplateUtils";
 import { buildCumulativeReportEngineOutput } from "./engine/cumulative-report-engine";
 
 import type {
@@ -125,8 +124,9 @@ import type {
 } from "./engine/report-types";
 import type { CumulativeReportEngineDataset } from "./engine/cumulative-report-types";
 
-import { useDataRevision } from "../../../hooks/useDataRevision";
 import { useBackgroundLoader } from "../../../hooks/useBackgroundLoader";
+import { useBranchWorkspaceScope } from "../../../hooks/useBranchWorkspaceScope";
+import { useBranchTableRevision } from "../../../hooks/useBranchTableRevision";
 type BroadsheetMode = ReportMode | "annual-broadsheet";
 
 type EntityId = string | number;
@@ -156,7 +156,6 @@ function firstExistingId<T extends { id?: EntityId }>(rows: T[]): string | undef
   return id || undefined;
 }
 
-const OPEN_WORKSPACE_KEY = "eleeveon_open_workspace";
 const BROADSHEET_PRINT_ZONE_ID = "broadsheet-print-zone";
 
 const BROADSHEET_MEDIA_OWNER_SCHOOLS = String(
@@ -205,21 +204,6 @@ function fallbackMediaValue(
   return safeRecordMediaValue(row[stringField]);
 }
 
-type OpenWorkspaceSession = {
-  membership?: Record<string, any> | null;
-  membershipId?: string | null;
-  role?: string | null;
-  schoolId?: string | null;
-  branchId?: string | null;
-  teacherId?: string | null;
-  studentId?: string | null;
-  parentId?: string | null;
-  memberName?: string | null;
-  fullName?: string | null;
-  userName?: string | null;
-  openedAt?: number;
-};
-
 function idOf(value: unknown): string {
   if (value === null || value === undefined) return "";
 
@@ -238,97 +222,6 @@ function idOf(value: unknown): string {
 
 function cleanId(value: unknown): string {
   return idOf(value);
-}
-
-function safeStorageRead(key: string) {
-  if (typeof window === "undefined") return null;
-
-  try {
-    return (
-      window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function safeJsonRead<T>(key: string): T | null {
-  const raw = safeStorageRead(key);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function readOpenWorkspaceSession() {
-  return safeJsonRead<OpenWorkspaceSession>(OPEN_WORKSPACE_KEY);
-}
-
-function readStoredActiveMembership() {
-  return safeJsonRead<Record<string, any>>("activeMembership");
-}
-
-function firstLocalId(...values: unknown[]): string {
-  for (const value of values) {
-    const id = idOf(value);
-    if (id) return id;
-  }
-
-  return "";
-}
-
-function selectedWorkspaceSchoolId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeSchoolId?: unknown;
-  activeSchool?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.schoolId,
-    membership?.schoolId,
-    membership?.school?.id,
-    args.activeSchoolId,
-    args.activeSchool?.id,
-    args.settings?.schoolId,
-    safeStorageRead("activeSchoolId"),
-  );
-}
-
-function selectedWorkspaceBranchId(args: {
-  openWorkspace?: OpenWorkspaceSession | null;
-  activeMembership?: Record<string, any> | null;
-  activeBranchId?: unknown;
-  activeBranch?: Record<string, any> | null;
-  settings?: Record<string, any> | null;
-}) {
-  const storedMembership = readStoredActiveMembership();
-  const membership =
-    args.openWorkspace?.membership ||
-    args.activeMembership ||
-    storedMembership ||
-    null;
-
-  return firstLocalId(
-    args.openWorkspace?.branchId,
-    membership?.branchId,
-    membership?.schoolBranchId,
-    membership?.branch?.id,
-    args.activeBranchId,
-    args.activeBranch?.id,
-    args.settings?.branchId,
-    safeStorageRead("activeBranchId"),
-  );
 }
 
 function labelOf<T extends { id?: EntityId; name?: string }>(
@@ -435,40 +328,56 @@ function withBranchHeader<T extends Record<string, any>>(
 }
 
 export default function Broadsheets() {
-  const dataRevision = useDataRevision();
+  const dataRevision = useBranchTableRevision([
+    "schools",
+    "branches",
+    "schoolBranchSettings",
+    "academicStructures",
+    "academicPeriods",
+    "students",
+    "parents",
+    "teachers",
+    "classes",
+    "subjects",
+    "classSubjects",
+    "classTeachers",
+    "studentEnrollments",
+    "studentParents",
+    "assessmentApplicabilities",
+    "assessmentStructures",
+    "assessmentStructureItems",
+    "assessmentEntries",
+    "gradingStructures",
+    "gradeRules",
+    "attendance",
+    "studentAttendanceSummaries",
+    "computedResults",
+    "reportCards",
+    "reportCardItems",
+    "studentReportSnapshots",
+    "studentPromotions",
+    "reportCardTemplates",
+    "reportCardTemplateSettings",
+    "reportCardTemplateAssignments",
+    "mediaAssets",
+    "mediaBlobs",
+  ]);
 
   const router = useRouter();
-
-  const { accountId, loading: accountLoading, authenticated } = useAccount();
-
   const { settings, loading: settingsLoading } = useSettings();
-
   const {
     activeSchool,
-    activeSchoolId,
     activeBranch,
-    activeBranchId,
-    loading: contextLoading,
   } = useActiveBranch();
-  const { activeMembership } = useActiveMembership();
-
-  const openWorkspace = useMemo(() => readOpenWorkspaceSession(), []);
-
-  const schoolId = selectedWorkspaceSchoolId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeSchoolId,
-    activeSchool: activeSchool as any,
-    settings: settings as any,
-  });
-
-  const branchId = selectedWorkspaceBranchId({
-    openWorkspace,
-    activeMembership: activeMembership as any,
-    activeBranchId,
-    activeBranch: activeBranch as any,
-    settings: settings as any,
-  });
+  const workspace = useBranchWorkspaceScope();
+  const {
+    accountId,
+    schoolId,
+    branchId,
+    authenticated,
+    restoring: accountLoading,
+    branchLoading: contextLoading,
+  } = workspace;
 
   const primary = settings?.primaryColor || "var(--primary-color, #2563eb)";
 
@@ -531,7 +440,7 @@ export default function Broadsheets() {
   const [assessmentEntries, setAssessmentEntries] = useState<AssessmentEntry[]>(
     [],
   );
-  const [gradingSystems, setGradingSystems] = useState<GradingSystem[]>([]);
+  const [gradingStructures, setGradingStructures] = useState<GradingStructure[]>([]);
   const [gradeRules, setGradeRules] = useState<GradeRule[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
   const [studentAttendanceSummaries, setStudentAttendanceSummaries] = useState<
@@ -602,7 +511,7 @@ export default function Broadsheets() {
     setAssessmentStructures([]);
     setAssessmentStructureItems([]);
     setAssessmentEntries([]);
-    setGradingSystems([]);
+    setGradingStructures([]);
     setGradeRules([]);
     setAttendance([]);
     setStudentAttendanceSummaries([]);
@@ -734,7 +643,7 @@ export default function Broadsheets() {
         db.assessmentStructures.toArray(),
         db.assessmentStructureItems.toArray(),
         db.assessmentEntries.toArray(),
-        db.gradingSystems.toArray(),
+        db.gradingStructures.toArray(),
         db.gradeRules.toArray(),
         db.attendance.toArray(),
         db.studentAttendanceSummaries.toArray(),
@@ -939,7 +848,7 @@ export default function Broadsheets() {
         ),
       );
       setAssessmentEntries(entryRows.filter(sameTenant));
-      setGradingSystems(
+      setGradingStructures(
         gradingRows.filter((row) => sameTenant(row) && row.active !== false),
       );
       setGradeRules(
@@ -1243,7 +1152,7 @@ export default function Broadsheets() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,
@@ -1270,7 +1179,7 @@ export default function Broadsheets() {
       assessmentStructures,
       assessmentStructureItems,
       assessmentEntries,
-      gradingSystems,
+      gradingStructures,
       gradeRules,
       attendance,
       studentAttendanceSummaries,
@@ -1280,9 +1189,44 @@ export default function Broadsheets() {
     ],
   );
 
+  const engineAssessmentSettings = useMemo(() => {
+    if (
+      mode !==
+      "subject-broadsheet"
+    ) {
+      return undefined;
+    }
+
+    const row =
+      reportCardTemplateSettings.find(
+        (item: any) =>
+          String(
+            item.reportType || "",
+          ) ===
+            "subject_broadsheet" &&
+          item.active !== false,
+      ) || null;
+
+    return resolveSubjectBroadsheetAssessmentReportSettings(
+      row as any,
+    );
+  }, [
+    mode,
+    reportCardTemplateSettings,
+  ]);
+
   const output = useMemo(
-    () => buildReportEngineOutput(dataset, filters),
-    [dataset, filters],
+    () =>
+      buildReportEngineOutput(
+        dataset,
+        filters,
+        engineAssessmentSettings,
+      ),
+    [
+      dataset,
+      filters,
+      engineAssessmentSettings,
+    ],
   );
 
   const cumulativeDataset: CumulativeReportEngineDataset = useMemo(
@@ -3839,6 +3783,26 @@ const css = `
 .student-reports-page .ba-print-head strong{font-size:14px}
 .student-reports-page .ba-print-head p{font-size:11px;margin-top:2px}
 .student-reports-page .ba-print-zone{padding:8px}
+
+@media (min-width:980px){
+  .student-reports-page .ba-modal-backdrop,
+  .student-reports-page .ba-sheet-backdrop{
+    top:var(--eds-shell-top-offset,0px);
+    right:0;
+    bottom:0;
+    left:var(--portal-content-left,0px);
+    width:auto;
+    max-width:calc(100vw - var(--portal-content-left,0px));
+    min-width:0;
+    overflow-x:hidden;
+  }
+
+  .student-reports-page .ba-modal,
+  .student-reports-page .ba-sheet{
+    min-width:0;
+    max-width:calc(100vw - var(--portal-content-left,0px) - 20px);
+  }
+}
 
 `;
  

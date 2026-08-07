@@ -1,375 +1,100 @@
 /**
  * app/lib/sync/syncTables.ts
  * --------------------------------------------------------------------------
- * Complete Eleeveon Schools synchronization table registry.
+ * Backward-compatible synchronization exports derived from the canonical
+ * database table-behaviour registry.
  *
- * Design guarantees:
- * - every Dexie table in the current database schema is classified exactly once;
- * - LOCAL_FIRST_SYNC_TABLES may push and pull through SyncRecord;
- * - BACKEND_CACHE_TABLES may be pulled/refreshed but never pushed by normal CRUD;
- * - BACKEND_ONLY_TABLES contain sensitive/server-authoritative records;
- * - LOCAL_ONLY_TABLES never leave this browser database;
- * - mediaAssets contains safe metadata only;
- * - mediaBlobs contains Blob/File data and is always local-only;
- * - database protection stores are always local-only;
- * - map/GPS fields remain part of their owning local-first record payloads;
- * - backward-compatible exports remain available.
- *
- * IMPORTANT:
- * When a new Dexie table is added, add it to ALL_KNOWN_DEXIE_TABLES and exactly
- * one classification list. validateSyncTableRegistry() will report omissions,
- * duplicates, and unknown names during development.
+ * Do not maintain a second hand-written table inventory here. Add or classify
+ * tables only in app/lib/db/core/registry.ts.
  */
 
-// ============================================================================
-// COMPLETE CURRENT DEXIE TABLE INVENTORY
-// Keep this list aligned with EleeveonDatabase table declarations.
-// ============================================================================
+import {
+  ALL_REGISTERED_TABLES,
+  BACKEND_CACHE_TABLES,
+  BACKEND_ONLY_TABLES,
+  BLOB_TABLES,
+  LOCAL_FIRST_SYNC_TABLES,
+  LOCAL_ONLY_TABLES,
+  PLATFORM_CACHE_TABLES,
+  PULL_SYNC_TABLES as REGISTRY_PULL_SYNC_TABLES,
+  PUSH_SYNC_TABLES as REGISTRY_PUSH_SYNC_TABLES,
+  isBackendOnlyTable as registryIsBackendOnlyTable,
+  isBlobTable,
+  isLocalOnlyTable as registryIsLocalOnlyTable,
+  isPlatformCacheTable,
+  isRegisteredTable,
+  shouldPullTable,
+  shouldPushTable,
+  tableKind,
+  validateTableRegistry,
+  type RegisteredTableName,
+} from "../db/core/registry";
 
-export const ALL_KNOWN_DEXIE_TABLES = [
-  // Local-first school data
-  "schools",
-  "branches",
-  "academicStructures",
-  "academicPeriods",
-  "organizations",
+export {
+  ALL_REGISTERED_TABLES,
+  BACKEND_CACHE_TABLES,
+  BACKEND_ONLY_TABLES,
+  BLOB_TABLES,
+  LOCAL_FIRST_SYNC_TABLES,
+  LOCAL_ONLY_TABLES,
+  PLATFORM_CACHE_TABLES,
+  tableKind,
+};
 
-  "students",
-  "teachers",
-  "parents",
-  "studentParents",
-
-  "classes",
-  "subjects",
-  "programs",
-  "curriculums",
-  "curriculumPathways",
-  "curriculumSubjects",
-  "classSubjects",
-  "subjectPrerequisites",
-  "studentCurriculums",
-  "subjectOfferings",
-  "assignments",
-  "classTeachers",
-  "studentEnrollments",
-
-  "gradingSystems",
-  "gradeRules",
-  "assessmentStructures",
-  "assessmentStructureItems",
-  "assessmentApplicabilities",
-  "assessmentComponents",
-  "assessmentEntries",
-  "computedResults",
-
-  "attendance",
-  "studentAttendanceSummaries",
-  "teacherAttendance",
-  "attendanceSessions",
-  "attendanceDevices",
-  "attendanceCredentials",
-  "attendanceCredentialEvents",
-  "attendanceCaptureEvents",
-  "attendanceEvidenceAssets",
-
-  // Shared identity, safety and transport
-  "identityCredentials",
-  "identityCredentialDesignSettings",
-  "identityCredentialEvents",
-  "identityDevices",
-  "identityAccessPoints",
-  "identityActivityEvents",
-  "identityEvidenceAssets",
-  "studentIdentityCards",
-  "pickupAuthorizations",
-  "studentPickupEvents",
-  "visitorProfiles",
-  "visitorVisits",
-  "schoolVehicles",
-  "transportRoutes",
-  "transportStops",
-  "studentTransportAssignments",
-  "transportJourneys",
-  "transportJourneyEvents",
-  "emergencyRollCallSessions",
-  "emergencyRollCallEntries",
-
-  "reportCards",
-  "reportCardItems",
-  "reportCardTemplates",
-  "reportCardTemplateSettings",
-  "reportCardTemplateAssignments",
-  "studentReportSnapshots",
-  "studentPromotions",
-
-  "feeStructures",
-  "payments",
-  "incomes",
-  "expenses",
-
-  "currencies",
-  "schoolCurrencySettings",
-
-  "paymentIntents",
-  "paymentTransactions",
-  "paymentRefunds",
-  "paymentSettlements",
-  "withdrawalRequests",
-  "schoolPayoutSettings",
-
-  "studentFeeInvoices",
-  "studentFeeInvoiceItems",
-  "studentFeePayments",
-
-  "staffPayrollProfiles",
-  "payrollRuns",
-  "payrollItems",
-  "staffPaymentRecords",
-
-  "announcements",
-  "announcementRecipients",
-  "messageThreads",
-  "messages",
-  "communicationLogs",
-  "notificationTemplates",
-
-  "schoolBranchSettings",
-   // Portal home / school experience
-  "portalHighlights",
-
-  // Public school website and template system
-  "websiteSettings",
-  "websiteTemplateSettings",
-  "websiteTemplateAssignments",
-  "websitePages",
-  "websiteSections",
-  "websiteNavigationItems",
-  "websiteDomains",
-  "websiteDomainAliases",
-  "websiteForms",
-  "websiteFormSubmissions",
-  "websiteRevisions",
-
-  "mediaAssets",
-  "mediaBlobs",
-
-  "calendarEvents",
-  "calendarEventParticipants",
-  "calendarEventReminders",
-  "calendarEventResponses",
-
-  "scheduleTimetables",
-  "scheduleSessions",
-  "scheduleResources",
-  "scheduleConflicts",
-
-  // Backend/platform cache and sensitive tables
-  "appUsers",
-  "userMemberships",
-  "permissionRules",
-  "accounts",
-  "userSessions",
-  "subscriptionPlans",
-  "accountSubscriptions",
-  "invoices",
-  "appPayments",
-  "billingEvents",
-  "syncDevices",
-  "syncConflicts",
-  "apiClients",
-  "apiKeys",
-  "webhooks",
-  "webhookLogs",
-  "integrationMappings",
-  "auditLogs",
-  "backgroundJobs",
-  "storageUsages",
-  "accountFeatureFlags",
-  "accountSystemSettings",
-  "notificationDeliveryLogs",
-  "paymentProviderEvents",
-
-  // Local database protection/recovery stores
-  "migrationJournal",
-  "databaseRecoveryBackups",
-  "syncQuarantine",
-] as const;
+export const ALL_KNOWN_DEXIE_TABLES =
+  ALL_REGISTERED_TABLES;
 
 export type KnownDexieTableName =
-  (typeof ALL_KNOWN_DEXIE_TABLES)[number];
-
-// ============================================================================
-// LOCAL-FIRST SCHOOL DATA
-// These tables use normal browser CRUD and SyncRecord push + pull.
-// ============================================================================
-
-export const LOCAL_FIRST_SYNC_TABLES = [
-  // Core school structure
-  "schools",
-  "branches",
-  "academicStructures",
-  "academicPeriods",
-  "organizations",
-
-  // People and relationships
-  "students",
-  "teachers",
-  "parents",
-  "studentParents",
-
-  // Academic setup and delivery
-  "classes",
-  "subjects",
-  "programs",
-  "curriculums",
-  "curriculumPathways",
-  "curriculumSubjects",
-  "classSubjects",
-  "subjectPrerequisites",
-  "studentCurriculums",
-  "subjectOfferings",
-  "assignments",
-  "classTeachers",
-  "studentEnrollments",
-
-  // Assessment and grading
-  "gradingSystems",
-  "gradeRules",
-  "assessmentStructures",
-  "assessmentStructureItems",
-  "assessmentApplicabilities",
-  "assessmentComponents",
-  "assessmentEntries",
-  "computedResults",
-
-  // Attendance
-  "attendance",
-  "studentAttendanceSummaries",
-  "teacherAttendance",
-  "attendanceSessions",
-  "attendanceDevices",
-  "attendanceCredentials",
-  "attendanceCredentialEvents",
-  "attendanceCaptureEvents",
-  "attendanceEvidenceAssets",
-
-  // Shared identity, safety and transport
-  "identityCredentials",
-  "identityCredentialDesignSettings",
-  "identityCredentialEvents",
-  "identityDevices",
-  "identityAccessPoints",
-  "identityActivityEvents",
-  "identityEvidenceAssets",
-  "studentIdentityCards",
-  "pickupAuthorizations",
-  "studentPickupEvents",
-  "visitorProfiles",
-  "visitorVisits",
-  "schoolVehicles",
-  "transportRoutes",
-  "transportStops",
-  "studentTransportAssignments",
-  "transportJourneys",
-  "transportJourneyEvents",
-  "emergencyRollCallSessions",
-  "emergencyRollCallEntries",
-
-  // Reporting
-  "reportCards",
-  "reportCardItems",
-  "reportCardTemplates",
-  "reportCardTemplateSettings",
-  "reportCardTemplateAssignments",
-  "studentReportSnapshots",
-  "studentPromotions",
-
-  // Finance
-  "feeStructures",
-  "payments",
-  "incomes",
-  "expenses",
-
-  // Currency
-  "currencies",
-  "schoolCurrencySettings",
-
-  // App-created payment records
-  // Provider webhook events remain backend-owned and are listed separately.
-  "paymentIntents",
-  "paymentTransactions",
-  "paymentRefunds",
-
-  // Wallet, settlement and payout
-  "paymentSettlements",
-  "withdrawalRequests",
-  "schoolPayoutSettings",
-
-  // Student fee invoicing
-  "studentFeeInvoices",
-  "studentFeeInvoiceItems",
-  "studentFeePayments",
-
-  // Payroll
-  "staffPayrollProfiles",
-  "payrollRuns",
-  "payrollItems",
-  "staffPaymentRecords",
-
-  // Communications
-  "announcements",
-  "announcementRecipients",
-  "messageThreads",
-  "messages",
-  "communicationLogs",
-  "notificationTemplates",
-
-  // Settings
-  "schoolBranchSettings",
-   // Portal home / school experience
-  "portalHighlights",
-
-  // Public school website and template system
-  // Records are lightweight, offline-first metadata/content. Website media files
-  // continue to sync through mediaAssets while mediaBlobs remains local-only.
-  "websiteSettings",
-  "websiteTemplateSettings",
-  "websiteTemplateAssignments",
-  "websitePages",
-  "websiteSections",
-  "websiteNavigationItems",
-  "websiteDomains",
-  "websiteDomainAliases",
-  "websiteForms",
-  "websiteFormSubmissions",
-  "websiteRevisions",
-
-  // Safe media metadata only
-  "mediaAssets",
-
-  // Calendar
-  "calendarEvents",
-  "calendarEventParticipants",
-  "calendarEventReminders",
-  "calendarEventResponses",
-
-  // Timetables and resources
-  "scheduleTimetables",
-  "scheduleSessions",
-  "scheduleResources",
-  "scheduleConflicts",
-] as const satisfies readonly KnownDexieTableName[];
+  RegisteredTableName;
 
 export type LocalFirstSyncTableName =
   (typeof LOCAL_FIRST_SYNC_TABLES)[number];
+export type BackendCacheTableName =
+  (typeof BACKEND_CACHE_TABLES)[number];
+export type BackendOnlyTableName =
+  (typeof BACKEND_ONLY_TABLES)[number];
+export type LocalOnlyTableName =
+  | (typeof LOCAL_ONLY_TABLES)[number]
+  | (typeof BLOB_TABLES)[number];
+export type SyncTableName =
+  LocalFirstSyncTableName;
 
-// ============================================================================
-// MAP / LOCATION-AWARE LOCAL-FIRST DATA
- //Tables extending MapLocationFields support the full set.
- //Event, device, access-point and transport tables may support only
- // latitude, longitude, accuracyMeters or locationLabel.
- 
-// ============================================================================
+export const SYNC_TABLES: SyncTableName[] = [
+  ...LOCAL_FIRST_SYNC_TABLES,
+];
+
+export const PUSH_SYNC_TABLES: SyncTableName[] = [
+  ...REGISTRY_PUSH_SYNC_TABLES,
+];
+
+/**
+ * Ordinary SyncRecord pulls are local-first only. Platform cache records are
+ * accepted separately by applyPlatformCacheRecords().
+ */
+export const PULL_SYNC_TABLES = [
+  ...REGISTRY_PULL_SYNC_TABLES,
+] as const;
+
+export type PullSyncTableName =
+  (typeof PULL_SYNC_TABLES)[number];
+
+export const BROWSER_READABLE_TABLES = [
+  ...LOCAL_FIRST_SYNC_TABLES,
+  ...BACKEND_CACHE_TABLES,
+] as const;
+
+export type BrowserReadableTableName =
+  (typeof BROWSER_READABLE_TABLES)[number];
+
+export const NEVER_PUSH_TABLES = [
+  ...BACKEND_CACHE_TABLES,
+  ...BACKEND_ONLY_TABLES,
+  ...LOCAL_ONLY_TABLES,
+  ...BLOB_TABLES,
+] as const;
+
+export type NeverPushTableName =
+  (typeof NEVER_PUSH_TABLES)[number];
 
 export const MAP_LOCATION_FIELDS = [
   "latitude",
@@ -389,22 +114,15 @@ export type MapLocationField =
   (typeof MAP_LOCATION_FIELDS)[number];
 
 export const LOCATION_AWARE_SYNC_TABLES = [
-  // Permanent school and person locations
   "schools",
   "branches",
   "students",
   "teachers",
   "parents",
-
-  // Existing attendance capture GPS evidence
   "attendanceCaptureEvents",
-
-  // Identity devices, access points and scan/activity evidence
   "identityDevices",
   "identityAccessPoints",
   "identityActivityEvents",
-
-  // Transport stop coordinates and journey scan positions
   "transportStops",
   "transportJourneyEvents",
 ] as const satisfies readonly LocalFirstSyncTableName[];
@@ -412,396 +130,164 @@ export const LOCATION_AWARE_SYNC_TABLES = [
 export type LocationAwareSyncTableName =
   (typeof LOCATION_AWARE_SYNC_TABLES)[number];
 
-export const LOCATION_AWARE_SYNC_TABLE_SET =
-  new Set<string>(
-    LOCATION_AWARE_SYNC_TABLES,
-  );
-
-export function isLocationAwareSyncTable(
-  tableName: string,
-): tableName is LocationAwareSyncTableName {
-  return LOCATION_AWARE_SYNC_TABLE_SET.has(
-    tableName,
-  );
-}
-
-// ============================================================================
-// BACKEND-OWNED CACHE TABLES
-// Safe server-authoritative records cached in Dexie for UI/startup.
-// They may be pulled/refreshed but never pushed through normal local-first CRUD.
-// ============================================================================
-
-export const BACKEND_CACHE_TABLES = [
-  "appUsers",
-  "userMemberships",
-  "permissionRules",
-  "accounts",
-
-  "subscriptionPlans",
-  "accountSubscriptions",
-  "invoices",
-  "appPayments",
-  "billingEvents",
-
-  "syncDevices",
-  "syncConflicts",
-
-  "apiClients",
-  "webhooks",
-  "webhookLogs",
-  "integrationMappings",
-
-  "auditLogs",
-  "backgroundJobs",
-  "storageUsages",
-
-  "accountFeatureFlags",
-  "accountSystemSettings",
-  "notificationDeliveryLogs",
-
-  // Payment-provider webhook/event records are backend authoritative.
-  "paymentProviderEvents",
-] as const satisfies readonly KnownDexieTableName[];
-
-export type BackendCacheTableName =
-  (typeof BACKEND_CACHE_TABLES)[number];
-
-// ============================================================================
-// BACKEND-ONLY / SENSITIVE TABLES
-// These stores may exist in Dexie for tightly controlled compatibility, but
-// secret/hash-bearing rows must never be normally pushed or broadly cached.
-// ============================================================================
-
-export const BACKEND_ONLY_TABLES = [
-  "userSessions",
-  "apiKeys",
-] as const satisfies readonly KnownDexieTableName[];
-
-export type BackendOnlyTableName =
-  (typeof BACKEND_ONLY_TABLES)[number];
-
-// ============================================================================
-// LOCAL-ONLY TABLES
-// Browser-only data, binary blobs, migrations, backups and quarantine.
-// These must never enter SyncRecord JSON or platform-cache responses.
-// ============================================================================
-
-export const LOCAL_ONLY_TABLES = [
-  // Binary media payloads
-  "mediaBlobs",
-
-  // Database upgrade/recovery infrastructure
-  "migrationJournal",
-  "databaseRecoveryBackups",
-
-  // Invalid push/pull records retained for diagnosis and repair
-  "syncQuarantine",
-] as const satisfies readonly KnownDexieTableName[];
-
-export type LocalOnlyTableName =
-  (typeof LOCAL_ONLY_TABLES)[number];
-
-// ============================================================================
-// SYNC DIRECTION EXPORTS
-// ============================================================================
-
-/**
- * Backward-compatible name used by older local CRUD and synchronization code.
- * It intentionally contains only local-first tables.
- */
-export type SyncTableName =
-  LocalFirstSyncTableName;
-
-export const SYNC_TABLES: SyncTableName[] = [
-  ...LOCAL_FIRST_SYNC_TABLES,
-];
-
-/**
- * Explicit browser-push allow-list.
- */
-export const PUSH_SYNC_TABLES: SyncTableName[] = [
-  ...LOCAL_FIRST_SYNC_TABLES,
-];
-
-/**
- * Normal SyncRecord pulls are local-first.
- * Safe platform cache records may also be accepted by the frontend pull/apply
- * pipeline when the backend includes them.
- */
-export const PULL_SYNC_TABLES = [
-  ...LOCAL_FIRST_SYNC_TABLES,
-  ...BACKEND_CACHE_TABLES,
-] as const;
-
-export type PullSyncTableName =
-  (typeof PULL_SYNC_TABLES)[number];
-
-/**
- * All tables that may be returned to the browser through either normal pull or
- * explicit platform-cache/bootstrap responses.
- */
-export const BROWSER_READABLE_TABLES = [
-  ...LOCAL_FIRST_SYNC_TABLES,
-  ...BACKEND_CACHE_TABLES,
-] as const;
-
-export type BrowserReadableTableName =
-  (typeof BROWSER_READABLE_TABLES)[number];
-
-/**
- * Tables that must never be included in a browser push request.
- */
-export const NEVER_PUSH_TABLES = [
-  ...BACKEND_CACHE_TABLES,
-  ...BACKEND_ONLY_TABLES,
-  ...LOCAL_ONLY_TABLES,
-] as const;
-
-export type NeverPushTableName =
-  (typeof NEVER_PUSH_TABLES)[number];
-
-// ============================================================================
-// SETS
-// ============================================================================
-
 export const KNOWN_DEXIE_TABLE_SET =
-  new Set<string>(
-    ALL_KNOWN_DEXIE_TABLES,
-  );
-
+  new Set<string>(ALL_KNOWN_DEXIE_TABLES);
 export const SYNC_TABLE_SET =
-  new Set<string>(
-    SYNC_TABLES,
-  );
-
+  new Set<string>(SYNC_TABLES);
 export const PUSH_SYNC_TABLE_SET =
-  new Set<string>(
-    PUSH_SYNC_TABLES,
-  );
-
+  new Set<string>(PUSH_SYNC_TABLES);
 export const LOCAL_FIRST_SYNC_TABLE_SET =
-  new Set<string>(
-    LOCAL_FIRST_SYNC_TABLES,
-  );
-
+  new Set<string>(LOCAL_FIRST_SYNC_TABLES);
 export const BACKEND_CACHE_TABLE_SET =
-  new Set<string>(
-    BACKEND_CACHE_TABLES,
-  );
-
+  new Set<string>(BACKEND_CACHE_TABLES);
 export const BACKEND_ONLY_TABLE_SET =
-  new Set<string>(
-    BACKEND_ONLY_TABLES,
-  );
-
+  new Set<string>(BACKEND_ONLY_TABLES);
 export const LOCAL_ONLY_TABLE_SET =
-  new Set<string>(
-    LOCAL_ONLY_TABLES,
-  );
-
+  new Set<string>([
+    ...LOCAL_ONLY_TABLES,
+    ...BLOB_TABLES,
+  ]);
 export const PULL_SYNC_TABLE_SET =
-  new Set<string>(
-    PULL_SYNC_TABLES,
-  );
-
+  new Set<string>(PULL_SYNC_TABLES);
 export const BROWSER_READABLE_TABLE_SET =
-  new Set<string>(
-    BROWSER_READABLE_TABLES,
-  );
-
+  new Set<string>(BROWSER_READABLE_TABLES);
 export const NEVER_PUSH_TABLE_SET =
-  new Set<string>(
-    NEVER_PUSH_TABLES,
-  );
-
-// ============================================================================
-// TYPE GUARDS
-// ============================================================================
+  new Set<string>(NEVER_PUSH_TABLES);
+export const LOCATION_AWARE_SYNC_TABLE_SET =
+  new Set<string>(LOCATION_AWARE_SYNC_TABLES);
 
 export function isKnownDexieTable(
   tableName: string,
 ): tableName is KnownDexieTableName {
-  return KNOWN_DEXIE_TABLE_SET.has(
-    tableName,
-  );
+  return isRegisteredTable(tableName);
 }
 
 export function isSyncTable(
   tableName: string,
 ): tableName is SyncTableName {
-  return SYNC_TABLE_SET.has(
-    tableName,
-  );
+  return shouldPullTable(tableName);
 }
 
 export function isLocalFirstSyncTable(
   tableName: string,
 ): tableName is LocalFirstSyncTableName {
-  return LOCAL_FIRST_SYNC_TABLE_SET.has(
-    tableName,
-  );
+  return tableKind(tableName) === "local_first";
 }
 
 export function isPushSyncTable(
   tableName: string,
 ): tableName is SyncTableName {
-  return PUSH_SYNC_TABLE_SET.has(
-    tableName,
-  );
+  return shouldPushTable(tableName);
 }
 
 export function isPullSyncTable(
   tableName: string,
 ): tableName is PullSyncTableName {
-  return PULL_SYNC_TABLE_SET.has(
-    tableName,
-  );
+  return shouldPullTable(tableName);
 }
 
 export function isBrowserReadableTable(
   tableName: string,
 ): tableName is BrowserReadableTableName {
-  return BROWSER_READABLE_TABLE_SET.has(
-    tableName,
+  return (
+    shouldPullTable(tableName) ||
+    isPlatformCacheTable(tableName)
   );
 }
 
 export function isBackendCacheTable(
   tableName: string,
 ): tableName is BackendCacheTableName {
-  return BACKEND_CACHE_TABLE_SET.has(
-    tableName,
-  );
+  return isPlatformCacheTable(tableName);
 }
 
 export function isBackendOnlyTable(
   tableName: string,
 ): tableName is BackendOnlyTableName {
-  return BACKEND_ONLY_TABLE_SET.has(
-    tableName,
-  );
+  return registryIsBackendOnlyTable(tableName);
 }
 
 export function isLocalOnlyTable(
   tableName: string,
 ): tableName is LocalOnlyTableName {
-  return LOCAL_ONLY_TABLE_SET.has(
-    tableName,
+  return (
+    registryIsLocalOnlyTable(tableName) ||
+    isBlobTable(tableName)
   );
 }
 
 export function isNeverPushTable(
   tableName: string,
 ): tableName is NeverPushTableName {
-  return NEVER_PUSH_TABLE_SET.has(
-    tableName,
-  );
+  return !shouldPushTable(tableName);
 }
 
-// ============================================================================
-// BACKWARD-COMPATIBLE BACKEND-DRIVEN NAMES
-// ============================================================================
+export function isLocationAwareSyncTable(
+  tableName: string,
+): tableName is LocationAwareSyncTableName {
+  return LOCATION_AWARE_SYNC_TABLE_SET.has(tableName);
+}
 
 export const BACKEND_DRIVEN_TABLES =
   BACKEND_CACHE_TABLES;
-
 export type BackendDrivenTableName =
   BackendCacheTableName;
-
 export const BACKEND_DRIVEN_TABLE_SET =
+  BACKEND_CACHE_TABLE_SET;
+export const BACKEND_DRIVEN_TABLE_SET_ALIAS =
   BACKEND_CACHE_TABLE_SET;
 
 export function isBackendDrivenTable(
   tableName: string,
 ): tableName is BackendDrivenTableName {
-  return isBackendCacheTable(
-    tableName,
-  );
+  return isBackendCacheTable(tableName);
 }
 
-// ============================================================================
-// FILTER HELPERS
-// ============================================================================
+export function getSyncTables(options?: {
+  include?: readonly string[];
+  exclude?: readonly string[];
+}): SyncTableName[] {
+  return filterTables(
+    SYNC_TABLES,
+    options,
+  ) as SyncTableName[];
+}
 
-export function getSyncTables(
+export function getPullSyncTables(options?: {
+  include?: readonly string[];
+  exclude?: readonly string[];
+}): PullSyncTableName[] {
+  return filterTables(
+    PULL_SYNC_TABLES,
+    options,
+  ) as PullSyncTableName[];
+}
+
+function filterTables(
+  source: readonly string[],
   options?: {
     include?: readonly string[];
     exclude?: readonly string[];
   },
 ) {
-  let tables =
-    [...SYNC_TABLES] as string[];
+  let tables = [...source];
 
   if (options?.include?.length) {
-    const include =
-      new Set(
-        options.include,
-      );
-
-    tables =
-      tables.filter(
-        (table) =>
-          include.has(table),
-      );
+    const include = new Set(options.include);
+    tables = tables.filter((table) =>
+      include.has(table),
+    );
   }
 
   if (options?.exclude?.length) {
-    const exclude =
-      new Set(
-        options.exclude,
-      );
-
-    tables =
-      tables.filter(
-        (table) =>
-          !exclude.has(table),
-      );
+    const exclude = new Set(options.exclude);
+    tables = tables.filter((table) =>
+      !exclude.has(table),
+    );
   }
 
-  return tables as SyncTableName[];
+  return tables;
 }
-
-export function getPullSyncTables(
-  options?: {
-    include?: readonly string[];
-    exclude?: readonly string[];
-  },
-) {
-  let tables =
-    [...PULL_SYNC_TABLES] as string[];
-
-  if (options?.include?.length) {
-    const include =
-      new Set(
-        options.include,
-      );
-
-    tables =
-      tables.filter(
-        (table) =>
-          include.has(table),
-      );
-  }
-
-  if (options?.exclude?.length) {
-    const exclude =
-      new Set(
-        options.exclude,
-      );
-
-    tables =
-      tables.filter(
-        (table) =>
-          !exclude.has(table),
-      );
-  }
-
-  return tables as PullSyncTableName[];
-}
-
-// ============================================================================
-// REGISTRY INTEGRITY VALIDATION
-// ============================================================================
 
 export type SyncTableRegistryValidation = {
   ok: boolean;
@@ -810,208 +296,92 @@ export type SyncTableRegistryValidation = {
   unknownClassifiedTables: string[];
   duplicateEntriesWithinLists: Record<string, string[]>;
   classificationByTable: Record<string, string[]>;
+  issues: string[];
 };
 
-function duplicateValues(
-  values: readonly string[],
-) {
-  const seen =
-    new Set<string>();
-
-  const duplicates =
-    new Set<string>();
-
-  for (const value of values) {
-    if (seen.has(value)) {
-      duplicates.add(value);
-    }
-
-    seen.add(value);
-  }
-
-  return [...duplicates].sort();
-}
-
-/**
- * Verifies that every known Dexie table is present in exactly one primary
- * classification and that no classification references an unknown table.
- *
- * Safe to call during DatabaseBootstrap, tests, or development startup.
- */
 export function validateSyncTableRegistry():
   SyncTableRegistryValidation {
-  const classifications = {
-    localFirst:
-      LOCAL_FIRST_SYNC_TABLES as readonly string[],
-    backendCache:
-      BACKEND_CACHE_TABLES as readonly string[],
-    backendOnly:
-      BACKEND_ONLY_TABLES as readonly string[],
-    localOnly:
-      LOCAL_ONLY_TABLES as readonly string[],
-  };
+  const issues = validateTableRegistry();
+  const classificationByTable: Record<
+    string,
+    string[]
+  > = {};
 
-  const classificationByTable:
+  const groups: Array<[
+    string,
+    readonly string[],
+  ]> = [
+    ["local_first", LOCAL_FIRST_SYNC_TABLES],
+    ["backend_cache", BACKEND_CACHE_TABLES],
+    ["backend_only", BACKEND_ONLY_TABLES],
+    ["local_only", LOCAL_ONLY_TABLES],
+    ["blob", BLOB_TABLES],
+  ];
+
+  const duplicateEntriesWithinLists:
     Record<string, string[]> = {};
 
-  for (
-    const [
-      classification,
-      tables,
-    ] of Object.entries(
-      classifications,
-    )
-  ) {
+  for (const [name, tables] of groups) {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+
     for (const table of tables) {
-      (
-        classificationByTable[
-          table
-        ] ||= []
-      ).push(
-        classification,
-      );
+      (classificationByTable[table] ??= []).push(name);
+      if (seen.has(table)) duplicates.add(table);
+      seen.add(table);
+    }
+
+    if (duplicates.size) {
+      duplicateEntriesWithinLists[name] = [
+        ...duplicates,
+      ].sort();
     }
   }
 
-  const known =
-    new Set<string>(
-      ALL_KNOWN_DEXIE_TABLES,
-    );
-
-  const classified =
-    Object.keys(
-      classificationByTable,
-    );
-
-  const missingTables =
-    [...known]
-      .filter(
-        (table) =>
-          !classificationByTable[
-            table
-          ],
-      )
-      .sort();
-
   const multiplyClassifiedTables =
-    classified
-      .filter(
-        (table) =>
-          classificationByTable[
-            table
-          ].length !== 1,
-      )
+    Object.entries(classificationByTable)
+      .filter(([, owners]) => owners.length > 1)
+      .map(([table]) => table)
       .sort();
-
-  const unknownClassifiedTables =
-    classified
-      .filter(
-        (table) =>
-          !known.has(table),
-      )
-      .sort();
-
-  const duplicateEntriesWithinLists =
-    Object.fromEntries(
-      Object.entries(
-        classifications,
-      ).map(
-        ([
-          name,
-          tables,
-        ]) => [
-          name,
-          duplicateValues(
-            tables,
-          ),
-        ],
-      ),
-    );
-
-  const hasInternalDuplicates =
-    Object.values(
-      duplicateEntriesWithinLists,
-    ).some(
-      (duplicates) =>
-        duplicates.length > 0,
-    );
 
   return {
     ok:
-      missingTables.length === 0 &&
-      multiplyClassifiedTables.length ===
-        0 &&
-      unknownClassifiedTables.length ===
-        0 &&
-      !hasInternalDuplicates,
-    missingTables,
+      issues.length === 0 &&
+      multiplyClassifiedTables.length === 0 &&
+      !Object.keys(duplicateEntriesWithinLists).length,
+    missingTables: [],
     multiplyClassifiedTables,
-    unknownClassifiedTables,
+    unknownClassifiedTables: [],
     duplicateEntriesWithinLists,
     classificationByTable,
+    issues,
   };
 }
 
-/**
- * Throws a detailed startup error when the registry and Dexie schema drift.
- */
 export function assertValidSyncTableRegistry() {
-  const result =
-    validateSyncTableRegistry();
+  const result = validateSyncTableRegistry();
 
-  if (result.ok) {
-    return result;
+  if (!result.ok) {
+    throw new Error(
+      [
+        "Invalid Eleeveon sync table registry:",
+        ...result.issues.map((issue) => `- ${issue}`),
+        ...result.multiplyClassifiedTables.map(
+          (table) => `- ${table} is multiply classified.`,
+        ),
+      ].join("\\n"),
+    );
   }
 
-  const details = [
-    result.missingTables.length
-      ? `Missing: ${result.missingTables.join(", ")}`
-      : "",
-    result.multiplyClassifiedTables.length
-      ? `Multiply classified: ${result.multiplyClassifiedTables.join(", ")}`
-      : "",
-    result.unknownClassifiedTables.length
-      ? `Unknown: ${result.unknownClassifiedTables.join(", ")}`
-      : "",
-    ...Object.entries(
-      result.duplicateEntriesWithinLists,
-    )
-      .filter(
-        (
-          [, duplicates],
-        ) =>
-          duplicates.length > 0,
-      )
-      .map(
-        ([
-          listName,
-          duplicates,
-        ]) =>
-          `Duplicates in ${listName}: ${duplicates.join(", ")}`,
-      ),
-  ]
-    .filter(Boolean)
-    .join(" | ");
-
-  throw new Error(
-    `Invalid synchronization table registry. ${details}`,
-  );
+  return result;
 }
 
-/**
- * Optional non-throwing development warning.
- */
 export function warnIfSyncTableRegistryInvalid() {
-  const result =
-    validateSyncTableRegistry();
+  const result = validateSyncTableRegistry();
 
-  if (
-    !result.ok &&
-    typeof console !==
-      "undefined"
-  ) {
+  if (!result.ok && typeof console !== "undefined") {
     console.error(
-      "[syncTables] Registry validation failed:",
+      "[sync] invalid table registry",
       result,
     );
   }

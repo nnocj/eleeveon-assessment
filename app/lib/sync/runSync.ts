@@ -36,6 +36,8 @@ import {
 import {
   resolveSyncPolicy,
 } from "./resolveSyncPolicy";
+import { assertSyncRegistryMatchesDatabase } from "./syncRegistryAudit";
+import { repairPendingSyncRecords } from "./pendingRecordRepair";
 
 export type SyncTrigger =
   | "startup"
@@ -60,6 +62,9 @@ export type RunSyncOptions = {
    * Developer-only/manual diagnostics may force a policy refresh.
    */
   refreshPolicy?: boolean;
+
+  /** Safely repairs legacy sync metadata before push. Defaults to true. */
+  repairPendingRecords?: boolean;
 };
 
 export type SyncListener = (
@@ -77,6 +82,7 @@ let activeMode: EffectiveSyncMode | null =
 let lastResult: SyncResult | null = null;
 
 const listeners = new Set<SyncListener>();
+let registryAudited = false;
 
 function emit() {
   const syncing = Boolean(activeSyncPromise);
@@ -177,6 +183,11 @@ async function performSync(
   options: RunSyncOptions,
 ): Promise<SyncResult> {
   const startedAt = Date.now();
+
+  if (!registryAudited) {
+    assertSyncRegistryMatchesDatabase();
+    registryAudited = true;
+  }
 
   let accountId: string;
 
@@ -300,6 +311,21 @@ async function performSync(
       accountId,
       "before synchronization started",
     );
+
+    if (
+      plan.shouldPush &&
+      options.repairPendingRecords !== false
+    ) {
+      const repair =
+        await repairPendingSyncRecords();
+
+      if (repair.errors.length) {
+        console.warn(
+          "[sync] some pending records could not be repaired automatically",
+          repair,
+        );
+      }
+    }
 
     const push = plan.shouldPush
       ? await pushSync({ accountId })

@@ -80,6 +80,31 @@ function normalizedMode(value: unknown): "light" | "dark" {
   return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
 }
 
+
+function announceSharedThemeApplied(
+  applied:
+    AppliedAppearance | null,
+) {
+  if (
+    typeof window === "undefined" ||
+    !applied
+  ) {
+    return;
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(
+      "eleeveon:shared-theme-applied",
+      {
+        detail: {
+          appliedFor: applied,
+          at: Date.now(),
+        },
+      },
+    ),
+  );
+}
+
 function appearanceSignature(settings: Record<string, any> | null | undefined) {
   if (!settings) return "none";
 
@@ -151,6 +176,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
           liveApplicationRef.current = null;
           setAppliedFor(applied);
           setLoading(false);
+          announceSharedThemeApplied(
+            applied,
+          );
         }
 
         return applied;
@@ -264,6 +292,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     liveApplicationRef.current = liveKey;
     setAppliedFor(applied);
     setLoading(false);
+    announceSharedThemeApplied(
+      applied,
+    );
   }, [
     activeMembership,
     expectedIdentity,

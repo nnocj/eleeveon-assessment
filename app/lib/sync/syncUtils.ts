@@ -22,6 +22,7 @@
 import { db } from "../db/db";
 import {
   assertAccountId,
+  createFallbackUuid,
   getAccountId,
   getDeviceId,
   normalizeSyncStatus,
@@ -87,7 +88,11 @@ export function prepareSyncData<T extends SyncableRecord>(data: T, existing?: Pa
     accountId,
     schoolId: data.schoolId ?? existing?.schoolId,
     branchId: data.branchId ?? existing?.branchId,
-    id: data.id ?? existing?.id ?? (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    id:
+      data.id ??
+      existing?.id ??
+      (globalThis.crypto?.randomUUID?.() ||
+        createFallbackUuid()),
     createdAt: existing?.createdAt || data.createdAt || nowTimestamp(),
     updatedAt: nowTimestamp(),
     version: Number(existing?.version || data.version || 0) + 1,

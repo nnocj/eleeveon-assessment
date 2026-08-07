@@ -2,38 +2,65 @@
  * app/lib/db/schema/build-schema.ts
  * --------------------------------------------------------------------------
  * Versioned schema composition and validation for Eleeveon Schools.
+ *
+ * Version history:
+ * - Version 1: historical baseline
+ * - Version 2: current operational/pre-Platform-V2 database
+ * - Version 3: Platform V2 schema plus assessment hierarchy migration
+ *
+ * Never modify already released version 1 or version 2 store definitions.
  */
+
+import type {
+  Transaction,
+} from "dexie";
 
 import {
   LOCAL_SYSTEM_STORES,
 } from "../db-migrations";
+
 import {
   validateStoreMap,
 } from "../core/indexes";
+
 import {
   DOMAIN_STORES,
   findDuplicateModuleStores,
 } from "../modules";
+
+import {
+  migrateAssessmentHierarchy,
+} from "../migrations/assessment-hierarchy";
+
 import {
   SCHEMA_V1_STORES,
   SCHEMA_V1_VERSION,
 } from "./schema-v1";
+
 import {
   SCHEMA_V2_STORES,
   SCHEMA_V2_VERSION,
 } from "./schema-v2";
 
 // ======================================================
-// VERSION 3
+// VERSION 3 — PLATFORM V2 + ASSESSMENT HIERARCHY
 // ======================================================
 
 export const SCHEMA_V3_VERSION = 3 as const;
 
 /**
- * Platform V2 schema.
+ * Current Platform V2 schema.
  *
- * DOMAIN_STORES contains school-domain and backend-cache module stores.
- * LOCAL_SYSTEM_STORES contains migration, backup, quarantine and health stores.
+ * DOMAIN_STORES:
+ * - school-domain tables;
+ * - platform/backend cache tables;
+ * - assessment hierarchy indexes and fields.
+ *
+ * LOCAL_SYSTEM_STORES:
+ * - migration journal;
+ * - database recovery backups;
+ * - sync quarantine;
+ * - local health and protection stores.
  */
 export const SCHEMA_V3_STORES: Readonly<
   Record<string, string>
@@ -61,12 +88,13 @@ export const VERSIONED_SCHEMAS = [
   {
     version: SCHEMA_V2_VERSION,
     stores: SCHEMA_V2_STORES,
-    label: "Pre-Platform-V2",
+    label: "Current operational schema",
   },
   {
     version: SCHEMA_V3_VERSION,
     stores: SCHEMA_V3_STORES,
-    label: "Platform V2",
+    label:
+      "Platform V2 and assessment hierarchy foundation",
   },
 ] as const satisfies readonly VersionedDexieSchema[];
 
@@ -114,7 +142,7 @@ export interface SchemaValidationResult {
 }
 
 /**
- * Validates one store map without opening IndexedDB.
+ * Validates one Dexie store map without opening IndexedDB.
  */
 export function validateSchema(
   version: number,
@@ -127,13 +155,16 @@ export function validateSchema(
   return {
     ok: issues.length === 0,
     version,
-    tableCount: Object.keys(stores).length,
+    tableCount: Object.keys(
+      stores,
+    ).length,
     issues,
   };
 }
 
 /**
- * Validates every registered version and checks current module ownership.
+ * Validates every historical/current version and checks that
+ * current module stores have exactly one owning module.
  */
 export function validateAllSchemas():
   SchemaValidationResult[] {
@@ -142,13 +173,17 @@ export function validateAllSchemas():
 
   const results = VERSIONED_SCHEMAS.map(
     ({ version, stores }) =>
-      validateSchema(version, stores),
+      validateSchema(
+        version,
+        stores,
+      ),
   );
 
   if (duplicateModuleStores.length) {
     const current = results.find(
       (result) =>
-        result.version === SCHEMA_V3_VERSION,
+        result.version ===
+        SCHEMA_V3_VERSION,
     );
 
     current?.issues.push(
@@ -158,14 +193,16 @@ export function validateAllSchemas():
       ),
     );
 
-    if (current) current.ok = false;
+    if (current) {
+      current.ok = false;
+    }
   }
 
   return results;
 }
 
 /**
- * Throws during development when the current schema is malformed.
+ * Throws during development when the latest/current schema is malformed.
  */
 export function assertValidLatestSchema(): void {
   const result = validateSchema(
@@ -183,6 +220,7 @@ export function assertValidLatestSchema(): void {
           `Duplicate module store: ${tableName}.`,
       ),
     );
+
     result.ok = false;
   }
 
@@ -202,37 +240,57 @@ export function assertValidLatestSchema(): void {
 // DEXIE REGISTRATION
 // ======================================================
 
-/**
- * Minimal structural contract required by registerSchemas().
- *
- * Using this interface keeps build-schema.ts independent of the concrete
- * EleeveonDatabase class and avoids importing the database singleton.
- */
-export interface DexieSchemaRegistrar {
-  version(
-    versionNumber: number,
+export interface DexieVersionRegistrar {
+  stores(
+    schema: Record<string, string>,
   ): {
-    stores(
-      schema: Record<string, string>,
+    upgrade(
+      callback: (
+        transaction: Transaction,
+      ) => void | Promise<void>,
     ): unknown;
   };
 }
 
 /**
+ * Minimal structural contract required by registerSchemas().
+ *
+ * Keeping this contract here prevents build-schema.ts from importing
+ * EleeveonDatabase or the database singleton.
+ */
+export interface DexieSchemaRegistrar {
+  version(
+    versionNumber: number,
+  ): DexieVersionRegistrar;
+}
+
+/**
  * Registers every historical schema in ascending order.
  *
- * Example:
- *
- *   registerSchemas(this);
+ * The hierarchy migration belongs only to version 3. Existing version-2
+ * databases will therefore run it exactly once when upgrading to version 3.
  */
 export function registerSchemas(
   database: DexieSchemaRegistrar,
 ): void {
-  for (const schema of VERSIONED_SCHEMAS) {
-    database
-      .version(schema.version)
-      .stores({
-        ...schema.stores,
-      });
-  }
+  database
+    .version(SCHEMA_V1_VERSION)
+    .stores({
+      ...SCHEMA_V1_STORES,
+    });
+
+  database
+    .version(SCHEMA_V2_VERSION)
+    .stores({
+      ...SCHEMA_V2_STORES,
+    });
+
+  database
+    .version(SCHEMA_V3_VERSION)
+    .stores({
+      ...SCHEMA_V3_STORES,
+    })
+    .upgrade(
+      migrateAssessmentHierarchy,
+    );
 }
