@@ -8,6 +8,10 @@
  * This is intentionally not a standalone route. It behaves like Dashboard,
  * Students, Reports and every other portal tab while remaining shared by all
  * role portals.
+ *
+ * Role-aware behavior:
+ * - developer / platform_team => Eleeveon support operations console.
+ * - school/account roles => updates, feedback, support and access center.
  */
 
 import {
@@ -20,7 +24,11 @@ import {
   db,
   type LocalPlatformAnnouncement,
   type LocalPlatformAnnouncementReceipt,
+  type LocalPlatformFeedbackMessage,
+  type LocalPlatformRelease,
+  type LocalPlatformReleaseNote,
   type PlatformFeedback,
+  type PlatformFeedbackStatus,
   type PlatformFeedbackType,
 } from "../../lib/db/db";
 
@@ -51,10 +59,19 @@ import type {
 } from "./RolePortalShell";
 
 type CenterSection =
+  | "inbox"
+  | "communications"
+  | "releases"
   | "updates"
   | "feedback"
   | "support"
   | "access";
+
+type FeedbackPriority =
+  | "low"
+  | "normal"
+  | "high"
+  | "urgent";
 
 type AnnouncementReceiptCreateInput =
   SyncableRecord & {
@@ -87,6 +104,20 @@ type FeedbackCreateInput =
       unknown
     > | null;
     submittedAt: number;
+    metadata?: Record<
+      string,
+      unknown
+    > | null;
+  };
+
+type FeedbackMessageCreateInput =
+  SyncableRecord & {
+    id: string;
+    feedbackId: string;
+    senderType: "platform";
+    senderUserId?: string | null;
+    body: string;
+    readAt?: string | null;
     metadata?: Record<
       string,
       unknown
@@ -127,6 +158,79 @@ const feedbackTypes: Array<{
   },
 ];
 
+const feedbackStatuses:
+  PlatformFeedbackStatus[] = [
+    "submitted",
+    "acknowledged",
+    "under_review",
+    "planned",
+    "in_progress",
+    "resolved",
+    "closed",
+  ];
+
+const feedbackPriorities:
+  FeedbackPriority[] = [
+    "low",
+    "normal",
+    "high",
+    "urgent",
+  ];
+
+const announcementRoles = [
+  "owner",
+  "super_admin",
+  "admin",
+  "branch_admin",
+  "teacher",
+  "student",
+  "accountant",
+  "parent",
+] as const;
+
+const announcementTypes = [
+  "update",
+  "maintenance",
+  "security",
+  "billing",
+  "general",
+] as const;
+
+const releaseChannels = [
+  "stable",
+  "preview",
+  "security",
+] as const;
+
+function localDateTimeValue(
+  iso?: string | null,
+) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const offset =
+    date.getTimezoneOffset() * 60_000;
+
+  return new Date(
+    date.getTime() - offset,
+  )
+    .toISOString()
+    .slice(0, 16);
+}
+
+function isoFromLocalInput(
+  value: string,
+) {
+  if (!value.trim()) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toISOString();
+}
+
 function idOf(value: unknown) {
   return value == null
     ? ""
@@ -163,6 +267,29 @@ function dateText(
           timeStyle: "short",
         },
       );
+}
+
+function titleText(value: unknown) {
+  return idOf(value)
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) =>
+      character.toUpperCase(),
+    );
+}
+
+function metadataText(
+  metadata: Record<
+    string,
+    unknown
+  > | null | undefined,
+  key: string,
+) {
+  const value = metadata?.[key];
+
+  return value == null ||
+    String(value).trim() === ""
+    ? ""
+    : String(value);
 }
 
 function visibleAnnouncement(
@@ -233,9 +360,27 @@ export default function EleeveonCenter({
   const access =
     useOptionalAccess();
 
+  const userId = idOf(user?.id);
+
+  const membershipId = idOf(
+    activeMembership?.id,
+  );
+
+  const role =
+    activeMembership?.role ??
+    account?.role ??
+    user?.role ??
+    null;
+
+  const isDeveloper =
+    role === "developer" ||
+    role === "platform_team";
+
   const [section, setSection] =
     useState<CenterSection>(
-      "updates",
+      isDeveloper
+        ? "inbox"
+        : "updates",
     );
 
   const [
@@ -245,6 +390,116 @@ export default function EleeveonCenter({
     LocalPlatformAnnouncement[]
   >([]);
 
+  const [
+    platformReleases,
+    setPlatformReleases,
+  ] = useState<
+    LocalPlatformRelease[]
+  >([]);
+
+  const [
+    releaseNotes,
+    setReleaseNotes,
+  ] = useState<
+    LocalPlatformReleaseNote[]
+  >([]);
+
+  const [
+    announcementType,
+    setAnnouncementType,
+  ] = useState<
+    LocalPlatformAnnouncement["type"]
+  >("general");
+
+  const [
+    announcementPriority,
+    setAnnouncementPriority,
+  ] = useState<
+    LocalPlatformAnnouncement["priority"]
+  >("normal");
+
+  const [
+    announcementTitle,
+    setAnnouncementTitle,
+  ] = useState("");
+
+  const [
+    announcementBody,
+    setAnnouncementBody,
+  ] = useState("");
+
+  const [
+    announcementActionLabel,
+    setAnnouncementActionLabel,
+  ] = useState("");
+
+  const [
+    announcementActionUrl,
+    setAnnouncementActionUrl,
+  ] = useState("");
+
+  const [
+    announcementTargetRoles,
+    setAnnouncementTargetRoles,
+  ] = useState<string[]>([]);
+
+  const [
+    announcementPublishAt,
+    setAnnouncementPublishAt,
+  ] = useState("");
+
+  const [
+    announcementExpiresAt,
+    setAnnouncementExpiresAt,
+  ] = useState("");
+
+  const [
+    announcementRequiresAck,
+    setAnnouncementRequiresAck,
+  ] = useState(false);
+
+  const [
+    announcementDismissible,
+    setAnnouncementDismissible,
+  ] = useState(true);
+
+  const [
+    releaseVersion,
+    setReleaseVersion,
+  ] = useState("");
+
+  const [
+    releaseTitle,
+    setReleaseTitle,
+  ] = useState("");
+
+  const [
+    releaseSummary,
+    setReleaseSummary,
+  ] = useState("");
+
+  const [
+    releaseChannel,
+    setReleaseChannel,
+  ] = useState<
+    LocalPlatformRelease["channel"]
+  >("stable");
+
+  const [
+    releaseMinimumVersion,
+    setReleaseMinimumVersion,
+  ] = useState("");
+
+  const [
+    releaseNoteTitle,
+    setReleaseNoteTitle,
+  ] = useState("");
+
+  const [
+    releaseNoteBody,
+    setReleaseNoteBody,
+  ] = useState("");
+
   const [receipts, setReceipts] =
     useState<
       LocalPlatformAnnouncementReceipt[]
@@ -252,6 +507,33 @@ export default function EleeveonCenter({
 
   const [feedback, setFeedback] =
     useState<PlatformFeedback[]>([]);
+
+  const [
+    feedbackMessages,
+    setFeedbackMessages,
+  ] = useState<
+    LocalPlatformFeedbackMessage[]
+  >([]);
+
+  const [
+    selectedFeedbackId,
+    setSelectedFeedbackId,
+  ] = useState("");
+
+  const [
+    developerFilter,
+    setDeveloperFilter,
+  ] = useState<
+    "open" | "all" | PlatformFeedbackStatus
+  >("open");
+
+  const [
+    developerSearch,
+    setDeveloperSearch,
+  ] = useState("");
+
+  const [replyBody, setReplyBody] =
+    useState("");
 
   const [feedbackType, setFeedbackType] =
     useState<PlatformFeedbackType>(
@@ -270,75 +552,165 @@ export default function EleeveonCenter({
   const [notice, setNotice] =
     useState<string | null>(null);
 
-  const userId = idOf(user?.id);
-
-  const membershipId = idOf(
-    activeMembership?.id,
-  );
-
-  const role =
-    activeMembership?.role ??
-    account?.role ??
-    user?.role ??
-    null;
+  useEffect(() => {
+    setSection(
+      isDeveloper
+        ? "inbox"
+        : "updates",
+    );
+  }, [isDeveloper]);
 
   const load = async () => {
-    if (!accountId) return;
+    if (!accountId && !isDeveloper) {
+      return;
+    }
 
     const [
       announcementRows,
+      releaseRows,
+      releaseNoteRows,
       receiptRows,
       feedbackRows,
+      messageRows,
     ] = await Promise.all([
       db.platformAnnouncements.toArray(),
-      db.platformAnnouncementReceipts
-        .where("accountId")
-        .equals(accountId)
-        .toArray(),
-      db.platformFeedback
-        .where("accountId")
-        .equals(accountId)
-        .toArray(),
+      db.platformReleases.toArray(),
+      db.platformReleaseNotes.toArray(),
+      isDeveloper
+        ? db.platformAnnouncementReceipts
+            .toArray()
+        : db.platformAnnouncementReceipts
+            .where("accountId")
+            .equals(accountId)
+            .toArray(),
+      isDeveloper
+        ? db.platformFeedback.toArray()
+        : db.platformFeedback
+            .where("accountId")
+            .equals(accountId)
+            .toArray(),
+      isDeveloper
+        ? db.platformFeedbackMessages
+            .toArray()
+        : db.platformFeedbackMessages
+            .where("accountId")
+            .equals(accountId)
+            .toArray(),
     ]);
 
+    const sortedAnnouncements =
+      announcementRows.sort(
+        (left, right) =>
+          new Date(
+            right.publishAt ??
+              right.updatedAt ??
+              right.createdAt ??
+              0,
+          ).getTime() -
+          new Date(
+            left.publishAt ??
+              left.updatedAt ??
+              left.createdAt ??
+              0,
+          ).getTime(),
+      );
+
     setAnnouncements(
-      announcementRows
-        .filter((row) =>
-          visibleAnnouncement(
-            row,
-            role,
+      isDeveloper
+        ? sortedAnnouncements
+        : sortedAnnouncements.filter(
+            (row) =>
+              visibleAnnouncement(
+                row,
+                role,
+              ),
           ),
-        )
-        .sort(
-          (left, right) =>
-            new Date(
-              right.publishAt ??
-                right.createdAt ??
-                0,
-            ).getTime() -
-            new Date(
-              left.publishAt ??
-                left.createdAt ??
-                0,
-            ).getTime(),
-        ),
+    );
+
+    setPlatformReleases(
+      releaseRows.sort(
+        (left, right) =>
+          new Date(
+            right.publishedAt ??
+              right.updatedAt ??
+              right.createdAt ??
+              0,
+          ).getTime() -
+          new Date(
+            left.publishedAt ??
+              left.updatedAt ??
+              left.createdAt ??
+              0,
+          ).getTime(),
+      ),
+    );
+
+    setReleaseNotes(
+      releaseNoteRows.sort(
+        (left, right) =>
+          Number(
+            left.displayOrder ?? 0,
+          ) -
+          Number(
+            right.displayOrder ?? 0,
+          ),
+      ),
     );
 
     setReceipts(receiptRows);
 
-    setFeedback(
+    const sortedFeedback =
       feedbackRows.sort(
         (left, right) =>
-          Number(right.submittedAt) -
-          Number(left.submittedAt),
+          Number(
+            right.lastServerMessageAt ??
+              right.submittedAt,
+          ) -
+          Number(
+            left.lastServerMessageAt ??
+              left.submittedAt,
+          ),
+      );
+
+    setFeedback(sortedFeedback);
+
+    setFeedbackMessages(
+      messageRows.sort(
+        (left, right) =>
+          new Date(
+            left.createdAt,
+          ).getTime() -
+          new Date(
+            right.createdAt,
+          ).getTime(),
       ),
     );
+
+    if (
+      isDeveloper &&
+      sortedFeedback.length
+    ) {
+      setSelectedFeedbackId(
+        (current) =>
+          current &&
+          sortedFeedback.some(
+            (item) =>
+              item.id === current,
+          )
+            ? current
+            : sortedFeedback[0].id,
+      );
+    }
   };
 
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, role]);
+  }, [
+    accountId,
+    role,
+    isDeveloper,
+  ]);
 
   const receiptByAnnouncement =
     useMemo(
@@ -359,6 +731,179 @@ export default function EleeveonCenter({
           announcement.id,
         )?.readAt,
     ).length;
+
+  const releaseNotesByRelease =
+    useMemo(() => {
+      const map = new Map<
+        string,
+        LocalPlatformReleaseNote[]
+      >();
+
+      releaseNotes.forEach((note) => {
+        const current =
+          map.get(note.releaseId) ?? [];
+        current.push(note);
+        map.set(note.releaseId, current);
+      });
+
+      return map;
+    }, [releaseNotes]);
+
+  const visibleReleases =
+    useMemo(
+      () =>
+        platformReleases.filter(
+          (release) =>
+            isDeveloper ||
+            release.status ===
+              "published",
+        ),
+      [
+        isDeveloper,
+        platformReleases,
+      ],
+    );
+
+  const selectedFeedback =
+    useMemo(
+      () =>
+        feedback.find(
+          (item) =>
+            item.id ===
+            selectedFeedbackId,
+        ),
+      [
+        feedback,
+        selectedFeedbackId,
+      ],
+    );
+
+  const selectedMessages =
+    useMemo(
+      () =>
+        feedbackMessages.filter(
+          (message) =>
+            message.feedbackId ===
+            selectedFeedbackId,
+        ),
+      [
+        feedbackMessages,
+        selectedFeedbackId,
+      ],
+    );
+
+  const developerTickets =
+    useMemo(() => {
+      const query =
+        developerSearch
+          .trim()
+          .toLowerCase();
+
+      return feedback.filter(
+        (item) => {
+          const statusMatch =
+            developerFilter === "all"
+              ? true
+              : developerFilter ===
+                  "open"
+                ? ![
+                    "resolved",
+                    "closed",
+                  ].includes(
+                    item.status,
+                  )
+                : item.status ===
+                  developerFilter;
+
+          if (!statusMatch) {
+            return false;
+          }
+
+          if (!query) {
+            return true;
+          }
+
+          const metadata =
+            item.metadata as
+              | Record<
+                  string,
+                  unknown
+                >
+              | null
+              | undefined;
+
+          return [
+            item.subject,
+            item.message,
+            item.type,
+            item.status,
+            item.priority,
+            item.accountId,
+            item.schoolId,
+            item.branchId,
+            item.userId,
+            metadataText(
+              metadata,
+              "schoolName",
+            ),
+            metadataText(
+              metadata,
+              "branchName",
+            ),
+            metadataText(
+              metadata,
+              "role",
+            ),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(query);
+        },
+      );
+    }, [
+      developerFilter,
+      developerSearch,
+      feedback,
+    ]);
+
+  const developerSummary =
+    useMemo(() => {
+      const open =
+        feedback.filter(
+          (item) =>
+            ![
+              "resolved",
+              "closed",
+            ].includes(item.status),
+        ).length;
+
+      const newCount =
+        feedback.filter(
+          (item) =>
+            item.status === "submitted",
+        ).length;
+
+      const urgent =
+        feedback.filter(
+          (item) =>
+            item.priority === "urgent" ||
+            item.priority === "high",
+        ).length;
+
+      const resolved =
+        feedback.filter(
+          (item) =>
+            item.status === "resolved",
+        ).length;
+
+      return {
+        open,
+        newCount,
+        urgent,
+        resolved,
+      };
+    }, [feedback]);
 
   const markRead = async (
     announcement:
@@ -504,6 +1049,475 @@ export default function EleeveonCenter({
       }
     };
 
+  const updateFeedbackStatus =
+    async (
+      item: PlatformFeedback,
+      status:
+        PlatformFeedbackStatus,
+    ) => {
+      if (!isDeveloper) return;
+
+      try {
+        setSaving(true);
+        setNotice(null);
+
+        const now = Date.now();
+
+        await updateLocal(
+          "platformFeedback",
+          item.id,
+          {
+            status,
+            acknowledgedAt:
+              status !== "submitted"
+                ? item.acknowledgedAt ??
+                  now
+                : item.acknowledgedAt ??
+                  null,
+            resolvedAt:
+              status === "resolved" ||
+              status === "closed"
+                ? item.resolvedAt ??
+                  now
+                : null,
+          },
+        );
+
+        await load();
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "Could not update ticket status.",
+        );
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  const updateFeedbackPriority =
+    async (
+      item: PlatformFeedback,
+      priority: FeedbackPriority,
+    ) => {
+      if (!isDeveloper) return;
+
+      try {
+        setSaving(true);
+        setNotice(null);
+
+        await updateLocal(
+          "platformFeedback",
+          item.id,
+          {
+            priority,
+          },
+        );
+
+        await load();
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "Could not update ticket priority.",
+        );
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  const sendDeveloperReply =
+    async () => {
+      if (
+        !isDeveloper ||
+        !selectedFeedback ||
+        !replyBody.trim()
+      ) {
+        return;
+      }
+
+      try {
+        setSaving(true);
+        setNotice(null);
+
+        const now =
+          new Date().toISOString();
+
+        const input:
+          FeedbackMessageCreateInput = {
+          id: stableId(),
+          accountId:
+            selectedFeedback.accountId,
+          feedbackId:
+            selectedFeedback.id,
+          senderType: "platform",
+          senderUserId:
+            userId || null,
+          body: replyBody.trim(),
+          readAt: null,
+          metadata: {
+            role,
+          },
+        };
+
+        await createLocal<
+          FeedbackMessageCreateInput
+        >(
+          "platformFeedbackMessages",
+          input,
+        );
+
+        await updateLocal(
+          "platformFeedback",
+          selectedFeedback.id,
+          {
+            status:
+              selectedFeedback.status ===
+              "submitted"
+                ? "acknowledged"
+                : selectedFeedback.status,
+            acknowledgedAt:
+              selectedFeedback
+                .acknowledgedAt ??
+              Date.now(),
+            lastServerMessageAt:
+              Date.now(),
+          },
+        );
+
+        setReplyBody("");
+        setNotice(
+          "Reply saved and queued for sync.",
+        );
+
+        await load();
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "Could not send the support reply.",
+        );
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  const toggleAnnouncementRole = (
+    targetRole: string,
+  ) => {
+    setAnnouncementTargetRoles(
+      (current) =>
+        current.includes(targetRole)
+          ? current.filter(
+              (item) =>
+                item !== targetRole,
+            )
+          : [...current, targetRole],
+    );
+  };
+
+  const saveAnnouncement =
+    async (
+      status:
+        | "draft"
+        | "scheduled"
+        | "published",
+    ) => {
+      if (
+        !isDeveloper ||
+        !announcementTitle.trim() ||
+        !announcementBody.trim()
+      ) {
+        setNotice(
+          "Add an announcement title and message.",
+        );
+        return;
+      }
+
+      try {
+        setSaving(true);
+        setNotice(null);
+
+        const now =
+          new Date().toISOString();
+
+        const publishAt =
+          status === "published"
+            ? now
+            : isoFromLocalInput(
+                announcementPublishAt,
+              );
+
+        const row:
+          LocalPlatformAnnouncement = {
+          id: stableId(),
+          key: `portal-${Date.now().toString(36)}`,
+          type: announcementType,
+          priority:
+            announcementPriority,
+          title:
+            announcementTitle.trim(),
+          body:
+            announcementBody.trim(),
+          actionLabel:
+            announcementActionLabel.trim() ||
+            null,
+          actionUrl:
+            announcementActionUrl.trim() ||
+            null,
+          locale: "en-GH",
+          targetRoles:
+            announcementTargetRoles.length
+              ? announcementTargetRoles
+              : null,
+          targetCountries: null,
+          targetPlanIds: null,
+          targetDeploymentModes: null,
+          minimumAppVersion: null,
+          maximumAppVersion: null,
+          requiresAcknowledgement:
+            announcementRequiresAck,
+          dismissible:
+            announcementDismissible,
+          status,
+          publishAt,
+          expiresAt:
+            isoFromLocalInput(
+              announcementExpiresAt,
+            ),
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        await db.platformAnnouncements.put(
+          row,
+        );
+
+        setAnnouncementTitle("");
+        setAnnouncementBody("");
+        setAnnouncementActionLabel("");
+        setAnnouncementActionUrl("");
+        setAnnouncementTargetRoles([]);
+        setAnnouncementPublishAt("");
+        setAnnouncementExpiresAt("");
+        setAnnouncementRequiresAck(false);
+        setAnnouncementDismissible(true);
+
+        setNotice(
+          status === "published"
+            ? "Announcement published in the local platform cache."
+            : status === "scheduled"
+              ? "Announcement scheduled in the local platform cache."
+              : "Announcement saved as a draft.",
+        );
+
+        await load();
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "Could not save the announcement.",
+        );
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  const setAnnouncementStatus =
+    async (
+      announcement:
+        LocalPlatformAnnouncement,
+      status:
+        | "draft"
+        | "published"
+        | "withdrawn",
+    ) => {
+      if (!isDeveloper) return;
+
+      const now =
+        new Date().toISOString();
+
+      await db.platformAnnouncements.put({
+        ...announcement,
+        status,
+        publishAt:
+          status === "published"
+            ? announcement.publishAt ??
+              now
+            : announcement.publishAt,
+        updatedAt: now,
+      });
+
+      await load();
+    };
+
+  const saveRelease =
+    async (
+      status:
+        | "draft"
+        | "published",
+    ) => {
+      if (
+        !isDeveloper ||
+        !releaseVersion.trim() ||
+        !releaseTitle.trim() ||
+        !releaseNoteBody.trim()
+      ) {
+        setNotice(
+          "Add a version, release title and release notes.",
+        );
+        return;
+      }
+
+      try {
+        setSaving(true);
+        setNotice(null);
+
+        const now =
+          new Date().toISOString();
+
+        const releaseId =
+          stableId();
+
+        const majorVersion =
+          Number.parseInt(
+            releaseVersion
+              .trim()
+              .replace(/^v/i, "")
+              .split(".")[0] || "0",
+            10,
+          );
+
+        const release:
+          LocalPlatformRelease = {
+          id: releaseId,
+          version:
+            releaseVersion.trim(),
+          majorVersion:
+            Number.isFinite(
+              majorVersion,
+            )
+              ? majorVersion
+              : 0,
+          channel: releaseChannel,
+          title:
+            releaseTitle.trim(),
+          summary:
+            releaseSummary.trim() ||
+            null,
+          status,
+          minimumSupportedVersion:
+            releaseMinimumVersion.trim() ||
+            null,
+          publishedAt:
+            status === "published"
+              ? now
+              : null,
+          metadata: {
+            createdFrom:
+              "eleeveon_center",
+            createdByRole: role,
+            createdByUserId:
+              userId || null,
+          },
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const note:
+          LocalPlatformReleaseNote = {
+          id: stableId(),
+          releaseId,
+          locale: "en-GH",
+          title:
+            releaseNoteTitle.trim() ||
+            releaseTitle.trim(),
+          body:
+            releaseNoteBody.trim(),
+          displayOrder: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        await db.transaction(
+          "rw",
+          db.platformReleases,
+          db.platformReleaseNotes,
+          async () => {
+            await db.platformReleases.put(
+              release,
+            );
+            await db.platformReleaseNotes.put(
+              note,
+            );
+          },
+        );
+
+        setReleaseVersion("");
+        setReleaseTitle("");
+        setReleaseSummary("");
+        setReleaseMinimumVersion("");
+        setReleaseNoteTitle("");
+        setReleaseNoteBody("");
+
+        setNotice(
+          status === "published"
+            ? "Release published in the local platform cache."
+            : "Release saved as a draft.",
+        );
+
+        await load();
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "Could not save the release.",
+        );
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  const setReleaseStatus =
+    async (
+      release:
+        LocalPlatformRelease,
+      status:
+        | "draft"
+        | "published"
+        | "withdrawn",
+    ) => {
+      if (!isDeveloper) return;
+
+      const now =
+        new Date().toISOString();
+
+      await db.platformReleases.put({
+        ...release,
+        status,
+        publishedAt:
+          status === "published"
+            ? release.publishedAt ??
+              now
+            : release.publishedAt,
+        updatedAt: now,
+      });
+
+      await load();
+    };
+
+  const selectedMetadata =
+    (selectedFeedback?.metadata ??
+      null) as
+      | Record<string, unknown>
+      | null;
+
+  const selectedDeviceInfo =
+    (selectedFeedback?.deviceInfo ??
+      null) as
+      | Record<string, unknown>
+      | null;
+
   return (
     <main className="center-module hub-module">
       <style>{css}</style>
@@ -511,32 +1525,97 @@ export default function EleeveonCenter({
       <section className="center-intro hub-overview">
         <div>
           <span>
-            Eleeveon Hub
+            {isDeveloper
+              ? "Eleeveon Developer Center"
+              : "Eleeveon Hub"}
           </span>
           <h2>
-            Messages, notices and support
+            {isDeveloper
+              ? "Platform support and feedback operations"
+              : "Messages, notices and support"}
           </h2>
           <p>
-            Review platform messages, announcements, support requests and workspace access in one place.
+            {isDeveloper
+              ? "Review customer feedback, investigate support context, manage ticket progress and respond from the same role portal."
+              : "Review platform messages, announcements, support requests and workspace access in one place."}
           </p>
         </div>
 
         <div className="center-workspace">
           <strong>
-            {activeSchool?.name ??
-              account?.name ??
-              "Eleeveon workspace"}
+            {isDeveloper
+              ? "Eleeveon Platform"
+              : activeSchool?.name ??
+                account?.name ??
+                "Eleeveon workspace"}
           </strong>
           <span>
-            {activeBranch?.name ??
-              role
-                ?.replaceAll("_", " ") ??
-              "Account"}
+            {isDeveloper
+              ? titleText(role)
+              : activeBranch?.name ??
+                titleText(role) ??
+                "Account"}
           </span>
         </div>
       </section>
 
       <nav className="center-tabs hub-tabs">
+        {isDeveloper ? (
+          <button
+            type="button"
+            className={
+              section === "inbox"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setSection("inbox")
+            }
+          >
+            Support inbox
+            {developerSummary.newCount ? (
+              <b>
+                {developerSummary.newCount}
+              </b>
+            ) : null}
+          </button>
+        ) : null}
+
+        {isDeveloper ? (
+          <button
+            type="button"
+            className={
+              section ===
+              "communications"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setSection(
+                "communications",
+              )
+            }
+          >
+            Communications
+          </button>
+        ) : null}
+
+        {isDeveloper ? (
+          <button
+            type="button"
+            className={
+              section === "releases"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setSection("releases")
+            }
+          >
+            Releases
+          </button>
+        ) : null}
+
         <button
           type="button"
           className={
@@ -554,33 +1633,37 @@ export default function EleeveonCenter({
           ) : null}
         </button>
 
-        <button
-          type="button"
-          className={
-            section === "feedback"
-              ? "active"
-              : ""
-          }
-          onClick={() =>
-            setSection("feedback")
-          }
-        >
-          Feedback
-        </button>
+        {!isDeveloper ? (
+          <button
+            type="button"
+            className={
+              section === "feedback"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setSection("feedback")
+            }
+          >
+            Feedback
+          </button>
+        ) : null}
 
-        <button
-          type="button"
-          className={
-            section === "support"
-              ? "active"
-              : ""
-          }
-          onClick={() =>
-            setSection("support")
-          }
-        >
-          Support
-        </button>
+        {!isDeveloper ? (
+          <button
+            type="button"
+            className={
+              section === "support"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setSection("support")
+            }
+          >
+            Support
+          </button>
+        ) : null}
 
         <button
           type="button"
@@ -593,12 +1676,1214 @@ export default function EleeveonCenter({
             setSection("access")
           }
         >
-          Access
+          {isDeveloper
+            ? "Platform context"
+            : "Access"}
         </button>
       </nav>
 
+      {section === "inbox" &&
+      isDeveloper ? (
+        <>
+          <section className="center-developer-summary">
+            <article className="center-stat">
+              <span>Open</span>
+              <strong>
+                {developerSummary.open}
+              </strong>
+            </article>
+
+            <article className="center-stat">
+              <span>New</span>
+              <strong>
+                {developerSummary.newCount}
+              </strong>
+            </article>
+
+            <article className="center-stat">
+              <span>High priority</span>
+              <strong>
+                {developerSummary.urgent}
+              </strong>
+            </article>
+
+            <article className="center-stat">
+              <span>Resolved</span>
+              <strong>
+                {developerSummary.resolved}
+              </strong>
+            </article>
+          </section>
+
+          <section className="center-card">
+            <div className="center-support-controls">
+              <label>
+                Search
+                <input
+                  value={developerSearch}
+                  onChange={(event) =>
+                    setDeveloperSearch(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="School, subject, type, user or account"
+                />
+              </label>
+
+              <label>
+                Queue
+                <select
+                  value={developerFilter}
+                  onChange={(event) =>
+                    setDeveloperFilter(
+                      event.target.value as
+                        | "open"
+                        | "all"
+                        | PlatformFeedbackStatus,
+                    )
+                  }
+                >
+                  <option value="open">
+                    Open tickets
+                  </option>
+                  <option value="all">
+                    All tickets
+                  </option>
+                  {feedbackStatuses.map(
+                    (status) => (
+                      <option
+                        key={status}
+                        value={status}
+                      >
+                        {titleText(status)}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+            </div>
+          </section>
+
+          {notice ? (
+            <div className="notice">
+              {notice}
+            </div>
+          ) : null}
+
+          <section className="center-ticket-layout">
+            <div className="center-ticket-list">
+              {developerTickets.length ? (
+                developerTickets.map(
+                  (item) => {
+                    const metadata =
+                      item.metadata as
+                        | Record<
+                            string,
+                            unknown
+                          >
+                        | null
+                        | undefined;
+
+                    const schoolName =
+                      metadataText(
+                        metadata,
+                        "schoolName",
+                      ) ||
+                      item.schoolId ||
+                      "Account";
+
+                    const branchName =
+                      metadataText(
+                        metadata,
+                        "branchName",
+                      );
+
+                    return (
+                      <button
+                        type="button"
+                        key={item.id}
+                        className={`center-ticket ${
+                          item.id ===
+                          selectedFeedbackId
+                            ? "active"
+                            : ""
+                        }`}
+                        onClick={() =>
+                          setSelectedFeedbackId(
+                            item.id,
+                          )
+                        }
+                      >
+                        <div className="center-ticket-top">
+                          <strong>
+                            {item.subject}
+                          </strong>
+                          <span
+                            className={`center-badge priority-${
+                              item.priority ??
+                              "normal"
+                            }`}
+                          >
+                            {item.priority ??
+                              "normal"}
+                          </span>
+                        </div>
+
+                        <p>
+                          {item.message}
+                        </p>
+
+                        <div className="center-ticket-meta">
+                          <span>
+                            {schoolName}
+                            {branchName
+                              ? ` · ${branchName}`
+                              : ""}
+                          </span>
+                          <span>
+                            {titleText(
+                              item.type,
+                            )}
+                          </span>
+                          <span>
+                            {titleText(
+                              item.status,
+                            )}
+                          </span>
+                          <span>
+                            {dateText(
+                              item.submittedAt,
+                            )}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  },
+                )
+              ) : (
+                <div className="center-developer-empty">
+                  No support tickets match
+                  the current queue.
+                </div>
+              )}
+            </div>
+
+            <div className="center-ticket-thread">
+              {selectedFeedback ? (
+                <>
+                  <div className="center-thread-heading">
+                    <h3>
+                      {
+                        selectedFeedback.subject
+                      }
+                    </h3>
+
+                    <span
+                      className={`center-badge priority-${
+                        selectedFeedback.priority ??
+                        "normal"
+                      }`}
+                    >
+                      {selectedFeedback.priority ??
+                        "normal"}
+                    </span>
+                  </div>
+
+                  <p className="center-thread-copy">
+                    {
+                      selectedFeedback.message
+                    }
+                  </p>
+
+                  <div className="center-support-context">
+                    <div>
+                      <span>School</span>
+                      <strong>
+                        {metadataText(
+                          selectedMetadata,
+                          "schoolName",
+                        ) ||
+                          selectedFeedback.schoolId ||
+                          "Not supplied"}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>Branch</span>
+                      <strong>
+                        {metadataText(
+                          selectedMetadata,
+                          "branchName",
+                        ) ||
+                          selectedFeedback.branchId ||
+                          "Not supplied"}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>Role</span>
+                      <strong>
+                        {titleText(
+                          metadataText(
+                            selectedMetadata,
+                            "role",
+                          ) ||
+                            "Unknown",
+                        )}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>Account ID</span>
+                      <strong>
+                        {
+                          selectedFeedback.accountId
+                        }
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>User ID</span>
+                      <strong>
+                        {selectedFeedback.userId ||
+                          "Not supplied"}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>App version</span>
+                      <strong>
+                        {selectedFeedback.appVersion ||
+                          "Not supplied"}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>Route</span>
+                      <strong>
+                        {selectedFeedback.route ||
+                          "Not supplied"}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>Device / browser</span>
+                      <strong>
+                        {selectedDeviceInfo
+                          ?.userAgent
+                          ? String(
+                              selectedDeviceInfo.userAgent,
+                            )
+                          : "Not supplied"}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="center-support-controls">
+                    <label>
+                      Status
+                      <select
+                        disabled={saving}
+                        value={
+                          selectedFeedback.status
+                        }
+                        onChange={(event) =>
+                          void updateFeedbackStatus(
+                            selectedFeedback,
+                            event.target
+                              .value as PlatformFeedbackStatus,
+                          )
+                        }
+                      >
+                        {feedbackStatuses.map(
+                          (status) => (
+                            <option
+                              key={status}
+                              value={status}
+                            >
+                              {titleText(
+                                status,
+                              )}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    </label>
+
+                    <label>
+                      Priority
+                      <select
+                        disabled={saving}
+                        value={
+                          selectedFeedback.priority ??
+                          "normal"
+                        }
+                        onChange={(event) =>
+                          void updateFeedbackPriority(
+                            selectedFeedback,
+                            event.target
+                              .value as FeedbackPriority,
+                          )
+                        }
+                      >
+                        {feedbackPriorities.map(
+                          (priority) => (
+                            <option
+                              key={priority}
+                              value={priority}
+                            >
+                              {titleText(
+                                priority,
+                              )}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="center-thread-messages">
+                    {selectedMessages.map(
+                      (item) => (
+                        <div
+                          key={item.id}
+                          className={`center-message ${
+                            item.senderType ===
+                            "platform"
+                              ? "platform"
+                              : "customer"
+                          }`}
+                        >
+                          <p>{item.body}</p>
+
+                          <div className="center-message-meta">
+                            <span>
+                              {item.senderType ===
+                              "platform"
+                                ? "Eleeveon"
+                                : "Customer"}
+                            </span>
+                            <span>
+                              {dateText(
+                                item.createdAt,
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      ),
+                    )}
+                  </div>
+
+                  <div className="center-reply-box">
+                    <label>
+                      Reply
+                      <textarea
+                        value={replyBody}
+                        onChange={(event) =>
+                          setReplyBody(
+                            event.target.value,
+                          )
+                        }
+                        placeholder="Write a support response…"
+                      />
+                    </label>
+
+                    <button
+                      type="button"
+                      className="primary submit"
+                      disabled={
+                        saving ||
+                        !replyBody.trim()
+                      }
+                      onClick={() =>
+                        void sendDeveloperReply()
+                      }
+                    >
+                      {saving
+                        ? "Saving…"
+                        : "Send reply"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="center-developer-empty">
+                  Select a ticket to review
+                  its support context.
+                </div>
+              )}
+            </div>
+          </section>
+        </>
+      ) : null}
+
+      {section ===
+        "communications" &&
+      isDeveloper ? (
+        <section className="center-publisher-layout">
+          <article className="center-card">
+            <span className="kicker">
+              Outbound communication
+            </span>
+            <h3>
+              Create platform announcement
+            </h3>
+            <p>
+              Publish notices, maintenance
+              messages, security alerts,
+              billing messages or general
+              platform communication to
+              selected portal roles.
+            </p>
+
+            <div className="center-form-grid">
+              <label>
+                Type
+                <select
+                  value={
+                    announcementType
+                  }
+                  onChange={(event) =>
+                    setAnnouncementType(
+                      event.target.value,
+                    )
+                  }
+                >
+                  {announcementTypes.map(
+                    (item) => (
+                      <option
+                        key={item}
+                        value={item}
+                      >
+                        {titleText(
+                          item,
+                        )}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+
+              <label>
+                Priority
+                <select
+                  value={
+                    announcementPriority
+                  }
+                  onChange={(event) =>
+                    setAnnouncementPriority(
+                      event.target
+                        .value as LocalPlatformAnnouncement["priority"],
+                    )
+                  }
+                >
+                  {feedbackPriorities.map(
+                    (item) => (
+                      <option
+                        key={item}
+                        value={item}
+                      >
+                        {titleText(
+                          item,
+                        )}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+            </div>
+
+            <label>
+              Title
+              <input
+                value={
+                  announcementTitle
+                }
+                onChange={(event) =>
+                  setAnnouncementTitle(
+                    event.target.value,
+                  )
+                }
+                placeholder="Short announcement title"
+              />
+            </label>
+
+            <label>
+              Message
+              <textarea
+                rows={6}
+                value={
+                  announcementBody
+                }
+                onChange={(event) =>
+                  setAnnouncementBody(
+                    event.target.value,
+                  )
+                }
+                placeholder="Write the message users should receive."
+              />
+            </label>
+
+            <div className="center-form-grid">
+              <label>
+                Action label
+                <input
+                  value={
+                    announcementActionLabel
+                  }
+                  onChange={(event) =>
+                    setAnnouncementActionLabel(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Open reports"
+                />
+              </label>
+
+              <label>
+                Action route / URL
+                <input
+                  value={
+                    announcementActionUrl
+                  }
+                  onChange={(event) =>
+                    setAnnouncementActionUrl(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="#reports or URL"
+                />
+              </label>
+            </div>
+
+            <div className="center-audience">
+              <span>
+                Audience
+              </span>
+              <small>
+                Leave every role unchecked
+                to target all user roles.
+              </small>
+
+              <div className="center-role-options">
+                {announcementRoles.map(
+                  (targetRole) => (
+                    <label
+                      key={targetRole}
+                      className="center-check"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={announcementTargetRoles.includes(
+                          targetRole,
+                        )}
+                        onChange={() =>
+                          toggleAnnouncementRole(
+                            targetRole,
+                          )
+                        }
+                      />
+                      <span>
+                        {titleText(
+                          targetRole,
+                        )}
+                      </span>
+                    </label>
+                  ),
+                )}
+              </div>
+            </div>
+
+            <div className="center-form-grid">
+              <label>
+                Schedule for
+                <input
+                  type="datetime-local"
+                  value={
+                    announcementPublishAt
+                  }
+                  onChange={(event) =>
+                    setAnnouncementPublishAt(
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+
+              <label>
+                Expires
+                <input
+                  type="datetime-local"
+                  value={
+                    announcementExpiresAt
+                  }
+                  onChange={(event) =>
+                    setAnnouncementExpiresAt(
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="center-inline-checks">
+              <label className="center-check">
+                <input
+                  type="checkbox"
+                  checked={
+                    announcementRequiresAck
+                  }
+                  onChange={(event) =>
+                    setAnnouncementRequiresAck(
+                      event.target.checked,
+                    )
+                  }
+                />
+                <span>
+                  Require acknowledgement
+                </span>
+              </label>
+
+              <label className="center-check">
+                <input
+                  type="checkbox"
+                  checked={
+                    announcementDismissible
+                  }
+                  onChange={(event) =>
+                    setAnnouncementDismissible(
+                      event.target.checked,
+                    )
+                  }
+                />
+                <span>
+                  Allow dismiss
+                </span>
+              </label>
+            </div>
+
+            <div className="center-publish-actions">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() =>
+                  void saveAnnouncement(
+                    "draft",
+                  )
+                }
+              >
+                Save draft
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  saving ||
+                  !announcementPublishAt
+                }
+                onClick={() =>
+                  void saveAnnouncement(
+                    "scheduled",
+                  )
+                }
+              >
+                Schedule
+              </button>
+
+              <button
+                type="button"
+                className="primary"
+                disabled={saving}
+                onClick={() =>
+                  void saveAnnouncement(
+                    "published",
+                  )
+                }
+              >
+                Publish now
+              </button>
+            </div>
+
+            {notice ? (
+              <div className="notice">
+                {notice}
+              </div>
+            ) : null}
+          </article>
+
+          <article className="center-card">
+            <span className="kicker">
+              Announcement manager
+            </span>
+            <h3>
+              Platform communications
+            </h3>
+
+            <div className="center-manager-list">
+              {announcements.length ? (
+                announcements.map(
+                  (item) => (
+                    <div
+                      key={item.id}
+                      className="center-manager-item"
+                    >
+                      <div className="center-manager-heading">
+                        <strong>
+                          {item.title}
+                        </strong>
+                        <span className="center-badge">
+                          {titleText(
+                            item.status,
+                          )}
+                        </span>
+                      </div>
+
+                      <p>{item.body}</p>
+
+                      <small>
+                        {titleText(
+                          item.type,
+                        )}
+                        {" · "}
+                        {titleText(
+                          item.priority,
+                        )}
+                        {" · "}
+                        {item.targetRoles
+                          ?.length
+                          ? item.targetRoles
+                              .map(
+                                titleText,
+                              )
+                              .join(", ")
+                          : "All roles"}
+                      </small>
+
+                      <div className="center-manager-actions">
+                        {item.status !==
+                        "published" ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void setAnnouncementStatus(
+                                item,
+                                "published",
+                              )
+                            }
+                          >
+                            Publish
+                          </button>
+                        ) : null}
+
+                        {item.status ===
+                        "published" ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void setAnnouncementStatus(
+                                item,
+                                "withdrawn",
+                              )
+                            }
+                          >
+                            Withdraw
+                          </button>
+                        ) : null}
+
+                        {item.status ===
+                        "withdrawn" ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void setAnnouncementStatus(
+                                item,
+                                "draft",
+                              )
+                            }
+                          >
+                            Restore draft
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ),
+                )
+              ) : (
+                <p>
+                  No platform
+                  communications yet.
+                </p>
+              )}
+            </div>
+          </article>
+        </section>
+      ) : null}
+
+      {section === "releases" &&
+      isDeveloper ? (
+        <section className="center-publisher-layout">
+          <article className="center-card">
+            <span className="kicker">
+              Product release
+            </span>
+            <h3>
+              Publish an Eleeveon update
+            </h3>
+            <p>
+              Create version information
+              and user-facing release notes
+              for the platform update.
+            </p>
+
+            <div className="center-form-grid">
+              <label>
+                Version
+                <input
+                  value={releaseVersion}
+                  onChange={(event) =>
+                    setReleaseVersion(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="1.3.0"
+                />
+              </label>
+
+              <label>
+                Channel
+                <select
+                  value={releaseChannel}
+                  onChange={(event) =>
+                    setReleaseChannel(
+                      event.target.value,
+                    )
+                  }
+                >
+                  {releaseChannels.map(
+                    (channel) => (
+                      <option
+                        key={channel}
+                        value={channel}
+                      >
+                        {titleText(
+                          channel,
+                        )}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+            </div>
+
+            <label>
+              Release title
+              <input
+                value={releaseTitle}
+                onChange={(event) =>
+                  setReleaseTitle(
+                    event.target.value,
+                  )
+                }
+                placeholder="Reports and assessment improvements"
+              />
+            </label>
+
+            <label>
+              Summary
+              <textarea
+                rows={3}
+                value={releaseSummary}
+                onChange={(event) =>
+                  setReleaseSummary(
+                    event.target.value,
+                  )
+                }
+                placeholder="A concise overview of this release."
+              />
+            </label>
+
+            <div className="center-form-grid">
+              <label>
+                Minimum supported version
+                <input
+                  value={
+                    releaseMinimumVersion
+                  }
+                  onChange={(event) =>
+                    setReleaseMinimumVersion(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="1.1.0"
+                />
+              </label>
+
+              <label>
+                Release-note title
+                <input
+                  value={
+                    releaseNoteTitle
+                  }
+                  onChange={(event) =>
+                    setReleaseNoteTitle(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="What changed"
+                />
+              </label>
+            </div>
+
+            <label>
+              Release notes
+              <textarea
+                rows={8}
+                value={
+                  releaseNoteBody
+                }
+                onChange={(event) =>
+                  setReleaseNoteBody(
+                    event.target.value,
+                  )
+                }
+                placeholder={"• Improved reports\n• Fixed offline behavior\n• Added new settings"}
+              />
+            </label>
+
+            <div className="center-publish-actions">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() =>
+                  void saveRelease(
+                    "draft",
+                  )
+                }
+              >
+                Save draft
+              </button>
+
+              <button
+                type="button"
+                className="primary"
+                disabled={saving}
+                onClick={() =>
+                  void saveRelease(
+                    "published",
+                  )
+                }
+              >
+                Publish release
+              </button>
+            </div>
+
+            {notice ? (
+              <div className="notice">
+                {notice}
+              </div>
+            ) : null}
+          </article>
+
+          <article className="center-card">
+            <span className="kicker">
+              Release manager
+            </span>
+            <h3>
+              Versions and release notes
+            </h3>
+
+            <div className="center-manager-list">
+              {platformReleases.length ? (
+                platformReleases.map(
+                  (release) => {
+                    const notes =
+                      releaseNotesByRelease.get(
+                        release.id,
+                      ) ?? [];
+
+                    return (
+                      <div
+                        key={release.id}
+                        className="center-manager-item"
+                      >
+                        <div className="center-manager-heading">
+                          <strong>
+                            {release.version}
+                            {" · "}
+                            {release.title}
+                          </strong>
+                          <span className="center-badge">
+                            {titleText(
+                              release.status,
+                            )}
+                          </span>
+                        </div>
+
+                        {release.summary ? (
+                          <p>
+                            {
+                              release.summary
+                            }
+                          </p>
+                        ) : null}
+
+                        <small>
+                          {titleText(
+                            release.channel,
+                          )}
+                          {release.minimumSupportedVersion
+                            ? ` · Minimum ${release.minimumSupportedVersion}`
+                            : ""}
+                          {release.publishedAt
+                            ? ` · ${dateText(
+                                release.publishedAt,
+                              )}`
+                            : ""}
+                        </small>
+
+                        {notes.map(
+                          (note) => (
+                            <div
+                              key={note.id}
+                              className="center-release-note"
+                            >
+                              <strong>
+                                {
+                                  note.title
+                                }
+                              </strong>
+                              <p>
+                                {note.body}
+                              </p>
+                            </div>
+                          ),
+                        )}
+
+                        <div className="center-manager-actions">
+                          {release.status !==
+                          "published" ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void setReleaseStatus(
+                                  release,
+                                  "published",
+                                )
+                              }
+                            >
+                              Publish
+                            </button>
+                          ) : null}
+
+                          {release.status ===
+                          "published" ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void setReleaseStatus(
+                                  release,
+                                  "withdrawn",
+                                )
+                              }
+                            >
+                              Withdraw
+                            </button>
+                          ) : null}
+
+                          {release.status ===
+                          "withdrawn" ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void setReleaseStatus(
+                                  release,
+                                  "draft",
+                                )
+                              }
+                            >
+                              Restore draft
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  },
+                )
+              ) : (
+                <p>
+                  No releases created yet.
+                </p>
+              )}
+            </div>
+          </article>
+        </section>
+      ) : null}
+
       {section === "updates" ? (
         <section className="center-list">
+          {!isDeveloper &&
+          visibleReleases.length ? (
+            visibleReleases.map(
+              (release) => {
+                const notes =
+                  releaseNotesByRelease.get(
+                    release.id,
+                  ) ?? [];
+
+                return (
+                  <article
+                    key={`release-${release.id}`}
+                    className="center-card center-release-card"
+                  >
+                    <header>
+                      <span>
+                        Product update
+                      </span>
+                      <small>
+                        {dateText(
+                          release.publishedAt ??
+                            release.updatedAt ??
+                            release.createdAt,
+                        )}
+                      </small>
+                    </header>
+
+                    <h3>
+                      {release.version}
+                      {" · "}
+                      {release.title}
+                    </h3>
+
+                    {release.summary ? (
+                      <p>
+                        {release.summary}
+                      </p>
+                    ) : null}
+
+                    {notes.length ? (
+                      <div className="center-user-release-notes">
+                        {notes.map(
+                          (note) => (
+                            <div
+                              key={note.id}
+                            >
+                              <strong>
+                                {
+                                  note.title
+                                }
+                              </strong>
+                              <p>
+                                {note.body}
+                              </p>
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              },
+            )
+          ) : null}
           {announcements.length ? (
             announcements.map(
               (announcement) => {
@@ -637,22 +2922,24 @@ export default function EleeveonCenter({
                     </p>
 
                     <footer>
-                      {receipt?.readAt ? (
-                        <span className="read-state">
-                          Read
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void markRead(
-                              announcement,
-                            )
-                          }
-                        >
-                          Mark as read
-                        </button>
-                      )}
+                      {!isDeveloper ? (
+                        receipt?.readAt ? (
+                          <span className="read-state">
+                            Read
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void markRead(
+                                announcement,
+                              )
+                            }
+                          >
+                            Mark as read
+                          </button>
+                        )
+                      ) : null}
 
                       {announcement.actionUrl ? (
                         <button
@@ -691,7 +2978,8 @@ export default function EleeveonCenter({
         </section>
       ) : null}
 
-      {section === "feedback" ? (
+      {section === "feedback" &&
+      !isDeveloper ? (
         <section className="center-grid">
           <article className="center-card">
             <span className="kicker">
@@ -789,14 +3077,12 @@ export default function EleeveonCenter({
                       {item.subject}
                     </strong>
                     <span>
-                      {item.type.replaceAll(
-                        "_",
-                        " ",
+                      {titleText(
+                        item.type,
                       )}
                       {" · "}
-                      {item.status.replaceAll(
-                        "_",
-                        " ",
+                      {titleText(
+                        item.status,
                       )}
                     </span>
                     <small>
@@ -817,7 +3103,8 @@ export default function EleeveonCenter({
         </section>
       ) : null}
 
-      {section === "support" ? (
+      {section === "support" &&
+      !isDeveloper ? (
         <section className="center-grid">
           <article className="center-card">
             <span className="kicker">
@@ -866,12 +3153,16 @@ export default function EleeveonCenter({
         <section className="center-grid">
           <article className="center-card">
             <span className="kicker">
-              Current access
+              {isDeveloper
+                ? "Current platform context"
+                : "Current access"}
             </span>
             <h3>
-              {access?.snapshot
-                ?.source ??
-                "Workspace access"}
+              {isDeveloper
+                ? titleText(role)
+                : access?.snapshot
+                    ?.source ??
+                  "Workspace access"}
             </h3>
 
             <div className="facts">
@@ -879,7 +3170,9 @@ export default function EleeveonCenter({
                 <span>Status</span>
                 <strong>
                   {access?.status ??
-                    "Unknown"}
+                    (isDeveloper
+                      ? "Platform role"
+                      : "Unknown")}
                 </strong>
               </div>
               <div>
@@ -903,34 +3196,100 @@ export default function EleeveonCenter({
             </div>
           </article>
 
-          <article className="center-card">
-            <span className="kicker">
-              Upgrade
-            </span>
-            <h3>
-              Add capacity or features
-            </h3>
-            <p>
-              Upgrade controls will use
-              the subscription module
-              available to the account
-              owner. Other roles can
-              send a billing question
-              from Feedback.
-            </p>
+          {isDeveloper ? (
+            <article className="center-card">
+              <span className="kicker">
+                Support cache
+              </span>
+              <h3>
+                Local platform records
+              </h3>
+              <p>
+                This developer view reads
+                all feedback and feedback
+                messages currently
+                available in the local
+                platform cache. Server
+                visibility still depends
+                on what your sync/bootstrap
+                layer provides to the
+                developer account.
+              </p>
 
-            <button
-              type="button"
-              onClick={() => {
-                setFeedbackType(
-                  "billing_question",
-                );
-                setSection("feedback");
-              }}
-            >
-              Ask about access
-            </button>
-          </article>
+              <div className="facts">
+                <div>
+                  <span>
+                    Feedback
+                  </span>
+                  <strong>
+                    {feedback.length}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>
+                    Messages
+                  </span>
+                  <strong>
+                    {
+                      feedbackMessages.length
+                    }
+                  </strong>
+                </div>
+
+                <div>
+                  <span>
+                    Announcements
+                  </span>
+                  <strong>
+                    {
+                      announcements.length
+                    }
+                  </strong>
+                </div>
+
+                <div>
+                  <span>
+                    Releases
+                  </span>
+                  <strong>
+                    {
+                      platformReleases.length
+                    }
+                  </strong>
+                </div>
+              </div>
+            </article>
+          ) : (
+            <article className="center-card">
+              <span className="kicker">
+                Upgrade
+              </span>
+              <h3>
+                Add capacity or features
+              </h3>
+              <p>
+                Upgrade controls will use
+                the subscription module
+                available to the account
+                owner. Other roles can
+                send a billing question
+                from Feedback.
+              </p>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackType(
+                    "billing_question",
+                  );
+                  setSection("feedback");
+                }}
+              >
+                Ask about access
+              </button>
+            </article>
+          )}
         </section>
       ) : null}
     </main>
@@ -1347,4 +3706,524 @@ span,
 .center-card:hover {
   border-color: var(--eds-border-strong) !important;
 }
+
+
+/* --------------------------------------------------------------------------
+ * Developer / platform-team support workspace
+ * -------------------------------------------------------------------------- */
+
+.center-developer-summary {
+  display: grid;
+  grid-template-columns:
+    repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.center-stat {
+  padding: 12px;
+  border: 1px solid
+    var(--border, rgba(0,0,0,.08));
+  border-radius: 15px;
+  background:
+    var(--surface, #ffffff);
+}
+
+.center-stat span {
+  display: block;
+  color:
+    var(--muted, #64748b);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.center-stat strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 21px;
+  line-height: 1;
+}
+
+.center-ticket-layout {
+  display: grid;
+  grid-template-columns:
+    minmax(280px, .9fr)
+    minmax(0, 1.35fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.center-ticket-list,
+.center-ticket-thread {
+  min-width: 0;
+}
+
+.center-ticket-list {
+  display: grid;
+  gap: 7px;
+}
+
+.center-ticket {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid
+    var(--border, rgba(0,0,0,.08));
+  border-radius: 14px;
+  background:
+    var(--surface, #ffffff);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.center-ticket.active {
+  border-color:
+    var(
+      --dashboard-primary,
+      var(--primary-color, #2563eb)
+    );
+  background:
+    color-mix(
+      in srgb,
+      var(
+        --dashboard-primary,
+        var(--primary-color, #2563eb)
+      ) 7%,
+      var(--surface, #ffffff)
+    );
+}
+
+.center-ticket-top,
+.center-ticket-meta,
+.center-thread-heading,
+.center-support-controls,
+.center-message-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.center-ticket-top,
+.center-thread-heading {
+  justify-content: space-between;
+}
+
+.center-ticket strong,
+.center-ticket span,
+.center-ticket small {
+  display: block;
+}
+
+.center-ticket strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.center-ticket p {
+  display: -webkit-box;
+  margin: 5px 0 7px;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color:
+    var(--muted, #64748b);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.center-ticket-meta {
+  flex-wrap: wrap;
+  color:
+    var(--muted, #64748b);
+  font-size: 10px;
+}
+
+.center-badge {
+  display: inline-flex !important;
+  align-items: center;
+  width: fit-content;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+  font-size: 9px !important;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.center-badge.priority-high,
+.center-badge.priority-urgent {
+  background:
+    color-mix(
+      in srgb,
+      #dc2626 10%,
+      var(--surface, #ffffff)
+    );
+}
+
+.center-ticket-thread {
+  padding: 15px;
+  border: 1px solid
+    var(--border, rgba(0,0,0,.08));
+  border-radius: 18px;
+  background:
+    var(--surface, #ffffff);
+}
+
+.center-thread-heading h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+}
+
+.center-thread-copy {
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 13px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+  white-space: pre-wrap;
+}
+
+.center-support-context {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.center-support-context > div {
+  min-width: 0;
+  padding: 9px;
+  border-radius: 11px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+}
+
+.center-support-context span,
+.center-support-context strong {
+  display: block;
+}
+
+.center-support-context span {
+  color:
+    var(--muted, #64748b);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.center-support-context strong {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.center-support-controls {
+  flex-wrap: wrap;
+  margin-top: 11px;
+}
+
+.center-support-controls label {
+  flex: 1 1 150px;
+  margin: 0;
+}
+
+.center-thread-messages {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.center-message {
+  max-width: 88%;
+  padding: 9px 10px;
+  border-radius: 13px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+}
+
+.center-message.platform {
+  margin-left: auto;
+  background:
+    color-mix(
+      in srgb,
+      var(
+        --dashboard-primary,
+        var(--primary-color, #2563eb)
+      ) 9%,
+      var(--surface, #ffffff)
+    );
+}
+
+.center-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  color: inherit;
+  font-size: 12px;
+}
+
+.center-message-meta {
+  justify-content: space-between;
+  margin-top: 5px;
+  color:
+    var(--muted, #64748b);
+  font-size: 9px;
+}
+
+.center-reply-box {
+  margin-top: 12px;
+}
+
+.center-reply-box textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.center-developer-empty {
+  padding: 24px 14px;
+  border: 1px dashed
+    var(--border, rgba(0,0,0,.12));
+  border-radius: 16px;
+  color:
+    var(--muted, #64748b);
+  text-align: center;
+}
+
+@media (max-width: 920px) {
+  .center-developer-summary {
+    grid-template-columns:
+      repeat(2, minmax(0, 1fr));
+  }
+
+  .center-ticket-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .center-developer-summary {
+    grid-template-columns:
+      repeat(2, minmax(0, 1fr));
+  }
+
+  .center-support-context {
+    grid-template-columns: 1fr;
+  }
+
+  .center-message {
+    max-width: 95%;
+  }
+}
+
+
+
+/* --------------------------------------------------------------------------
+ * Developer / Platform Team outbound publishing
+ * -------------------------------------------------------------------------- */
+
+.center-publisher-layout {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1.05fr)
+    minmax(300px, .95fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.center-form-grid {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.center-audience {
+  margin-top: 12px;
+  padding: 11px;
+  border-radius: 13px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+}
+
+.center-audience > span {
+  display: block;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.center-audience > small {
+  display: block;
+  margin-top: 2px;
+  color:
+    var(--muted, #64748b);
+}
+
+.center-role-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.center-check {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px !important;
+  margin: 0 !important;
+  padding: 7px 9px;
+  border: 1px solid
+    var(--border, rgba(0,0,0,.08));
+  border-radius: 999px;
+  background:
+    var(--surface, #ffffff);
+  cursor: pointer;
+  font-size: 10px !important;
+}
+
+.center-check input {
+  width: auto !important;
+  margin: 0;
+  padding: 0 !important;
+}
+
+.center-inline-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.center-publish-actions,
+.center-manager-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.center-manager-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.center-manager-item {
+  padding: 11px;
+  border: 1px solid
+    var(--border, rgba(0,0,0,.08));
+  border-radius: 14px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+}
+
+.center-manager-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.center-manager-heading strong {
+  min-width: 0;
+  font-size: 13px;
+}
+
+.center-manager-item > p {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+
+.center-manager-item > small {
+  display: block;
+  margin-top: 7px;
+  color:
+    var(--muted, #64748b);
+  font-size: 9px;
+}
+
+.center-release-note {
+  margin-top: 8px;
+  padding: 9px;
+  border-radius: 11px;
+  background:
+    var(--surface, #ffffff);
+}
+
+.center-release-note strong {
+  font-size: 11px;
+}
+
+.center-release-note p {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  font-size: 10px;
+}
+
+.center-release-card {
+  border-color:
+    color-mix(
+      in srgb,
+      var(
+        --dashboard-primary,
+        var(--primary-color, #2563eb)
+      ) 22%,
+      var(--border, rgba(0,0,0,.08))
+    );
+}
+
+.center-user-release-notes {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.center-user-release-notes > div {
+  padding: 9px 10px;
+  border-radius: 11px;
+  background:
+    var(--shell-section-bg, #f7f8fb);
+}
+
+.center-user-release-notes strong {
+  font-size: 11px;
+}
+
+.center-user-release-notes p {
+  margin-top: 3px;
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .center-publisher-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .center-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .center-publish-actions,
+  .center-manager-actions {
+    justify-content: stretch;
+  }
+
+  .center-publish-actions button,
+  .center-manager-actions button {
+    flex: 1 1 auto;
+  }
+}
+
 `;
