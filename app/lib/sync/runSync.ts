@@ -1,21 +1,5 @@
 /**
- * app/lib/sync/runSync.ts
- * --------------------------------------------------------------------------
- * Eleeveon Schools single-flight synchronization runner.
- *
- * Every same-tab trigger joins one shared Promise:
- * - startup;
- * - login;
- * - role selection;
- * - reconnect;
- * - focus;
- * - visibility resume;
- * - timer;
- * - manual refresh;
- * - future backend notifications.
- *
- * Cross-tab concurrency remains protected by the account/environment-scoped
- * lock from syncStorage.ts.
+ * Eleeveon Schools entitlement-aware single-flight synchronization runner.
  */
 
 import { pullSync } from "./pullSync";
@@ -37,8 +21,21 @@ import {
   releaseSyncLock,
 } from "./syncStorage";
 
-import { refreshPlatformCache } from "./platformCache";
-import { registerSyncDevice } from "./syncDevices";
+import {
+  refreshPlatformCache,
+} from "./platformCache";
+import {
+  registerSyncDevice,
+} from "./syncDevices";
+
+import {
+  createSyncExecutionPlan,
+  syncModeLabel,
+  type EffectiveSyncMode,
+} from "./syncPolicy";
+import {
+  resolveSyncPolicy,
+} from "./resolveSyncPolicy";
 
 export type SyncTrigger =
   | "startup"
@@ -58,6 +55,11 @@ export type RunSyncOptions = {
   pullLimit?: number;
   pullTableNames?: string[];
   trigger?: SyncTrigger;
+
+  /**
+   * Developer-only/manual diagnostics may force a policy refresh.
+   */
+  refreshPolicy?: boolean;
 };
 
 export type SyncListener = (
@@ -65,9 +67,13 @@ export type SyncListener = (
   syncing: boolean,
 ) => void;
 
-let activeSyncPromise: Promise<SyncResult> | null = null;
+let activeSyncPromise:
+  | Promise<SyncResult>
+  | null = null;
 let activeAccountId: string | null = null;
 let activeOptions: RunSyncOptions | null = null;
+let activeMode: EffectiveSyncMode | null =
+  null;
 let lastResult: SyncResult | null = null;
 
 const listeners = new Set<SyncListener>();
@@ -79,21 +85,29 @@ function emit() {
     try {
       listener(lastResult, syncing);
     } catch (error) {
-      console.error("[sync] listener failed", error);
+      console.error(
+        "[sync] listener failed",
+        error,
+      );
     }
   }
 }
 
-function createFailedResult(
-  message: string,
-  startedAt: number,
+function result(
+  input: {
+    ok: boolean;
+    pushed?: number;
+    pulled?: number;
+    errors?: string[];
+    startedAt: number;
+  },
 ): SyncResult {
   return {
-    ok: false,
-    pushed: 0,
-    pulled: 0,
-    errors: [message],
-    startedAt,
+    ok: input.ok,
+    pushed: input.pushed ?? 0,
+    pulled: input.pulled ?? 0,
+    errors: input.errors ?? [],
+    startedAt: input.startedAt,
     finishedAt: Date.now(),
   };
 }
@@ -114,28 +128,28 @@ export function getActiveSyncOptions() {
   return activeOptions;
 }
 
+export function getActiveSyncMode() {
+  return activeMode;
+}
+
 export function getLastSyncResult() {
   return lastResult;
 }
 
-export function subscribeToSync(listener: SyncListener) {
+export function subscribeToSync(
+  listener: SyncListener,
+) {
   listeners.add(listener);
-  listener(lastResult, Boolean(activeSyncPromise));
+  listener(
+    lastResult,
+    Boolean(activeSyncPromise),
+  );
 
   return () => {
     listeners.delete(listener);
   };
 }
 
-/**
- * Public single-flight entry point.
- *
- * The first caller starts the operation. All later callers in the same tab
- * receive the exact same Promise and therefore the exact same result.
- *
- * The first caller's options govern the active run. Global/bootstrap callers
- * should request includePlatformCache=true where platform data is required.
- */
 export function runSync(
   options: RunSyncOptions = {},
 ): Promise<SyncResult> {
@@ -145,10 +159,13 @@ export function runSync(
 
   activeOptions = { ...options };
 
-  activeSyncPromise = performSync(activeOptions).finally(() => {
+  activeSyncPromise = performSync(
+    activeOptions,
+  ).finally(() => {
     activeSyncPromise = null;
     activeAccountId = null;
     activeOptions = null;
+    activeMode = null;
     emit();
   });
 
@@ -161,158 +178,233 @@ async function performSync(
 ): Promise<SyncResult> {
   const startedAt = Date.now();
 
-  if (!isOnline()) {
-    lastResult = createFailedResult(
-      "Device is offline.",
-      startedAt,
-    );
-    return lastResult;
-  }
-
   let accountId: string;
 
   try {
     accountId = assertAccountId();
-  } catch (error: any) {
-    lastResult = createFailedResult(
-      error?.message || String(error),
+  } catch (error) {
+    lastResult = result({
+      ok: false,
+      errors: [
+        error instanceof Error
+          ? error.message
+          : String(error),
+      ],
       startedAt,
-    );
+    });
     return lastResult;
   }
 
   activeAccountId = accountId;
   emit();
 
-  const lockOwner = [
-    getDeviceId(),
-    startedAt,
-    Math.random().toString(36).slice(2, 9),
-  ].join(":");
+  const online = isOnline();
 
-  if (!acquireSyncLock({ accountId, owner: lockOwner })) {
-    lastResult = createFailedResult(
-      "This account is already syncing in another Eleeveon tab.",
+  const policy = await resolveSyncPolicy(
+    accountId,
+    {
+      forceRefresh:
+        options.refreshPolicy === true,
+      online,
+    },
+  );
+
+  activeMode = policy.mode;
+  emit();
+
+  const plan = createSyncExecutionPlan(
+    policy,
+    options,
+  );
+
+  /**
+   * Offline mode is a successful no-op for school data. Local work remains in
+   * Dexie and can be backed up/exported without pretending that cloud sync ran.
+   */
+  if (policy.mode === "offline") {
+    if (
+      online &&
+      plan.shouldRefreshPlatformCache
+    ) {
+      const cache =
+        await refreshPlatformCache({
+          silent: true,
+        });
+
+      lastResult = result({
+        ok: cache.errors.length === 0,
+        errors: cache.errors,
+        startedAt,
+      });
+    } else {
+      lastResult = result({
+        ok: true,
+        errors: [],
+        startedAt,
+      });
+    }
+
+    setLastSyncError(null);
+    return lastResult;
+  }
+
+  if (!online) {
+    lastResult = result({
+      ok: false,
+      errors: [
+        `${syncModeLabel(
+          policy.mode,
+        )} requires an internet connection.`,
+      ],
       startedAt,
+    });
+
+    setLastSyncError(
+      lastResult.errors[0],
     );
     return lastResult;
   }
 
+  const lockOwner = [
+    getDeviceId(),
+    startedAt,
+    Math.random()
+      .toString(36)
+      .slice(2, 9),
+  ].join(":");
+
+  if (
+    !acquireSyncLock({
+      accountId,
+      owner: lockOwner,
+    })
+  ) {
+    lastResult = result({
+      ok: false,
+      errors: [
+        "This account is already syncing in another Eleeveon tab.",
+      ],
+      startedAt,
+    });
+    return lastResult;
+  }
+
   try {
-    await registerSyncDevice({
-      silent: true,
-    }).catch(() => undefined);
+    if (plan.shouldRegisterDevice) {
+      await registerSyncDevice({
+        silent: true,
+      }).catch(() => undefined);
+    }
 
     assertAccountUnchanged(
       accountId,
       "before synchronization started",
     );
 
-    const push = await pushSync({ accountId });
+    const push = plan.shouldPush
+      ? await pushSync({ accountId })
+      : {
+          pushed: 0,
+          errors: [] as string[],
+        };
 
     assertAccountUnchanged(
       accountId,
       "before pull synchronization",
     );
 
-    const pull = await pullSync({
-      accountId,
-      limit: options.pullLimit,
-      tableNames: options.pullTableNames,
-    });
+    const pull = plan.shouldPull
+      ? await pullSync({
+          accountId,
+          limit: options.pullLimit,
+          tableNames:
+            options.pullTableNames,
+        })
+      : {
+          pulled: 0,
+          errors: [] as string[],
+          cacheUpdated: 0,
+        };
 
-    let cacheUpdated = pull.cacheUpdated || 0;
     const cacheErrors: string[] = [];
 
-    if (options.includePlatformCache) {
+    if (
+      plan.shouldRefreshPlatformCache
+    ) {
       assertAccountUnchanged(
         accountId,
         "before platform cache refresh",
       );
 
-      const cache = await refreshPlatformCache({
-        silent: true,
-      });
+      const cache =
+        await refreshPlatformCache({
+          silent: true,
+        });
 
-      cacheUpdated += cache.updated;
       cacheErrors.push(...cache.errors);
     }
 
-    const completionErrors = pull.completed
-      ? []
-      : ["Pull synchronization did not complete all pages."];
-
     const errors = [
-      ...push.errors,
-      ...pull.errors,
+      ...(push.errors ?? []),
+      ...(pull.errors ?? []),
       ...cacheErrors,
-      ...completionErrors,
     ];
 
-    const finishedAt = Date.now();
-
-    lastResult = {
+    lastResult = result({
       ok: errors.length === 0,
       pushed: push.pushed,
       pulled: pull.pulled,
       errors,
       startedAt,
-      finishedAt,
-      conflicts: Number(push.conflicts || 0),
-      cacheUpdated,
-      pullPages: pull.pages,
-      pullCompleted: pull.completed,
-      pullCursorBefore: pull.cursorBefore || undefined,
-      pullCursorAfter: pull.cursorAfter || undefined,
-      trigger: options.trigger || "unknown",
-    } as SyncResult;
+    });
 
-    if (lastResult.ok && pull.completed) {
-      setLastSyncOkAt(finishedAt, accountId);
-      setLastSyncError(null, accountId);
-      setBootstrapCompleted(true, accountId);
+    if (lastResult.ok) {
+      setLastSyncOkAt(Date.now());
+      setLastSyncError(null);
+      setBootstrapCompleted(true);
     } else {
-      setBootstrapCompleted(false, accountId);
       setLastSyncError(
-        errors[0] || "Sync failed",
-        accountId,
+        errors.join("; "),
       );
     }
 
-    emit();
     return lastResult;
-  } catch (error: any) {
-    lastResult = {
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    lastResult = result({
       ok: false,
-      pushed: 0,
-      pulled: 0,
-      errors: [error?.message || String(error)],
+      errors: [message],
       startedAt,
-      finishedAt: Date.now(),
-      pullCompleted: false,
-      trigger: options.trigger || "unknown",
-    } as SyncResult;
+    });
 
-    setBootstrapCompleted(false, accountId);
-    setLastSyncError(
-      lastResult.errors[0] || "Sync failed",
-      accountId,
-    );
-
-    emit();
+    setLastSyncError(message);
     return lastResult;
   } finally {
-    releaseSyncLock(accountId, lockOwner);
+    releaseSyncLock(
+      accountId,
+      lockOwner,
+    );
   }
 }
 
 function assertAccountUnchanged(
-  accountId: string,
+  expectedAccountId: string,
   stage: string,
 ) {
-  if (getAccountId() !== accountId) {
+  const currentAccountId =
+    getAccountId();
+
+  if (
+    !currentAccountId ||
+    currentAccountId !==
+      expectedAccountId
+  ) {
     throw new Error(
-      `Active account changed ${stage}.`,
+      `The active account changed ${stage}. Synchronization was cancelled.`,
     );
   }
 }
